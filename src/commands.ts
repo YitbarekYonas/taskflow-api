@@ -1,6 +1,10 @@
 import {load,save} from "./storage.js";
 import {UserError} from "./errors.js";
 import type {Task} from "./types.js";
+import {createWriteStream} from "node:fs";
+import path from "node:path";
+import {Readable} from "node:stream";
+import {pipeline} from "node:stream/promises";
 function findTask(tasks:Task [],id:number){
     const task = tasks.find((t) => t.id === id);
     if(!task) throw new UserError(`No task found with id ${id}`);
@@ -31,4 +35,25 @@ export async function deleteTask(id:number): Promise<Task>{
     const task = findTask(tasks,id);
     await save(tasks.filter((t)=> t.id === id));
     return task;
+}
+function csvEscape(value:string):string{
+    return `"${value.replaceAll('"','""')}"`;
+}
+export async function exportCsv(outFile:string): Promise<string>{
+    if(path.extname(outFile) !== ".csv"){
+        throw new UserError("Export file must end with .csv");
+    }
+    const target = path.resolve(outFile);
+    const tasks = await load();
+    await pipeline(
+        Readable.from(tasks),
+        async function* (source: AsyncIterable<Task>) {
+            yield "id,title,done\n";
+            for await (const t of source){
+                yield `${t.id}, ${csvEscape(t.title)},${t.done}\n`;
+            }
+        },
+        createWriteStream(target)
+    );
+    return target;
 }

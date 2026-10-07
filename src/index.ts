@@ -1,4 +1,4 @@
-import {addTask,listTasks,completeTask,deleteTask} from "./commands.js";
+import {addTask,listTasks,completeTask,deleteTask,exportCsv} from "./commands.js";
 import {UserError} from "./errors.js";
 function parseId(arg?:string): number{
     const id = Number(arg);
@@ -31,6 +31,11 @@ async function main(){
         case "delete":{
             const task = await deleteTask(parseId(args[0]));
             console.log(`Deleted #${task.id}: ${task.title}`);
+            break;
+        }
+        case "export":{
+            const file = await exportCsv(args[0] ?? "tasks.csv");
+            console.log(`Exported to ${file}`);
             break;
         }
         default:
