@@ -76,3 +76,12 @@ export async function exportCsv(outFile: string): Promise<string> {
 
   return target;
 }
+
+export async function listOverdue(
+  today: string = new Date().toISOString().slice(0, 10)
+): Promise<Task[]> {
+  const tasks = await load();
+  return tasks.filter(
+    (t) => t.status !== "done" && t.dueDate !== undefined && t.dueDate < today
+  );
+}

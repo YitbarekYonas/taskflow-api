@@ -1,5 +1,5 @@
 import { parseArgs } from "node:util";
-import { addTask, listTasks, setStatus, deleteTask, exportCsv } from "./commands.js";
+import { addTask, listTasks, setStatus, deleteTask, exportCsv,listOverdue } from "./commands.js";
 import { UserError } from "./errors.js";
 import { PRIORITIES, STATUSES, type Priority, type Status, type Task } from "./types.js";
 import { parseChoice } from "./utils.js";
@@ -11,7 +11,7 @@ type Command =
   | { kind: "done"; id: number }
   | { kind: "delete"; id: number }
   | { kind: "export"; file: string }
-  | { kind: "help" };
+  | { kind: "help" }| { kind: "overdue" };
 
 const MARKS: Record<Status, string> = {
   todo: "[ ]",
@@ -70,6 +70,8 @@ function parseCommand(argv: string[]): Command {
       return { kind: name, id: parseId(rest[0]) };
     case "export":
       return { kind: "export", file: rest[0] ?? "tasks.csv" };
+    case "overdue":
+      return { kind: "overdue" };
     default:
       return { kind: "help" };
   }
@@ -121,9 +123,14 @@ async function run(cmd: Command): Promise<void> {
       );
       break;
     }
+    case "overdue": {
+      const tasks = await listOverdue();
+      if (tasks.length === 0) console.log("Nothing overdue.");
+      tasks.forEach((t) => console.log(formatTask(t)));
+      break;
+    }
     default: {
-      // If you add a new Command kind and forget to handle it above,
-      // this line becomes a compile error.
+
       const unreachable: never = cmd;
       throw new Error(`Unhandled command: ${JSON.stringify(unreachable)}`);
     }
