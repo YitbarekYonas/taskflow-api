@@ -1,5 +1,5 @@
 import { parseArgs } from "node:util";
-import { addTask, listTasks, setStatus, deleteTask, exportCsv,listOverdue } from "./commands.js";
+import { addTask, listTasks, setStatus, deleteTask, exportCsv,listOverdue,summary } from "./commands.js";
 import { UserError } from "./errors.js";
 import { PRIORITIES, STATUSES, type Priority, type Status, type Task } from "./types.js";
 import { parseChoice } from "./utils.js";
@@ -11,7 +11,8 @@ type Command =
   | { kind: "done"; id: number }
   | { kind: "delete"; id: number }
   | { kind: "export"; file: string }
-  | { kind: "help" }| { kind: "overdue" };
+  | { kind: "help" }| { kind: "overdue" }
+  | { kind: "summary" };
 
 const MARKS: Record<Status, string> = {
   todo: "[ ]",
@@ -72,6 +73,8 @@ function parseCommand(argv: string[]): Command {
       return { kind: "export", file: rest[0] ?? "tasks.csv" };
     case "overdue":
       return { kind: "overdue" };
+    case "summary":
+      return { kind: "summary" };
     default:
       return { kind: "help" };
   }
@@ -119,7 +122,8 @@ async function run(cmd: Command): Promise<void> {
           "  add <title> [-p low|medium|high] [-d YYYY-MM-DD]\n" +
           "  list [-s todo|in_progress|done]\n" +
           "  start <id> | done <id> | delete <id>\n" +
-          "  export [file.csv]"
+          "  export [file.csv]   (CSV format)"
+
       );
       break;
     }
@@ -127,6 +131,11 @@ async function run(cmd: Command): Promise<void> {
       const tasks = await listOverdue();
       if (tasks.length === 0) console.log("Nothing overdue.");
       tasks.forEach((t) => console.log(formatTask(t)));
+      break;
+    }
+    case "summary": {
+      const counts = await summary();
+      console.log(`todo: ${counts.todo}  in progress: ${counts.in_progress}  done: ${counts.done}`);
       break;
     }
     default: {
