@@ -1,7 +1,7 @@
 {
   "name": "taskflow",
   "version": "1.0.0",
-  "description": "",
+  "description": "Task manager CLI built with Node.js and TypeScript",
   "main": "index.js",
   "scripts": {
     "start": "tsx src/index.ts",
@@ -9,10 +9,13 @@
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "keywords": ["taskflow", "task-manager", "cli", "typescript", "nodejs"],
+  "author": "Yitbarek Yonas",
+  "license": "MIT",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "devDependencies": {
     "@types/node": "^26.6.4",
     "tsx": "^4.23.15",
