@@ -85,3 +85,9 @@ export async function listOverdue(
     (t) => t.status !== "done" && t.dueDate !== undefined && t.dueDate < today
   );
 }
+export async function summary(): Promise<Record<Status, number>> {
+  const tasks = await load();
+  const counts: Record<Status, number> = { todo: 0, in_progress: 0, done: 0 };
+  for (const t of tasks) counts[t.status]++;
+  return counts;
+}
