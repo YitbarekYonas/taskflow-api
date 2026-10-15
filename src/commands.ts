@@ -91,3 +91,6 @@ export async function summary(): Promise<Record<Status, number>> {
   for (const t of tasks) counts[t.status]++;
   return counts;
 }
+export async function getTask(id: number): Promise<Task> {
+  return findById(await load(), id, "task");
+}
