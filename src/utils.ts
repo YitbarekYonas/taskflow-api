@@ -1,5 +1,5 @@
 import { UserError } from "./errors.js";
-
+import { NotFoundError } from "./errors.js";
 
 export function findById<T extends { id: number }>(
   items: T[],
@@ -7,7 +7,7 @@ export function findById<T extends { id: number }>(
   label = "item"
 ): T {
   const item = items.find((i) => i.id === id);
-  if (!item) throw new UserError(`No ${label} with id ${id}.`);
+  if (!item) throw new NotFoundError(`No ${label} with id ${id}.`);
   return item;
 }
 
