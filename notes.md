@@ -48,3 +48,19 @@ Three things I can do now that I couldn't on Day 1:
 
 One thing I want to get better at in Week 2:
 - http requests
+## Known limitations on day 9
+
+### Concurrency (file storage)
+The JSON file store is not safe for concurrent writes.
+
+**Experiment:** fired 8 parallel POST /tasks requests.
+**Expected:** 8 new tasks. **Observed:** 5 lost, only 3 new tasks created.
+
+**Cause:** each request does read → modify → write on `tasks.json`. When
+requests overlap, multiple reads see the same stale state. The last write wins,
+silently discarding the others' changes. This is a **lost update race condition**.
+
+**Fixes:**
+- Short-term (single process): queue writes in-process so only one read-modify-write
+  runs at a time.
+- Real fix: a database with transactions and unique ID sequences (Week 3).
