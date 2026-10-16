@@ -6,6 +6,7 @@ import { load, save } from "./storage.js";
 import { UserError } from "./errors.js";
 import { findById } from "./utils.js";
 import type { NewTask, Status, Task } from "./types.js";
+import type { TaskPatch } from "./schemas/task.schemas.js";
 
 function validateDate(value: string): string {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || Number.isNaN(Date.parse(value))) {
@@ -93,4 +94,16 @@ export async function summary(): Promise<Record<Status, number>> {
 }
 export async function getTask(id: number): Promise<Task> {
   return findById(await load(), id, "task");
+}
+export async function updateTask(id: number, patch: TaskPatch): Promise<Task> {
+  const tasks = await load();
+  const task = findById(tasks, id, "task");
+
+  if (patch.title !== undefined) task.title = patch.title;
+  if (patch.status !== undefined) task.status = patch.status;
+  if (patch.priority !== undefined) task.priority = patch.priority;
+  if (patch.dueDate !== undefined) task.dueDate = patch.dueDate ?? undefined;
+
+  await save(tasks);
+  return task;
 }
