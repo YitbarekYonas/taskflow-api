@@ -8,6 +8,10 @@ export const notFound: RequestHandler = (req, res) => {
 };
 
 export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
+    if ((err as { type?: string }).type === "entity.parse.failed") {
+    res.status(400).json({ error: { message: "Request body is not valid JSON" } });
+    return;
+  }
   if (err instanceof ZodError) {
     res.status(400).json({
       error: {
