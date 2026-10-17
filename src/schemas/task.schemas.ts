@@ -8,6 +8,19 @@ const dateString = z
 
 const title = z.string().trim().min(1, "Title cannot be empty").max(200);
 
+export const SORT_FIELDS = ["createdAt", "dueDate", "priority", "title"] as const;
+
+export const listTasksQuerySchema = z.object({
+  status: z.enum(STATUSES).optional(),
+  priority: z.enum(PRIORITIES).optional(),
+  search: z.string().trim().min(1).optional(),
+  sort: z.enum(SORT_FIELDS).default("createdAt"),
+  order: z.enum(["asc", "desc"]).default("asc"),
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(10),
+});
+
+export type TaskQuery = z.infer<typeof listTasksQuerySchema>;
 export const createTaskSchema = z
   .object({
     title,

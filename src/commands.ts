@@ -5,9 +5,60 @@ import { pipeline } from "node:stream/promises";
 import { load, save } from "./storage.js";
 import { UserError } from "./errors.js";
 import { findById } from "./utils.js";
-import type { NewTask, Status, Task } from "./types.js";
-import type { TaskPatch } from "./schemas/task.schemas.js";
+import type { NewTask, Status, Task ,Priority} from "./types.js";
+import type { TaskQuery, TaskPatch } from "./schemas/task.schemas.js";
 
+const PRIORITY_RANK: Record<Priority, number> = { low: 0, medium: 1, high: 2 };
+
+export async function queryTasks(q: TaskQuery) {
+  let tasks = await load();
+
+  if (q.status) tasks = tasks.filter((t) => t.status === q.status);
+  if (q.priority) tasks = tasks.filter((t) => t.priority === q.priority);
+  if (q.search) {
+    const needle = q.search.toLowerCase();
+    tasks = tasks.filter((t) => t.title.toLowerCase().includes(needle));
+  }
+
+  const dir = q.order === "asc" ? 1 : -1;
+  tasks.sort((a, b) => {
+    let result = 0;
+    switch (q.sort) {
+      case "title":
+        result = a.title.localeCompare(b.title);
+        break;
+      case "priority":
+        result = PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority];
+        break;
+      case "createdAt":
+        result = a.createdAt.localeCompare(b.createdAt);
+        break;
+      case "dueDate":
+        if (!a.dueDate && !b.dueDate) return a.id - b.id;
+        if (!a.dueDate) return 1;
+        if (!b.dueDate) return -1;
+        result = a.dueDate.localeCompare(b.dueDate);
+        break;
+    }
+    return result !== 0 ? result * dir : a.id - b.id; 
+  });
+
+  const total = tasks.length;
+  const totalPages = Math.ceil(total / q.limit);
+  const items = tasks.slice((q.page - 1) * q.limit, q.page * q.limit);
+
+  return {
+    items,
+    meta: {
+      page: q.page,
+      limit: q.limit,
+      total,
+      totalPages,
+      hasNext: q.page < totalPages,
+      hasPrev: q.page > 1,
+    },
+  };
+}
 function validateDate(value: string): string {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || Number.isNaN(Date.parse(value))) {
     throw new UserError("Due date must be a real date in YYYY-MM-DD format.");
