@@ -1,9 +1,9 @@
 import { parseArgs } from "node:util";
-import { addTask, listTasks, setStatus, deleteTask, exportCsv,listOverdue,summary } from "./commands.js";
+import { taskService } from "./container.js";
 import { UserError } from "./errors.js";
 import { PRIORITIES, STATUSES, type Priority, type Status, type Task } from "./types.js";
 import { parseChoice } from "./utils.js";
-
+const { addTask, listTasks, setStatus, deleteTask, exportCsv, listOverdue, summary } = taskService;
 type Command =
   | { kind: "add"; title: string; priority?: Priority; dueDate?: string }
   | { kind: "list"; status?: Status }

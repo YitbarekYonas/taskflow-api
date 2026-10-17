@@ -2,63 +2,12 @@ import { createWriteStream } from "node:fs";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { load, save } from "./storage.js";
-import { UserError } from "./errors.js";
-import { findById } from "./utils.js";
-import type { NewTask, Status, Task ,Priority} from "./types.js";
-import type { TaskQuery, TaskPatch } from "./schemas/task.schemas.js";
+import { NotFoundError, UserError } from "../errors.js";
+import type { Repository } from "../repositories/repository.js";
+import type { TaskPatch, TaskQuery } from "../schemas/task.schemas.js";
+import type { NewTask, Status, Task } from "../types.js";
+import { applyQuery } from "./taskQuery.js";
 
-const PRIORITY_RANK: Record<Priority, number> = { low: 0, medium: 1, high: 2 };
-
-export async function queryTasks(q: TaskQuery) {
-  let tasks = await load();
-
-  if (q.status) tasks = tasks.filter((t) => t.status === q.status);
-  if (q.priority) tasks = tasks.filter((t) => t.priority === q.priority);
-  if (q.search) {
-    const needle = q.search.toLowerCase();
-    tasks = tasks.filter((t) => t.title.toLowerCase().includes(needle));
-  }
-
-  const dir = q.order === "asc" ? 1 : -1;
-  tasks.sort((a, b) => {
-    let result = 0;
-    switch (q.sort) {
-      case "title":
-        result = a.title.localeCompare(b.title);
-        break;
-      case "priority":
-        result = PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority];
-        break;
-      case "createdAt":
-        result = a.createdAt.localeCompare(b.createdAt);
-        break;
-      case "dueDate":
-        if (!a.dueDate && !b.dueDate) return a.id - b.id;
-        if (!a.dueDate) return 1;
-        if (!b.dueDate) return -1;
-        result = a.dueDate.localeCompare(b.dueDate);
-        break;
-    }
-    return result !== 0 ? result * dir : a.id - b.id; 
-  });
-
-  const total = tasks.length;
-  const totalPages = Math.ceil(total / q.limit);
-  const items = tasks.slice((q.page - 1) * q.limit, q.page * q.limit);
-
-  return {
-    items,
-    meta: {
-      page: q.page,
-      limit: q.limit,
-      total,
-      totalPages,
-      hasNext: q.page < totalPages,
-      hasPrev: q.page > 1,
-    },
-  };
-}
 function validateDate(value: string): string {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || Number.isNaN(Date.parse(value))) {
     throw new UserError("Due date must be a real date in YYYY-MM-DD format.");
@@ -66,95 +15,102 @@ function validateDate(value: string): string {
   return value;
 }
 
-export async function addTask(input: NewTask): Promise<Task> {
-  const title = input.title.trim();
-  if (!title) throw new UserError("Task title cannot be empty.");
-
-  const tasks = await load();
-  const task: Task = {
-    id: tasks.reduce((max, t) => Math.max(max, t.id), 0) + 1,
-    title,
-    status: "todo",
-    priority: input.priority ?? "medium",
-    dueDate: input.dueDate ? validateDate(input.dueDate) : undefined,
-    createdAt: new Date().toISOString(),
-  };
-  tasks.push(task);
-  await save(tasks);
-  return task;
-}
-
-export async function listTasks(filter: { status?: Status } = {}): Promise<Task[]> {
-  const tasks = await load();
-  return filter.status ? tasks.filter((t) => t.status === filter.status) : tasks;
-}
-
-export async function setStatus(id: number, status: Status): Promise<Task> {
-  const tasks = await load();
-  const task = findById(tasks, id, "task");
-  task.status = status;
-  await save(tasks);
-  return task;
-}
-
-export async function deleteTask(id: number): Promise<Task> {
-  const tasks = await load();
-  const task = findById(tasks, id, "task");
-  await save(tasks.filter((t) => t.id !== id));
-  return task;
-}
-
 function csvEscape(value: string): string {
   return `"${value.replaceAll('"', '""')}"`;
 }
 
-export async function exportCsv(outFile: string): Promise<string> {
-  if (path.extname(outFile) !== ".csv") {
-    throw new UserError("Export file must end with .csv");
+type Deps = { tasks: Repository<Task> };
+
+export function createTaskService({ tasks }: Deps) {
+  async function getTask(id: number): Promise<Task> {
+    const task = await tasks.findById(id);
+    if (!task) throw new NotFoundError(`No task with id ${id}.`);
+    return task;
   }
-  const target = path.resolve(outFile);
-  const tasks = await load();
 
-  await pipeline(
-    Readable.from(tasks),
-    async function* (source: AsyncIterable<Task>) {
-      yield "id,title,status,priority,dueDate,createdAt\n";
-      for await (const t of source) {
-        yield `${t.id},${csvEscape(t.title)},${t.status},${t.priority},${t.dueDate ?? ""},${t.createdAt}\n`;
-      }
-    },
-    createWriteStream(target)
-  );
+  async function addTask(input: NewTask): Promise<Task> {
+    const title = input.title.trim();
+    if (!title) throw new UserError("Task title cannot be empty.");
 
-  return target;
+    return tasks.insert({
+      title,
+      status: "todo",
+      priority: input.priority ?? "medium",
+      dueDate: input.dueDate ? validateDate(input.dueDate) : undefined,
+      createdAt: new Date().toISOString(),
+    });
+  }
+
+  async function listTasks(filter: { status?: Status } = {}): Promise<Task[]> {
+    const all = await tasks.findAll();
+    return filter.status ? all.filter((t) => t.status === filter.status) : all;
+  }
+
+  async function queryTasks(q: TaskQuery) {
+    return applyQuery(await tasks.findAll(), q);
+  }
+
+  async function updateTask(id: number, patch: TaskPatch): Promise<Task> {
+    const changes: Partial<Omit<Task, "id">> = {};
+    if (patch.title !== undefined) changes.title = patch.title;
+    if (patch.status !== undefined) changes.status = patch.status;
+    if (patch.priority !== undefined) changes.priority = patch.priority;
+    if (patch.dueDate !== undefined) changes.dueDate = patch.dueDate ?? undefined;
+
+    const updated = await tasks.update(id, changes);
+    if (!updated) throw new NotFoundError(`No task with id ${id}.`);
+    return updated;
+  }
+
+  async function setStatus(id: number, status: Status): Promise<Task> {
+    return updateTask(id, { status });
+  }
+
+  async function deleteTask(id: number): Promise<Task> {
+    const removed = await tasks.remove(id);
+    if (!removed) throw new NotFoundError(`No task with id ${id}.`);
+    return removed;
+  }
+
+  async function listOverdue(
+    today: string = new Date().toISOString().slice(0, 10)
+  ): Promise<Task[]> {
+    const all = await tasks.findAll();
+    return all.filter(
+      (t) => t.status !== "done" && t.dueDate !== undefined && t.dueDate < today
+    );
+  }
+
+  async function summary(): Promise<Record<Status, number>> {
+    const counts: Record<Status, number> = { todo: 0, in_progress: 0, done: 0 };
+    for (const t of await tasks.findAll()) counts[t.status]++;
+    return counts;
+  }
+
+  async function exportCsv(outFile: string): Promise<string> {
+    if (path.extname(outFile) !== ".csv") {
+      throw new UserError("Export file must end with .csv");
+    }
+    const target = path.resolve(outFile);
+    const all = await tasks.findAll();
+
+    await pipeline(
+      Readable.from(all),
+      async function* (source: AsyncIterable<Task>) {
+        yield "id,title,status,priority,dueDate,createdAt\n";
+        for await (const t of source) {
+          yield `${t.id},${csvEscape(t.title)},${t.status},${t.priority},${t.dueDate ?? ""},${t.createdAt}\n`;
+        }
+      },
+      createWriteStream(target)
+    );
+    return target;
+  }
+
+  return {
+    getTask, addTask, listTasks, queryTasks, updateTask,
+    setStatus, deleteTask, listOverdue, summary, exportCsv,
+  };
 }
 
-export async function listOverdue(
-  today: string = new Date().toISOString().slice(0, 10)
-): Promise<Task[]> {
-  const tasks = await load();
-  return tasks.filter(
-    (t) => t.status !== "done" && t.dueDate !== undefined && t.dueDate < today
-  );
-}
-export async function summary(): Promise<Record<Status, number>> {
-  const tasks = await load();
-  const counts: Record<Status, number> = { todo: 0, in_progress: 0, done: 0 };
-  for (const t of tasks) counts[t.status]++;
-  return counts;
-}
-export async function getTask(id: number): Promise<Task> {
-  return findById(await load(), id, "task");
-}
-export async function updateTask(id: number, patch: TaskPatch): Promise<Task> {
-  const tasks = await load();
-  const task = findById(tasks, id, "task");
-
-  if (patch.title !== undefined) task.title = patch.title;
-  if (patch.status !== undefined) task.status = patch.status;
-  if (patch.priority !== undefined) task.priority = patch.priority;
-  if (patch.dueDate !== undefined) task.dueDate = patch.dueDate ?? undefined;
-
-  await save(tasks);
-  return task;
-}
+export type TaskService = ReturnType<typeof createTaskService>;
