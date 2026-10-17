@@ -1,6 +1,6 @@
 import type { ErrorRequestHandler, RequestHandler } from "express";
 import { ZodError } from "zod";
-import { NotFoundError, UserError } from "../errors.js";
+import { NotFoundError, UserError,ConflictError } from "../errors.js";
 import { logger } from "../logger.js";
 
 export const notFound: RequestHandler = (req, res) => {
@@ -23,6 +23,10 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
   }
   if (err instanceof NotFoundError) {
     res.status(404).json({ error: { message: err.message } });
+    return;
+  }
+    if (err instanceof ConflictError) {
+    res.status(409).json({ error: { message: err.message } });
     return;
   }
   if (err instanceof UserError) {

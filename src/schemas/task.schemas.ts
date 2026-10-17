@@ -18,6 +18,7 @@ export const listTasksQuerySchema = z.object({
   order: z.enum(["asc", "desc"]).default("asc"),
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(10),
+  projectId: z.coerce.number().int().positive().optional(),
 });
 
 export type TaskQuery = z.infer<typeof listTasksQuerySchema>;
@@ -26,6 +27,7 @@ export const createTaskSchema = z
     title,
     priority: z.enum(PRIORITIES).optional(),
     dueDate: dateString.optional(),
+    projectId: z.number().int().positive().optional(),
   })
   .strict();
 
@@ -36,6 +38,7 @@ export const updateTaskSchema = z
     status: z.enum(STATUSES),
     priority: z.enum(PRIORITIES),
     dueDate: dateString.nullable(),
+    projectId: z.number().int().positive().nullable(),
   })
   .partial()
   .strict()
