@@ -3,7 +3,9 @@ import { taskService } from "./container.js";
 import { UserError } from "./errors.js";
 import { PRIORITIES, STATUSES, type Priority, type Status, type Task } from "./types.js";
 import { parseChoice } from "./utils.js";
+
 const { addTask, listTasks, setStatus, deleteTask, exportCsv, listOverdue, summary } = taskService;
+
 type Command =
   | { kind: "add"; title: string; priority?: Priority; dueDate?: string }
   | { kind: "list"; status?: Status }
@@ -11,7 +13,8 @@ type Command =
   | { kind: "done"; id: number }
   | { kind: "delete"; id: number }
   | { kind: "export"; file: string }
-  | { kind: "help" }| { kind: "overdue" }
+  | { kind: "help" }
+  | { kind: "overdue" }
   | { kind: "summary" };
 
 const MARKS: Record<Status, string> = {
@@ -123,7 +126,6 @@ async function run(cmd: Command): Promise<void> {
           "  list [-s todo|in_progress|done]\n" +
           "  start <id> | done <id> | delete <id>\n" +
           "  export [file.csv]   (CSV format)"
-
       );
       break;
     }
@@ -139,7 +141,7 @@ async function run(cmd: Command): Promise<void> {
       break;
     }
     default: {
-
+      // Exhaustiveness check: TypeScript will error if a Command kind is unhandled
       const unreachable: never = cmd;
       throw new Error(`Unhandled command: ${JSON.stringify(unreachable)}`);
     }
