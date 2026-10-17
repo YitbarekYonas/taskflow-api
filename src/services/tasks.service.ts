@@ -5,32 +5,40 @@ import { pipeline } from "node:stream/promises";
 import { NotFoundError, UserError } from "../errors.js";
 import type { Repository } from "../repositories/repository.js";
 import type { TaskPatch, TaskQuery } from "../schemas/task.schemas.js";
-import type { NewTask, Status, Task } from "../types.js";
 import { applyQuery } from "./taskQuery.js";
+import type { Project, NewTask, Status, Task } from "../types.js";
 
-function validateDate(value: string): string {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || Number.isNaN(Date.parse(value))) {
-    throw new UserError("Due date must be a real date in YYYY-MM-DD format.");
+type Deps = { tasks: Repository<Task>; projects: Repository<Project> };
+
+export function createTaskService({ tasks, projects }: Deps) {
+  async function assertProjectExists(projectId: number) {
+    if (!(await projects.findById(projectId))) {
+      throw new UserError(`Project ${projectId} does not exist.`);
+    }
   }
-  return value;
-}
 
-function csvEscape(value: string): string {
-  return `"${value.replaceAll('"', '""')}"`;
-}
-
-type Deps = { tasks: Repository<Task> };
-
-export function createTaskService({ tasks }: Deps) {
   async function getTask(id: number): Promise<Task> {
     const task = await tasks.findById(id);
     if (!task) throw new NotFoundError(`No task with id ${id}.`);
     return task;
   }
 
+  function validateDate(value: string): string {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || Number.isNaN(Date.parse(value))) {
+      throw new UserError("Due date must be a real date in YYYY-MM-DD format.");
+    }
+    return value;
+  }
+
+  function csvEscape(value: string): string {
+    return `"${value.replaceAll('"', '""')}"`;
+  }
+
   async function addTask(input: NewTask): Promise<Task> {
     const title = input.title.trim();
     if (!title) throw new UserError("Task title cannot be empty.");
+
+    if (input.projectId !== undefined) await assertProjectExists(input.projectId);
 
     return tasks.insert({
       title,
@@ -38,6 +46,7 @@ export function createTaskService({ tasks }: Deps) {
       priority: input.priority ?? "medium",
       dueDate: input.dueDate ? validateDate(input.dueDate) : undefined,
       createdAt: new Date().toISOString(),
+      projectId: input.projectId,
     });
   }
 
@@ -57,6 +66,11 @@ export function createTaskService({ tasks }: Deps) {
     if (patch.priority !== undefined) changes.priority = patch.priority;
     if (patch.dueDate !== undefined) changes.dueDate = patch.dueDate ?? undefined;
 
+    if (patch.projectId !== undefined) {
+      if (patch.projectId !== null) await assertProjectExists(patch.projectId);
+      changes.projectId = patch.projectId ?? undefined;
+    }
+    
     const updated = await tasks.update(id, changes);
     if (!updated) throw new NotFoundError(`No task with id ${id}.`);
     return updated;
@@ -111,6 +125,6 @@ export function createTaskService({ tasks }: Deps) {
     getTask, addTask, listTasks, queryTasks, updateTask,
     setStatus, deleteTask, listOverdue, summary, exportCsv,
   };
-}
+} 
 
 export type TaskService = ReturnType<typeof createTaskService>;

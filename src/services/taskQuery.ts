@@ -35,7 +35,7 @@ export function applyQuery(all: Task[], q: TaskQuery) {
     }
     return result !== 0 ? result * dir : a.id - b.id;
   });
-
+  if (q.projectId) tasks = tasks.filter((t) => t.projectId === q.projectId);
   const total = tasks.length;
   const totalPages = Math.ceil(total / q.limit);
   const items = tasks.slice((q.page - 1) * q.limit, q.page * q.limit);
