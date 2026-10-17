@@ -1,44 +1,88 @@
 # TaskFlow
 
 A team task-management API built with Node.js, Express, and TypeScript.
-The CLI remains for local use; the HTTP API is the primary interface and will grow into a full backend with PostgreSQL and authentication.
 
 ## Features
-
-### CLI
-- Add, list, start, complete, and delete tasks
-- Set priorities (low / medium / high) and due dates
-- Filter tasks by status
-- List overdue tasks
-- Summary of task counts by status
-- CSV export
-
-### HTTP API
-- `GET /health` — server health check
-- `GET /tasks` — list tasks (optional `?status=`)
-- `GET /tasks/:id` — get a task by id
-- `POST /tasks` — create a task
-- `PATCH /tasks/:id` — partially update a task
-- `DELETE /tasks/:id` — delete a task
-
-### Shared
-- Local JSON storage with Zod validation
-- Type-safe codebase with strict TypeScript
-- Config via `.env`
-- Centralized error handling with consistent JSON error shape
+- **CLI:** Add, list, start, complete, delete, filter, and export tasks (CSV).
+- **HTTP API:** Full CRUD with pagination, sorting, searching, and filtering.
+- **Core:** JSON storage with Zod validation, strict TypeScript, and centralized error handling.
 
 ## Setup
-
-### Prerequisites
-
-- Node.js 20+ (LTS recommended)
-- npm
-
-### Install
-
 ```bash
-
 git clone https://github.com/YitbarekYonas/taskflow-api.git
 cd taskflow-api
 npm install
 cp .env.example .env
+npm run typecheck
+```
+
+## Development
+```bash
+npm run dev     # Run API with auto-restart (http://localhost:3000)
+npm run cli -- list  # Run CLI
+npm run build   # Build for production
+npm start       # Run compiled JS
+```
+
+## API Endpoints
+
+| Method | Path | Description | Success |
+|--------|------|-------------|---------|
+| GET | `/health` | Health check | 200 |
+| GET | `/tasks` | List tasks (see params below) | 200 |
+| GET | `/tasks/:id` | Get one task | 200 |
+| POST | `/tasks` | Create a task | 201 |
+| PATCH | `/tasks/:id` | Update fields | 200 |
+| DELETE | `/tasks/:id` | Delete a task | 204 |
+
+### `GET /tasks` Query Parameters
+| Param | Values | Default |
+|-------|--------|---------|
+| `status` | `todo`, `in_progress`, `done` | all |
+| `priority` | `low`, `medium`, `high` | all |
+| `search` | text in title | none |
+| `sort` | `createdAt`, `dueDate`, `priority`, `title` | `createdAt` |
+| `order` | `asc`, `desc` | `asc` |
+| `page` / `limit` | integers (limit max 100) | `1` / `10` |
+
+### Sample Response (`GET /tasks`)
+```json
+{
+  "data": [
+    { "id": 1, "title": "Write report", "status": "done", "priority": "high" }
+  ],
+  "meta": { "page": 1, "limit": 10, "total": 13, "totalPages": 2, "hasNext": true, "hasPrev": false }
+}
+```
+
+### Error Response
+```json
+{
+  "error": { "message": "Validation failed", "details": [{ "path": "title", "message": "Required" }] }
+}
+```
+*Status codes: 400 (Bad Input), 404 (Not Found), 500 (Server Error)*
+
+## Project Structure
+```
+src/
+├── app.ts, server.ts, cli.ts
+├── commands.ts (Service layer), storage.ts (JSON data)
+├── config.ts, logger.ts, errors.ts, types.ts, utils.ts
+├── schemas/ (Zod validation)
+├── middleware/ (Logger, error handling)
+├── controllers/ (HTTP logic)
+└── routes/ (Express routes)
+```
+
+## Tech Stack
+Node.js, TypeScript, Express 5, Zod, dotenv, tsx.
+
+## Roadmap
+- [x] Week 1 — CLI core
+- [x] Week 2 — Express API (CRUD, pagination, filtering)
+- [ ] Week 3 — PostgreSQL
+- [ ] Week 4 — Auth (JWT)
+
+## Known Limitations
+**Concurrency:** JSON file storage is not safe for concurrent writes (causes lost updates). A real database with transactions will fix this in Week 3.
