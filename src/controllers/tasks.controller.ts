@@ -1,38 +1,32 @@
 import type { Request, Response } from "express";
-import { z } from "zod";
-import { STATUSES } from "../types.js";
-import { addTask, deleteTask, getTask, listTasks, updateTask } from "../commands.js";
-import { createTaskSchema, updateTaskSchema } from "../schemas/task.schemas.js";
+import { addTask, deleteTask, getTask, queryTasks, updateTask } from "../commands.js";
+import type { TaskPatch } from "../schemas/task.schemas.js";
+import type { TaskQuery } from "../schemas/task.schemas.js";
+import type { NewTask } from "../types.js";
 
-const listQuery = z.object({ status: z.enum(STATUSES).optional() });
-const idParam = z.coerce.number().int().positive();
-
-export async function list(req: Request, res: Response) {
-  const { status } = listQuery.parse(req.query);
-  const tasks = await listTasks({ status });
-  res.json({ data: tasks });
+export async function list(_req: Request, res: Response) {
+  const { items, meta } = await queryTasks(res.locals.query as TaskQuery);
+  res.json({ data: items, meta });
 }
 
-export async function getById(req: Request, res: Response) {
-  const id = idParam.parse(req.params.id);
-  const task = await getTask(id);
-  res.json({ data: task });
+export async function getById(_req: Request, res: Response) {
+  const { id } = res.locals.params as { id: number };
+  res.json({ data: await getTask(id) });
 }
-export async function create(req: Request, res: Response) {
-  const body = createTaskSchema.parse(req.body);
-  const task = await addTask(body);
+
+export async function create(_req: Request, res: Response) {
+  const task = await addTask(res.locals.body as NewTask);
   res.status(201).location(`/tasks/${task.id}`).json({ data: task });
 }
 
-export async function update(req: Request, res: Response) {
-  const id = idParam.parse(req.params.id);
-  const patch = updateTaskSchema.parse(req.body);
-  const task = await updateTask(id, patch);
+export async function update(_req: Request, res: Response) {
+  const { id } = res.locals.params as { id: number };
+  const task = await updateTask(id, res.locals.body as TaskPatch);
   res.json({ data: task });
 }
 
-export async function remove(req: Request, res: Response) {
-  const id = idParam.parse(req.params.id);
+export async function remove(_req: Request, res: Response) {
+  const { id } = res.locals.params as { id: number };
   await deleteTask(id);
   res.status(204).end();
 }
