@@ -8,7 +8,6 @@ const server = app.listen(config.port, () => {
   logger.info(`TaskFlow API listening on http://localhost:${config.port}`);
 });
 
-// Graceful shutdown: finish in-flight requests before exiting
 function shutdown(signal: string) {
   logger.info(`${signal} received, shutting down`);
   server.close(() => process.exit(0));
