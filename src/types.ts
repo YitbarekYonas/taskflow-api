@@ -16,6 +16,15 @@ export const taskSchema = z.object({
   projectId: z.number().int().positive().optional(),
 });
 
+export const commentSchema = z.object({
+  id: z.number().int().positive(),
+  taskId: z.number().int().positive(),
+  author: z.string().min(1),
+  body: z.string().min(1),
+  createdAt: z.string(),
+  updatedAt: z.string().optional(),
+});
+export type Comment = z.infer<typeof commentSchema>;
 
 export type Task = z.infer<typeof taskSchema>;
 
