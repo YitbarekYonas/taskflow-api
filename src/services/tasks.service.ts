@@ -6,11 +6,15 @@ import { NotFoundError, UserError } from "../errors.js";
 import type { Repository } from "../repositories/repository.js";
 import type { TaskPatch, TaskQuery } from "../schemas/task.schemas.js";
 import { applyQuery } from "./taskQuery.js";
-import type { Project, NewTask, Status, Task } from "../types.js";
+import type { Project, NewTask, Status, Task, Comment } from "../types.js";
 
-type Deps = { tasks: Repository<Task>; projects: Repository<Project> };
+type Deps = { 
+  tasks: Repository<Task>; 
+  projects: Repository<Project>; 
+  comments: Repository<Comment>;
+};
 
-export function createTaskService({ tasks, projects }: Deps) {
+export function createTaskService({ tasks, projects, comments }: Deps) {
   async function assertProjectExists(projectId: number) {
     if (!(await projects.findById(projectId))) {
       throw new UserError(`Project ${projectId} does not exist.`);
@@ -83,6 +87,11 @@ export function createTaskService({ tasks, projects }: Deps) {
   async function deleteTask(id: number): Promise<Task> {
     const removed = await tasks.remove(id);
     if (!removed) throw new NotFoundError(`No task with id ${id}.`);
+
+    // Cascade: a comment can't outlive its task
+    const orphans = (await comments.findAll()).filter((c) => c.taskId === id);
+    for (const c of orphans) await comments.remove(c.id);
+
     return removed;
   }
 
