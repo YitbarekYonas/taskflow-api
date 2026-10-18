@@ -17,6 +17,8 @@
 - **Repository Pattern:** separating business logic (services) from data storage (repositories). Services depend on an interface, not a specific implementation.
 - **Dependency Injection:** using a `container.ts` composition root to wire dependencies together.
 - **Referential Integrity:** enforcing relationships (tasks belong to projects) and using `409 Conflict` for state violations.
+- **Production Middleware:** Helmet, CORS allow-lists, Request IDs (`X-Request-Id`), and body size limits.
+- **Nested Routes & IDOR:** Using `Router({ mergeParams: true })` to nest comments under tasks, and preventing Insecure Direct Object Reference (IDOR) by verifying the comment belongs to the task in the URL.
 
 ## Checkpoint answers (Days 2–6)
 
@@ -56,6 +58,20 @@
 5. Why is the check-then-delete in `deleteProject` still unsafe?
    > Between checking for tasks and deleting the project, another request could add a task. A DB fixes this with a foreign key constraint.
 
+## Day 12 Checkpoint Answers
+1. Why can `curl` call your API from anywhere while a browser page from another origin can't? Does CORS protect your data from attackers?
+   > CORS is a browser security feature. `curl` ignores CORS headers entirely. CORS does *not* protect your data from attackers (like someone using `curl` or Postman); it only prevents malicious websites from making requests on behalf of a user's browser. It is not authentication.
+2. What is a preflight request, and which requests trigger it?
+   > A preflight is an `OPTIONS` request the browser sends before the actual request to check if the server allows it. Requests that trigger it are non-simple requests: those using methods like `PUT`, `PATCH`, `DELETE`, or those with custom headers like `Content-Type: application/json`.
+3. Why does `GET /tasks/2/comments/2` return `404` when comment 2 exists on task 1?
+   > To prevent IDOR (Insecure Direct Object Reference). If we just looked up the comment by its ID, a user could read comments from other tasks by guessing IDs. We explicitly check that the comment's `taskId` matches the `taskId` in the URL.
+4. Why do Helmet and CORS come before the router, while `errorHandler` comes last?
+   > Helmet and CORS must run first so that *every* response (including errors and preflights) gets the security headers. `errorHandler` must be last so it catches errors thrown by any route or middleware before it.
+5. Why accept a client-supplied `X-Request-Id` only if it matches a strict pattern?
+   > To prevent log injection attacks. If we accepted arbitrary strings, an attacker could send newlines or fake JSON to corrupt our logs. A strict regex ensures only safe, predictable IDs are used.
+6. When would you choose cascade delete, and when would you choose to block with `409`?
+   > Cascade delete when the child resource is meaningless without the parent (e.g., a comment cannot exist without a task). Block with `409` when the child is an independent entity (e.g., a task is still valuable even if its project is deleted).
+
 ## Known limitations
 
 ### Concurrency (file storage)
@@ -66,6 +82,14 @@ The JSON file store is no longer safe for concurrent writes across *multiple pro
 **Result after fix:** all 8 tasks were created successfully.
 
 **Remaining limitation:** a second server instance or running the CLI at the same time would still cause a race. Only a real database fixes that.
+
+### Atomicity of Cascading Deletes
+*Added Day 12.*
+When deleting a task, we first remove the task, then loop through and remove its comments. If the server crashes between these two steps, we are left with orphaned comments. A database fixes this with a single transaction (or `ON DELETE CASCADE` constraint).
+
+### Unauthenticated Authors
+*Added Day 12.*
+The `author` field for comments is currently a plain string supplied by the client. Anyone can pretend to be anyone. This will be fixed in Week 4 when we add JWT authentication.
 
 ## Week 1 summary
 Three things I can do now that I couldn't on Day 1:

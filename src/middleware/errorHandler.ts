@@ -12,6 +12,10 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
     res.status(400).json({ error: { message: "Request body is not valid JSON" } });
     return;
   }
+    if ((err as { type?: string }).type === "entity.too.large") {
+    res.status(413).json({ error: { message: "Request body is too large" } });
+    return;
+  }
   if (err instanceof ZodError) {
     res.status(400).json({
       error: {
@@ -33,6 +37,8 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
     res.status(400).json({ error: { message: err.message } });
     return;
   }
-  logger.error("Unhandled error:", err);
-  res.status(500).json({ error: { message: "Internal server error" } });
+  logger.error(`[${res.locals.requestId}] Unhandled error:`, err);
+  res.status(500).json({
+    error: { message: "Internal server error", requestId: res.locals.requestId },
+  });
 };
