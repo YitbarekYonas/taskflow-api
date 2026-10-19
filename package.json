@@ -1,6 +1,6 @@
 {
   "name": "taskflow",
-  "version": "1.0.0",
+  "version": "0.2.0",
   "description": "Task manager CLI built with Node.js and TypeScript",
   "main": "index.js",
   "scripts": {
