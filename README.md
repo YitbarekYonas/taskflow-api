@@ -25,6 +25,18 @@ npm run build   # Build for production
 npm start       # Run compiled JS
 ```
 
+## Documentation & Testing
+
+Interactive API docs are available at `http://localhost:3000/docs` when the server is running. You can test every endpoint directly in the browser.
+
+To verify the API against a running server:
+```bash
+npm run smoke
+```
+*(The server must be running in another terminal).*
+
+![Smoke Test Results](./docs/smoke-test.png)
+
 ## API Endpoints
 
 ### Tasks
@@ -86,7 +98,12 @@ npm start       # Run compiled JS
 ## Architecture
 
 ```
-HTTP request → route (validate) → controller → service → repository → JSON file
+HTTP request
+  → helmet → cors → requestId → logger → json parser
+  → route (validate params / query / body)
+  → controller (HTTP in, HTTP out)
+  → service (business rules)
+  → repository (JSON files; PostgreSQL in Week 3)
 ```
 
 The repository pattern decouples business logic from data storage. Services depend on a `Repository<T>` interface, not a specific implementation. To move from JSON files to PostgreSQL (Week 3), we only need to create a new repository class and update the composition root (`container.ts`).
@@ -104,6 +121,7 @@ src/
 ├── app.ts, server.ts, cli.ts
 ├── container.ts (Composition root)
 ├── config.ts, logger.ts, errors.ts, types.ts, utils.ts
+├── docs/ (OpenAPI spec)
 ├── schemas/ (Zod validation)
 ├── repositories/ (Data storage: interface, JSON impl, legacy migration)
 ├── services/ (Business logic: tasks, projects, comments, queries)
@@ -113,11 +131,11 @@ src/
 ```
 
 ## Tech Stack
-Node.js, TypeScript, Express 5, Zod, dotenv, tsx, Helmet, CORS.
+Node.js, TypeScript, Express 5, Zod, dotenv, tsx, Helmet, CORS, Swagger UI.
 
 ## Roadmap
 - [x] Week 1 — CLI core
-- [x] Week 2 — Express API (CRUD, pagination, filtering, repository pattern, projects, comments, production middleware)
+- [x] Week 2 — Express API (CRUD, pagination, filtering, repository pattern, projects, comments, production middleware, OpenAPI docs)
 - [ ] Week 3 — PostgreSQL
 - [ ] Week 4 — Auth (JWT)
 
