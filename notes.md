@@ -26,6 +26,13 @@
 - **Atomic IDs:** `SERIAL` generates IDs atomically, so the ID-reuse problem and the race condition from Day 9 disappear.
 - **Constraints & Cascades:** Foreign keys and `ON DELETE CASCADE` replace the hand-written checks in your services. The DB enforces them atomically.
 
+### Week 3 (Prisma & Database Schema)
+- **Prisma ORM:** Describing tables as models and generating a typed client. `prisma.task.findMany()` is checked by TypeScript.
+- **Schema-first workflow:** Editing `schema.prisma` and running `prisma migrate dev` to write SQL migration files.
+- **Relations:** Explicit join tables (`ProjectMember`) for many-to-many relationships that carry data (like `role`).
+- **`onDelete` rules:** `Restrict` (block delete, like our 409), `Cascade` (delete children, like our comments), and `SetNull` (unassign tasks).
+- **Indexes:** Indexing foreign keys (`projectId`) and frequently filtered columns (`status`) so the database doesn't have to scan the whole table.
+
 ## Checkpoint answers (Days 2–6)
 
 *(Skipped or filled in as you go)*
@@ -90,6 +97,20 @@
 5. Why does it matter that every error, including a 404 for an unknown route and a 400 for malformed JSON, has the same shape?
    > It allows frontend clients to write one error-handling function for all API calls, instead of custom logic for every endpoint.
 
+## Day 15 Checkpoint Answers
+1. What problem does a migration file solve compared with editing the database by hand?
+   > It creates a version history for the database. If a teammate clones the repo, they can run `prisma migrate dev` and their database will instantly match yours perfectly. If you edit by hand, you have to remember every SQL command you typed.
+2. Which of your Day 11 and 12 service checks are now handled by the schema, and by which keyword?
+   > The "project has tasks" check is now handled by `onDelete: Restrict` on the Task project relation. The comment cascade delete is handled by `onDelete: Cascade`. The "project exists" check is handled by the foreign key `REFERENCES`.
+3. Why is `ProjectMember` an explicit model instead of a hidden relation?
+   > Because it has its own data (the `role` and `joinedAt`). An implicit many-to-many relation only stores the two IDs. We need to know if a user is an `owner` or a `member`.
+4. Why do we index foreign keys such as `projectId`?
+   > Without an index, the database has to scan the entire tasks table row-by-row every time you query `WHERE projectId = 1`. An index makes that lookup instant.
+5. Why is the generated client in `.gitignore` while `prisma/migrations` is committed?
+   > The generated client is just code automatically built from the schema. You never edit it manually. The migrations, however, are hand-crafted history that must be shared with the team and deployed to production.
+6. Why should the app create one `PrismaClient` and not one per request?
+   > Every new `PrismaClient` creates a new connection pool to the database. If you create one per request, you will exhaust the database's maximum connections very quickly and crash.
+
 ## API Conventions (Day 13 Audit)
 - **POST:** Returns `201` and a `Location` header.
 - **Errors:** All errors use the `{ "error": { "message": "..." } }` shape.
@@ -100,11 +121,8 @@
 ## Known limitations
 *(Each of these is fixed by a specific upcoming week, showing forward planning).*
 
-1. **Concurrency (file storage):** JSON file storage is safe for concurrent requests *within the same process* (thanks to an in-memory write queue), but not across multiple processes. A real database with transactions will fix this in **Week 3**.
-2. **Atomicity of Cascading Deletes:** When deleting a task, we first remove the task, then loop through and remove its comments. If the server crashes between these two steps, we are left with orphaned comments. A database fixes this with a single transaction (or `ON DELETE CASCADE` constraint) in **Week 3**.
-3. **Non-atomic Project Deletion:** Between checking if a project has tasks and deleting it, another request could add a task (check-then-act race). A foreign key constraint fixes this in **Week 3**.
-4. **Unauthenticated Authors:** The `author` field for comments is currently a plain string supplied by the client. Anyone can pretend to be anyone. This will be fixed in **Week 4** when we add JWT authentication.
-5. **No Automated Tests:** We currently rely on a manual `npm run smoke` test. Proper unit and integration tests will be added in **Week 5**.
+1. **Unauthenticated Authors:** The `author` field for comments is currently a plain string supplied by the client. Anyone can pretend to be anyone. This will be fixed in **Week 4** when we add JWT authentication.
+2. **No Automated Tests:** We currently rely on a manual `npm run smoke` test. Proper unit and integration tests will be added in **Week 5**.
 
 ## Week 1 summary
 Three things I can do now that I couldn't on Day 1:

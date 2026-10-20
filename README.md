@@ -1,19 +1,43 @@
 # TaskFlow
 
-A team task-management API built with Node.js, Express, and TypeScript.
+A team task-management API built with Node.js, Express, TypeScript, and Prisma.
 
 ## Features
 - **CLI:** Add, list, start, complete, delete, filter, and export tasks (CSV).
 - **HTTP API:** Full CRUD for tasks, projects, and comments, with pagination, sorting, searching, filtering, and referential integrity.
-- **Core:** Repository pattern (swappable JSON storage), Zod validation, strict TypeScript, and centralized error handling.
+- **Core:** Repository pattern, Zod validation, strict TypeScript, and centralized error handling.
+- **Database:** PostgreSQL with Prisma ORM, enforcing referential integrity and cascading deletes.
 - **Production Middleware:** Security headers (Helmet), CORS, Request IDs, and body size limits.
 
 ## Setup
+
+### Prerequisites
+- Node.js 20+
+- Docker (for running PostgreSQL)
+
+### Install
 ```bash
 git clone https://github.com/YitbarekYonas/taskflow-api.git
 cd taskflow-api
 npm install
 cp .env.example .env
+```
+
+### Database
+1. Start the PostgreSQL container:
+   ```bash
+   docker start taskflow-db
+   ```
+   *(If you don't have it yet: `docker run --name taskflow-db -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=taskflow -p 5432:5432 -d postgres:17`)*
+
+2. Run the database migrations:
+   ```bash
+   npm run db:migrate
+   npm run db:generate
+   ```
+
+### Verify
+```bash
 npm run typecheck
 ```
 
@@ -103,10 +127,41 @@ HTTP request
   → route (validate params / query / body)
   → controller (HTTP in, HTTP out)
   → service (business rules)
-  → repository (JSON files; PostgreSQL in Week 3)
+  → repository (PostgreSQL via Prisma)
 ```
 
-The repository pattern decouples business logic from data storage. Services depend on a `Repository<T>` interface, not a specific implementation. To move from JSON files to PostgreSQL (Week 3), we only need to create a new repository class and update the composition root (`container.ts`).
+The repository pattern decouples business logic from data storage. Services depend on a `Repository<T>` interface, not a specific implementation. We can swap implementations (e.g., from JSON to Prisma) without touching the business logic.
+
+## Database
+
+```mermaid
+erDiagram
+  USER ||--o{ PROJECT_MEMBER : "belongs via"
+  PROJECT ||--o{ PROJECT_MEMBER : "has"
+  PROJECT ||--o{ TASK : "contains (restrict)"
+  USER ||--o{ TASK : "assigned (set null)"
+  TASK ||--o{ COMMENT : "has (cascade)"
+
+  USER { int id PK
+         string email UK
+         string name }
+  PROJECT { int id PK
+            string name }
+  PROJECT_MEMBER { int projectId PK
+                   int userId PK
+                   string role }
+  TASK { int id PK
+         string title
+         string status
+         string priority
+         date dueDate
+         int projectId FK
+         int assigneeId FK }
+  COMMENT { int id PK
+            int taskId FK
+            string author
+            string body }
+```
 
 ## Production Middleware
 
@@ -117,29 +172,33 @@ The repository pattern decouples business logic from data storage. Services depe
 
 ## Project Structure
 ```
+prisma/
+├── schema.prisma         # Database schema
+└── migrations/           # SQL migration history
+
 src/
 ├── app.ts, server.ts, cli.ts
-├── container.ts (Composition root)
+├── container.ts          # Composition root
+├── db.ts                 # Prisma Client instance
 ├── config.ts, logger.ts, errors.ts, types.ts, utils.ts
-├── docs/ (OpenAPI spec)
-├── schemas/ (Zod validation)
-├── repositories/ (Data storage: interface, JSON impl, legacy migration)
-├── services/ (Business logic: tasks, projects, comments, queries)
-├── middleware/ (Logger, validation, error handling, request IDs)
-├── controllers/ (HTTP logic)
-└── routes/ (Express routes)
+├── docs/                 # OpenAPI spec
+├── generated/prisma/     # Auto-generated Prisma Client (gitignored)
+├── schemas/              # Zod validation
+├── repositories/         # Data storage: interface, Prisma impl
+├── services/             # Business logic: tasks, projects, comments, queries
+├── middleware/           # Logger, validation, error handling, request IDs
+├── controllers/          # HTTP logic
+└── routes/               # Express routes
 ```
 
 ## Tech Stack
-Node.js, TypeScript, Express 5, Zod, dotenv, tsx, Helmet, CORS, Swagger UI.
+Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CORS, Swagger UI.
 
 ## Roadmap
 - [x] Week 1 — CLI core
 - [x] Week 2 — Express API (CRUD, pagination, filtering, repository pattern, projects, comments, production middleware, OpenAPI docs)
-- [ ] Week 3 — PostgreSQL
+- [x] Week 3 — PostgreSQL & Prisma (Schema, Migrations, ORM integration)
 - [ ] Week 4 — Auth (JWT)
 
 ## Known Limitations
-1. **Concurrency:** JSON file storage is safe for concurrent requests *within the same Node process* (thanks to an in-memory write queue), but not across multiple processes. A real database with transactions will fix this in Week 3.
-2. **Cascading Deletes:** Deleting a task deletes its comments in two separate steps. A crash between them leaves orphaned comments. A database transaction will fix this.
-3. **Unauthenticated Authors:** Comment authors are supplied by the client as plain strings. This will be replaced by authenticated user IDs in Week 4.
+1. **Unauthenticated Authors:** Comment authors are supplied by the client as plain strings. This will be replaced by authenticated user IDs in Week 4.
