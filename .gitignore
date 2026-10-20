@@ -8,3 +8,5 @@ src/generated
 .cursor
 .agents
 .devin
+.windsurf
+skills-lock.json
