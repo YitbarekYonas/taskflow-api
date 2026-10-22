@@ -3,6 +3,7 @@ import { taskService } from "./container.js";
 import { UserError } from "./errors.js";
 import { PRIORITIES, STATUSES, type Priority, type Status, type Task } from "./types.js";
 import { parseChoice } from "./utils.js";
+import {prisma} from "./db.js";
 
 const { addTask, listTasks, setStatus, deleteTask, exportCsv, listOverdue, summary } = taskService;
 
@@ -152,11 +153,13 @@ async function main() {
   await run(parseCommand(process.argv.slice(2)));
 }
 
-main().catch((err) => {
-  if (err instanceof UserError) {
-    console.error(`Error: ${err.message}`);
-  } else {
-    console.error("Unexpected error:", err);
-  }
-  process.exit(1);
-});
+main()
+  .catch((err) => {
+    if (err instanceof UserError) {
+      console.error(`Error: ${err.message}`);
+    } else {
+      console.error("Unexpected error:", err);
+    }
+    process.exitCode = 1; // lets the process end naturally after cleanup
+  })
+  .finally(() => prisma.$disconnect());
