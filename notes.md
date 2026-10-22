@@ -33,6 +33,12 @@
 - **`onDelete` rules:** `Restrict` (block delete, like our 409), `Cascade` (delete children, like our comments), and `SetNull` (unassign tasks).
 - **Indexes:** Indexing foreign keys (`projectId`) and frequently filtered columns (`status`) so the database doesn't have to scan the whole table.
 
+### Week 3 (Swapping Repositories)
+- **Data Mapping:** Translating between the domain (`Date` vs ISO string, `undefined` vs `null`) at the repository boundary.
+- **The `undefined` trap:** Prisma treats `undefined` as "don't touch", while `null` means "set to NULL".
+- **Error Translation:** Catching Prisma's `P2025` (record not found) and returning `undefined` to the service.
+- **Connection Pooling:** Prisma keeps connections open, so CLIs must call `prisma.$disconnect()` to let the Node process exit.
+
 ## Checkpoint answers (Days 2–6)
 
 *(Skipped or filled in as you go)*
@@ -111,6 +117,20 @@
 6. Why should the app create one `PrismaClient` and not one per request?
    > Every new `PrismaClient` creates a new connection pool to the database. If you create one per request, you will exhaust the database's maximum connections very quickly and crash.
 
+## Day 16 Checkpoint Answers
+1. Which three things had to be translated at the repository boundary, and why do the services never see Prisma types?
+   > Dates (`Date` objects to ISO strings), missing values (`undefined` to `null`), and the database's `P2025` error (to `undefined` so the service can throw a 404). The service only knows about our domain types because the repository mapper handles the translation.
+2. In Prisma, what's the difference between `undefined` and `null` in an update, and how does the mapper handle it?
+   > `undefined` means "don't touch this column". `null` means "set this column to NULL". Our mapper checks if the key exists (`"dueDate" in d`) to know if the user actually wanted to clear it.
+3. Why does the CLI hang without `prisma.$disconnect()`?
+   > Prisma maintains an open connection pool to the database. Node.js won't exit as long as there are active connections, so the CLI waits forever unless we explicitly disconnect.
+4. Why must the sequences be moved after importing rows with explicit IDs?
+   > PostgreSQL's `SERIAL` sequence only counts up. If you import 100 tasks with IDs 1-100, the sequence is still at 1. The next insert will try to use ID 1 and crash. We have to manually tell the sequence to start at 101.
+5. Why did the 8 parallel creates all survive this time, and why does it also work across processes?
+   > PostgreSQL handles concurrent writes safely with transactions and row locks. The database arbitrates the race condition, not our application code.
+6. Why is `GET /tasks` still inefficient even though it now uses a database?
+   > Because `queryTasks` still loads *all* rows into memory using `findMany()` and then slices them in JavaScript. It doesn't use SQL `LIMIT` and `OFFSET` yet. Day 18 fixes this.
+
 ## API Conventions (Day 13 Audit)
 - **POST:** Returns `201` and a `Location` header.
 - **Errors:** All errors use the `{ "error": { "message": "..." } }` shape.
@@ -121,8 +141,9 @@
 ## Known limitations
 *(Each of these is fixed by a specific upcoming week, showing forward planning).*
 
-1. **Unauthenticated Authors:** The `author` field for comments is currently a plain string supplied by the client. Anyone can pretend to be anyone. This will be fixed in **Week 4** when we add JWT authentication.
-2. **No Automated Tests:** We currently rely on a manual `npm run smoke` test. Proper unit and integration tests will be added in **Week 5**.
+1. **In-Memory Pagination:** `queryTasks` loads all rows into memory and slices them in JavaScript instead of using SQL `LIMIT` and `OFFSET`. This will be optimized in **Day 18**.
+2. **Unauthenticated Authors:** The `author` field for comments is currently a plain string supplied by the client. Anyone can pretend to be anyone. This will be fixed in **Week 4** when we add JWT authentication.
+3. **No Automated Tests:** We currently rely on a manual `npm run smoke` test. Proper unit and integration tests will be added in **Week 5**.
 
 ## Week 1 summary
 Three things I can do now that I couldn't on Day 1:

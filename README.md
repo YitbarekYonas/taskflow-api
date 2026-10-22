@@ -6,7 +6,7 @@ A team task-management API built with Node.js, Express, TypeScript, and Prisma.
 - **CLI:** Add, list, start, complete, delete, filter, and export tasks (CSV).
 - **HTTP API:** Full CRUD for tasks, projects, and comments, with pagination, sorting, searching, filtering, and referential integrity.
 - **Core:** Repository pattern, Zod validation, strict TypeScript, and centralized error handling.
-- **Database:** PostgreSQL with Prisma ORM, enforcing referential integrity and cascading deletes.
+- **Database:** PostgreSQL with Prisma ORM, enforcing referential integrity and cascading deletes. (JSON file storage is still selectable via `STORAGE=json` for testing).
 - **Production Middleware:** Security headers (Helmet), CORS, Request IDs, and body size limits.
 
 ## Setup
@@ -127,10 +127,19 @@ HTTP request
   → route (validate params / query / body)
   → controller (HTTP in, HTTP out)
   → service (business rules)
-  → repository (PostgreSQL via Prisma)
+  → repository (PostgreSQL via Prisma; JSON files still selectable)
 ```
 
 The repository pattern decouples business logic from data storage. Services depend on a `Repository<T>` interface, not a specific implementation. We can swap implementations (e.g., from JSON to Prisma) without touching the business logic.
+
+## Configuration
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `PORT` | The port the Express server listens on | `3000` |
+| `NODE_ENV` | Environment mode | `development` |
+| `DATABASE_URL` | PostgreSQL connection string | (required) |
+| `STORAGE` | Storage backend: `prisma` or `json` | `prisma` |
+| `CORS_ORIGIN` | Allowed origins for browser requests | `http://localhost:5173` |
 
 ## Database
 
@@ -184,7 +193,7 @@ src/
 ├── docs/                 # OpenAPI spec
 ├── generated/prisma/     # Auto-generated Prisma Client (gitignored)
 ├── schemas/              # Zod validation
-├── repositories/         # Data storage: interface, Prisma impl
+├── repositories/         # Data storage: interface, Prisma impl, JSON impl
 ├── services/             # Business logic: tasks, projects, comments, queries
 ├── middleware/           # Logger, validation, error handling, request IDs
 ├── controllers/          # HTTP logic
@@ -202,3 +211,4 @@ Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CO
 
 ## Known Limitations
 1. **Unauthenticated Authors:** Comment authors are supplied by the client as plain strings. This will be replaced by authenticated user IDs in Week 4.
+2. **In-Memory Pagination:** `queryTasks` loads all rows into memory and slices them in JavaScript instead of using SQL `LIMIT` and `OFFSET`. This will be optimized in Day 18.
