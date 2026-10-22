@@ -1,7 +1,8 @@
 import type { PrismaClient, Project as ProjectRow } from "../../generated/prisma/client.js";
 import type { Project } from "../../types.js";
-import type { Repository } from "../repository.js";
-import { isPrismaError } from "./errors.js";
+import type { ProjectRepository, Repository } from "../repository.js";
+import { isPrismaError, mapDeleteError } from "./errors.js";
+import { mapWriteError } from "./errors.js";
 
 type ProjectData = Omit<Project, "id">;
 
@@ -22,7 +23,7 @@ function toColumns(d: Partial<ProjectData>) {
   return c;
 }
 
-export class PrismaProjectRepository implements Repository<Project> {
+export class PrismaProjectRepository  implements ProjectRepository {
   constructor(private readonly prisma: PrismaClient) {}
 
   async findAll() {
@@ -54,7 +55,14 @@ export class PrismaProjectRepository implements Repository<Project> {
       return toProject(await this.prisma.project.delete({ where: { id } }));
     } catch (err) {
       if (isPrismaError(err, "P2025")) return undefined;
-      throw err;
+      throw mapDeleteError(err);
     }
+  }
+    async findAllWithTaskCount() {
+    const rows = await this.prisma.project.findMany({
+      orderBy: { id: "asc" },
+      include: { _count: { select: { tasks: true } } },
+    });
+    return rows.map((row) => ({ ...toProject(row), taskCount: row._count.tasks }));
   }
 }

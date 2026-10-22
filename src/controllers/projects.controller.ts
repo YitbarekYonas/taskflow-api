@@ -1,7 +1,16 @@
 import type { Request, Response } from "express";
 import { projectService } from "../container.js";
 import type { NewProject, ProjectPatch } from "../schemas/project.schemas.js";
+import type { TaskQuery } from "../schemas/task.schemas.js";
 
+export async function listTasks(_req: Request, res: Response) {
+  const { id } = res.locals.params as { id: number };
+  const { items, meta } = await projectService.listProjectTasks(
+    id,
+    res.locals.query as Omit<TaskQuery, "projectId">
+  );
+  res.json({ data: items, meta });
+}
 export async function list(_req: Request, res: Response) {
   res.json({ data: await projectService.listProjects() });
 }

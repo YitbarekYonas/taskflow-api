@@ -2,6 +2,7 @@ import type { Comment as CommentRow, PrismaClient } from "../../generated/prisma
 import type { Comment } from "../../types.js";
 import type { Repository } from "../repository.js";
 import { isPrismaError } from "./errors.js";
+import { mapWriteError } from "./errors.js";
 
 type CommentData = Omit<Comment, "id">;
 
@@ -41,11 +42,12 @@ export class PrismaCommentRepository implements Repository<Comment> {
   }
 
   async insert(data: CommentData) {
-    return toComment(
-      await this.prisma.comment.create({
-        data: { ...toColumns(data), taskId: data.taskId, author: data.author, body: data.body },
-      })
-    );
+    try {
+      const row = await this.prisma.comment.create({ data: { ...toColumns(data), taskId: data.taskId, author: data.author, body: data.body } });
+      return toComment(row);
+    } catch (err) {
+      throw mapWriteError(err);
+    }
   }
 
   async update(id: number, changes: Partial<CommentData>) {
@@ -53,7 +55,7 @@ export class PrismaCommentRepository implements Repository<Comment> {
       return toComment(await this.prisma.comment.update({ where: { id }, data: toColumns(changes) }));
     } catch (err) {
       if (isPrismaError(err, "P2025")) return undefined;
-      throw err;
+      throw mapWriteError(err);
     }
   }
 

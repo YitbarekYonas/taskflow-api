@@ -160,6 +160,6 @@ main()
     } else {
       console.error("Unexpected error:", err);
     }
-    process.exitCode = 1; // lets the process end naturally after cleanup
+    process.exitCode = 1; 
   })
   .finally(() => prisma.$disconnect());

@@ -2,6 +2,7 @@ import type { PrismaClient, Task as TaskRow } from "../../generated/prisma/clien
 import type { Priority, Status, Task } from "../../types.js";
 import type { Repository } from "../repository.js";
 import { isPrismaError } from "./errors.js";
+import { mapWriteError } from "./errors.js";
 
 type TaskData = Omit<Task, "id">;
 
@@ -52,18 +53,21 @@ export class PrismaTaskRepository implements Repository<Task> {
     const row = await this.prisma.task.findUnique({ where: { id } });
     return row ? toTask(row) : undefined;
   }
-
   async insert(data: TaskData) {
-    const row = await this.prisma.task.create({ data: { ...toColumns(data), title: data.title } });
-    return toTask(row);
+    try {
+      const row = await this.prisma.task.create({ data: { ...toColumns(data), title: data.title } });
+      return toTask(row);
+    } catch (err) {
+      throw mapWriteError(err);
+    }
   }
 
   async update(id: number, changes: Partial<TaskData>) {
     try {
       return toTask(await this.prisma.task.update({ where: { id }, data: toColumns(changes) }));
     } catch (err) {
-      if (isPrismaError(err, "P2025")) return undefined; // no such row
-      throw err;
+      if (isPrismaError(err, "P2025")) return undefined;
+      throw mapWriteError(err);
     }
   }
 

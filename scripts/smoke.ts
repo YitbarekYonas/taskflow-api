@@ -49,6 +49,12 @@ check("  list has meta.total >= 1", list.json.meta.total >= 1);
 const comment = await expectStatus("add comment", 201, "POST", `/tasks/${tid}/comments`, { author: "Smoke", body: "Hello" });
 const cid = comment.json.data.id;
 await expectStatus("get comment", 200, "GET", `/tasks/${tid}/comments/${cid}`);
+const projectTasks = await expectStatus("tasks of project", 200, "GET", `/projects/${pid}/tasks`);
+check("  nested list contains the task", projectTasks.json.data.some((t: { id: number }) => t.id === tid));
+await expectStatus("tasks of missing project", 404, "GET", "/projects/999999/tasks");
+const projectList = await call("GET", "/projects");
+const mine = projectList.json.data.find((p: { id: number }) => p.id === pid);
+check("  project list has taskCount", mine?.taskCount === 1, JSON.stringify(mine));
 
 // Rules and failures
 await expectStatus("project with tasks cannot be deleted", 409, "DELETE", `/projects/${pid}`);
