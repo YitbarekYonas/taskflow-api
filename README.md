@@ -6,7 +6,7 @@ A team task-management API built with Node.js, Express, TypeScript, and Prisma.
 - **CLI:** Add, list, start, complete, delete, filter, and export tasks (CSV).
 - **HTTP API:** Full CRUD for tasks, projects, and comments, with pagination, sorting, searching, filtering, and referential integrity.
 - **Core:** Repository pattern, Zod validation, strict TypeScript, and centralized error handling.
-- **Database:** PostgreSQL with Prisma ORM, enforcing referential integrity and cascading deletes. (JSON file storage is still selectable via `STORAGE=json` for testing).
+- **Database:** PostgreSQL with Prisma ORM, enforcing referential integrity, cascading deletes, and nested queries.
 - **Production Middleware:** Security headers (Helmet), CORS, Request IDs, and body size limits.
 
 ## Setup
@@ -75,11 +75,12 @@ npm run smoke
 ### Projects
 | Method | Path | Description | Success |
 |--------|------|-------------|---------|
-| GET | `/projects` | List all projects | 200 |
+| GET | `/projects` | List all projects (includes `taskCount`) | 200 |
 | GET | `/projects/:id` | Get one project | 200 |
 | POST | `/projects` | Create a project | 201 |
 | PATCH | `/projects/:id` | Update a project | 200 |
 | DELETE | `/projects/:id` | Delete a project (fails with 409 if it has tasks) | 204 |
+| GET | `/projects/:id/tasks` | List the tasks of one project | 200 |
 
 ### Comments
 | Method | Path | Description | Success |
@@ -127,10 +128,10 @@ HTTP request
   → route (validate params / query / body)
   → controller (HTTP in, HTTP out)
   → service (business rules)
-  → repository (PostgreSQL via Prisma; JSON files still selectable)
+  → repository (PostgreSQL via Prisma)
 ```
 
-The repository pattern decouples business logic from data storage. Services depend on a `Repository<T>` interface, not a specific implementation. We can swap implementations (e.g., from JSON to Prisma) without touching the business logic.
+The repository pattern decouples business logic from data storage. Services depend on a `Repository<T>` interface, not a specific implementation. The database enforces foreign key constraints natively.
 
 ## Configuration
 | Variable | Description | Default |
@@ -138,7 +139,6 @@ The repository pattern decouples business logic from data storage. Services depe
 | `PORT` | The port the Express server listens on | `3000` |
 | `NODE_ENV` | Environment mode | `development` |
 | `DATABASE_URL` | PostgreSQL connection string | (required) |
-| `STORAGE` | Storage backend: `prisma` or `json` | `prisma` |
 | `CORS_ORIGIN` | Allowed origins for browser requests | `http://localhost:5173` |
 
 ## Database
@@ -193,7 +193,7 @@ src/
 ├── docs/                 # OpenAPI spec
 ├── generated/prisma/     # Auto-generated Prisma Client (gitignored)
 ├── schemas/              # Zod validation
-├── repositories/         # Data storage: interface, Prisma impl, JSON impl
+├── repositories/         # Data storage: interface, Prisma impl
 ├── services/             # Business logic: tasks, projects, comments, queries
 ├── middleware/           # Logger, validation, error handling, request IDs
 ├── controllers/          # HTTP logic
@@ -206,7 +206,7 @@ Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CO
 ## Roadmap
 - [x] Week 1 — CLI core
 - [x] Week 2 — Express API (CRUD, pagination, filtering, repository pattern, projects, comments, production middleware, OpenAPI docs)
-- [x] Week 3 — PostgreSQL & Prisma (Schema, Migrations, ORM integration)
+- [x] Week 3 — PostgreSQL & Prisma (Schema, Migrations, ORM integration, Constraints)
 - [ ] Week 4 — Auth (JWT)
 
 ## Known Limitations
