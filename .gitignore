@@ -3,3 +3,10 @@ node_modules
 tasks.json
 tasks.csv
 dist
+src/generated
+.claude
+.cursor
+.agents
+.devin
+.windsurf
+skills-lock.json
