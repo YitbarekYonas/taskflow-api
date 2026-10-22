@@ -10,6 +10,7 @@ const schema = z.object({
     .string()
     .default("http://localhost:5173")
     .transform((s) => s.split(",").map((o) => o.trim()).filter(Boolean)),
+    DATABASE_URL: z.string().min(1).startsWith("postgres"),
 });
 const parsed = schema.safeParse(process.env);
 if(!parsed.success){
@@ -25,4 +26,5 @@ export const config ={
     dataFile : parsed.data.DATA_FILE,
     port: parsed.data.PORT,
     corsOrigins: parsed.data.CORS_ORIGIN,
+    databaseUrl: parsed.data.DATABASE_URL,
 };
