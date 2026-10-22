@@ -39,6 +39,11 @@
 - **Error Translation:** Catching Prisma's `P2025` (record not found) and returning `undefined` to the service.
 - **Connection Pooling:** Prisma keeps connections open, so CLIs must call `prisma.$disconnect()` to let the Node process exit.
 
+### Week 3 (Database Constraints & N+1)
+- **Trusting the Database:** Removed manual checks (`assertProjectExists`) and cascades. Prisma's `P2003` error is mapped to `InvalidReferenceError` (400 on insert) or `InUseError` (409 on delete).
+- **N+1 Problem:** Loading a list then running a query per item. Fixed by using Prisma's `_count` to get counts in a single query.
+- **Nested Queries:** Added `GET /projects/:id/tasks` to reuse task filtering for a specific project.
+
 ## Checkpoint answers (Days 2–6)
 
 *(Skipped or filled in as you go)*
@@ -130,6 +135,18 @@
    > PostgreSQL handles concurrent writes safely with transactions and row locks. The database arbitrates the race condition, not our application code.
 6. Why is `GET /tasks` still inefficient even though it now uses a database?
    > Because `queryTasks` still loads *all* rows into memory using `findMany()` and then slices them in JavaScript. It doesn't use SQL `LIMIT` and `OFFSET` yet. Day 18 fixes this.
+
+## Day 17 Checkpoint Answers
+1. Why is "check that it exists, then insert" unsafe, while a foreign key is safe?
+   > `check, then insert` has a gap between the two steps where another request can slip in (race condition). A foreign key is checked *inside* the write operation by the database, so there is no gap and no code path can bypass it.
+2. The same `P2003` code becomes a `400` on insert and a `409` on delete. Why?
+   > On insert, a bad reference means the client sent a bad `projectId` (their fault: 400). On delete, a `P2003` means the resource is still in use by other rows (a state conflict: 409). The repository maps these to `InvalidReferenceError` and `InUseError` so the service can add the human message.
+3. Which checks did you deliberately keep in the services, and why can't the database do them?
+   > We kept the comment ownership check (`comment.taskId === taskId`). The database enforces that the comment belongs to *a* task, but it doesn't know that the URL requested `/tasks/2/comments/2` instead of `/tasks/1/comments/2`. That is a business rule (preventing IDOR).
+4. What is the N+1 problem, and how many operations did each version in `n-plus-one.ts` take?
+   > N+1 happens when you run 1 query for a list, and then N extra queries inside a loop. The naive version took 21 operations for 20 projects. The `_count` version took 1 operation.
+5. Why can't an in-memory fake repository test your integrity rules?
+   > An in-memory array doesn't have foreign keys. It wouldn't throw a `P2003` error. To test integrity, you must run your tests against a real database (like a test instance of Postgres).
 
 ## API Conventions (Day 13 Audit)
 - **POST:** Returns `201` and a `Location` header.

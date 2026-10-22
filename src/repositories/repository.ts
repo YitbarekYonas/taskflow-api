@@ -1,3 +1,8 @@
+import type { Project } from "../types.js";
+
+export interface ProjectRepository extends Repository<Project> {
+  findAllWithTaskCount(): Promise<Array<Project & { taskCount: number }>>;
+}
 export interface Repository<T extends { id: number }> {
   findAll(): Promise<T[]>;
   findById(id: number): Promise<T | undefined>;

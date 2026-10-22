@@ -14,8 +14,7 @@
     "db:migrate": "prisma migrate dev",
     "db:generate": "prisma generate",
     "db:studio": "prisma studio",
-    "db:check": "tsx scripts/db-check.ts",
-    "db:import": "tsx scripts/import-json.ts"
+    "db:check": "tsx scripts/db-check.ts"
   },
   "keywords": [
     "taskflow",
