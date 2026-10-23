@@ -5,11 +5,12 @@ import { pipeline } from "node:stream/promises";
 import { NotFoundError, UserError } from "../errors.js";
 import type { Repository } from "../repositories/repository.js";
 import type { TaskPatch, TaskQuery } from "../schemas/task.schemas.js";
-import { applyQuery } from "./taskQuery.js";
+import { buildMeta } from "./pagination.js";
 import type { NewTask, Status, Task} from "../types.js";
 import { InvalidReferenceError } from "../errors.js";
+import {TaskRepository} from "../repositories/repository.js";
 
-type Deps = { tasks: Repository<Task> };
+type Deps = { tasks: TaskRepository };
 
   // The database rejects a bad projectId; we only add a friendly message
   async function withProjectCheck<T>(projectId: number | undefined, op: () => Promise<T>) {
@@ -58,8 +59,9 @@ export function createTaskService({ tasks }: Deps){
     return filter.status ? all.filter((t) => t.status === filter.status) : all;
   }
 
-  async function queryTasks(q: TaskQuery) {
-    return applyQuery(await tasks.findAll(), q);
+ async function queryTasks(q: TaskQuery) {
+    const { items, total } = await tasks.query(q);
+    return { items, meta: buildMeta(total, q.page, q.limit) };
   }
 
   async function updateTask(id: number, patch: TaskPatch): Promise<Task> {
@@ -90,19 +92,12 @@ export function createTaskService({ tasks }: Deps){
     return removed;
   }
 
-  async function listOverdue(
-    today: string = new Date().toISOString().slice(0, 10)
-  ): Promise<Task[]> {
-    const all = await tasks.findAll();
-    return all.filter(
-      (t) => t.status !== "done" && t.dueDate !== undefined && t.dueDate < today
-    );
+  async function listOverdue(today: string = new Date().toISOString().slice(0, 10)) {
+    return tasks.findOverdue(today);
   }
 
-  async function summary(): Promise<Record<Status, number>> {
-    const counts: Record<Status, number> = { todo: 0, in_progress: 0, done: 0 };
-    for (const t of await tasks.findAll()) counts[t.status]++;
-    return counts;
+  async function summary() {
+    return tasks.countByStatus();
   }
 
   async function exportCsv(outFile: string): Promise<string> {

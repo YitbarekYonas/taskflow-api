@@ -3,9 +3,10 @@ import type { ProjectRepository, Repository } from "../repositories/repository.j
 import { NewProject, ProjectPatch } from "../schemas/project.schemas.js";
 import type { TaskQuery } from "../schemas/task.schemas.js";
 import { Project, Task } from "../types.js";
-import { applyQuery } from "./taskQuery.js";
+import {TaskRepository} from "../repositories/repository.js";
+import {buildMeta} from "./pagination.js";
 
-type Deps = { projects: ProjectRepository; tasks: Repository<Task> };
+type Deps = { projects: ProjectRepository; tasks: TaskRepository };
 
 export function createProjectService({ projects, tasks }: Deps) {
   async function getProject(id: number): Promise<Project> {
@@ -43,10 +44,10 @@ export function createProjectService({ projects, tasks }: Deps) {
     }
   }
 
-  // Still filters in memory; Day 18 pushes this into SQL
   async function listProjectTasks(id: number, q: Omit<TaskQuery, "projectId">) {
     await getProject(id);
-    return applyQuery(await tasks.findAll(), { ...q, projectId: id });
+    const { items, total } = await tasks.query({ ...q, projectId: id });
+    return { items, meta: buildMeta(total, q.page, q.limit) };
   }
 
   return { getProject, listProjects, createProject, updateProject, deleteProject,listProjectTasks };
