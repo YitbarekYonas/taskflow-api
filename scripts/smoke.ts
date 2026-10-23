@@ -46,6 +46,10 @@ const patched = await expectStatus("patch task", 200, "PATCH", `/tasks/${tid}`, 
 check("  patch changed the status", patched.json.data.status === "done");
 const list = await expectStatus("list with filters", 200, "GET", `/tasks?projectId=${pid}&limit=5`);
 check("  list has meta.total >= 1", list.json.meta.total >= 1);
+const p1 = await call("GET", "/tasks?sort=priority&order=desc&limit=5&page=1");
+const p2 = await call("GET", "/tasks?sort=priority&order=desc&limit=5&page=2");
+const pagedIds = [...p1.json.data, ...p2.json.data].map((t: { id: number }) => t.id);
+check("  pages with many ties never overlap", new Set(pagedIds).size === pagedIds.length);
 const comment = await expectStatus("add comment", 201, "POST", `/tasks/${tid}/comments`, { author: "Smoke", body: "Hello" });
 const cid = comment.json.data.id;
 await expectStatus("get comment", 200, "GET", `/tasks/${tid}/comments/${cid}`);

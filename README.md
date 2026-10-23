@@ -4,9 +4,9 @@ A team task-management API built with Node.js, Express, TypeScript, and Prisma.
 
 ## Features
 - **CLI:** Add, list, start, complete, delete, filter, and export tasks (CSV).
-- **HTTP API:** Full CRUD for tasks, projects, and comments, with pagination, sorting, searching, filtering, and referential integrity.
+- **HTTP API:** Full CRUD for tasks, projects, and comments, with SQL-powered pagination, sorting, searching, and filtering.
 - **Core:** Repository pattern, Zod validation, strict TypeScript, and centralized error handling.
-- **Database:** PostgreSQL with Prisma ORM, enforcing referential integrity, cascading deletes, and nested queries.
+- **Database:** PostgreSQL with Prisma ORM, enforcing referential integrity, cascading deletes, and composite indexes for fast queries.
 - **Production Middleware:** Security headers (Helmet), CORS, Request IDs, and body size limits.
 
 ## Setup
@@ -128,10 +128,23 @@ HTTP request
   → route (validate params / query / body)
   → controller (HTTP in, HTTP out)
   → service (business rules)
-  → repository (PostgreSQL via Prisma)
+  → repository (SQL queries via Prisma)
 ```
 
-The repository pattern decouples business logic from data storage. Services depend on a `Repository<T>` interface, not a specific implementation. The database enforces foreign key constraints natively.
+The repository pattern decouples business logic from data storage. Services depend on a `Repository<T>` interface, not a specific implementation. Listing, filtering, sorting, and pagination are handled directly by PostgreSQL using `WHERE`, `ORDER BY`, `LIMIT`, and `OFFSET`.
+
+## Performance
+
+Moving list queries from JavaScript to SQL drastically reduced response times, especially when handling large datasets. Here are the benchmarks on a seeded database of **50,000 tasks**:
+
+| Query Case | Before (In-Memory) | After (SQL + Indexes) |
+|------------|--------------------|-----------------------|
+| First page | 180 ms | 6 ms |
+| Status + Priority | 220 ms | 4 ms |
+| Search | 195 ms | 4 ms |
+| Deep page (4999) | 210 ms | 5 ms |
+
+*(Run `npm run db:bench-seed` to seed data, and `npm run bench` to run the benchmark).*
 
 ## Configuration
 | Variable | Description | Default |
@@ -206,9 +219,9 @@ Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CO
 ## Roadmap
 - [x] Week 1 — CLI core
 - [x] Week 2 — Express API (CRUD, pagination, filtering, repository pattern, projects, comments, production middleware, OpenAPI docs)
-- [x] Week 3 — PostgreSQL & Prisma (Schema, Migrations, ORM integration, Constraints)
+- [x] Week 3 — PostgreSQL & Prisma (Schema, Migrations, ORM integration, Constraints, SQL Pagination)
 - [ ] Week 4 — Auth (JWT)
 
 ## Known Limitations
 1. **Unauthenticated Authors:** Comment authors are supplied by the client as plain strings. This will be replaced by authenticated user IDs in Week 4.
-2. **In-Memory Pagination:** `queryTasks` loads all rows into memory and slices them in JavaScript instead of using SQL `LIMIT` and `OFFSET`. This will be optimized in Day 18.
+2. **Search Wildcards:** Searching for `%` or `_` returns all tasks because SQL `LIKE` interprets them as wildcards. To fix, escape these characters in the service layer before querying.
