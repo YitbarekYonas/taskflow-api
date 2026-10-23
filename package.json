@@ -15,7 +15,10 @@
     "db:generate": "prisma generate",
     "db:studio": "prisma studio",
     "db:check": "tsx scripts/db-check.ts",
-    "db:n1": "tsx scripts/n-plus-one.ts"
+    "db:n1": "tsx scripts/n-plus-one.ts",
+    "db:bench-seed": "tsx scripts/seed-bench.ts",
+    "db:bench-clean": "tsx scripts/seed-bench.ts --clean",
+    "bench": "tsx scripts/bench.ts"
   },
   "keywords": [
     "taskflow",
