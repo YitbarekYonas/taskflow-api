@@ -1,4 +1,5 @@
 import type { Prisma, PrismaClient, Task as TaskRow } from "../../generated/prisma/client.js";
+import type { Db } from "./db.js";
 import type { Priority, Status, Task } from "../../types.js";
 import type { Repository } from "../repository.js";
 import { isPrismaError,mapWriteError } from "./errors.js";
@@ -66,7 +67,7 @@ function buildOrderBy(sort: TaskQuery["sort"], dir: "asc" | "desc"): Prisma.Task
   }
 }
 export class PrismaTaskRepository implements TaskRepository {
-  constructor(private readonly prisma: PrismaClient) {}
+  constructor(private readonly prisma: Db) {}
 
   async findAll() {
     const rows = await this.prisma.task.findMany({ orderBy: { id: "asc" } });
@@ -104,18 +105,31 @@ export class PrismaTaskRepository implements TaskRepository {
     }
   }
 
-    async query(q: TaskQuery) {
+   async query(q: TaskQuery) {
     const where = buildWhere(q);
-    // one transaction, so the page and the total come from the same moment
-    const [rows, total] = await this.prisma.$transaction([
-      this.prisma.task.findMany({
-        where,
-        orderBy: buildOrderBy(q.sort, q.order),
-        skip: (q.page - 1) * q.limit,
-        take: q.limit,
-      }),
-      this.prisma.task.count({ where }),
-    ]);
+    const page = {
+      where,
+      orderBy: buildOrderBy(q.sort, q.order),
+      skip: (q.page - 1) * q.limit,
+      take: q.limit,
+    };
+
+    let rows: TaskRow[];
+    let total: number;
+    
+    if ("$transaction" in this.prisma) {
+      // We have a full PrismaClient, so we can use $transaction
+      [rows, total] = await this.prisma.$transaction([
+        this.prisma.task.findMany(page),
+        this.prisma.task.count({ where }),
+      ]);
+    } else {
+      // We are already inside a transaction.
+      // Cast it to PrismaClient just to satisfy TypeScript.
+      const client = this.prisma as unknown as PrismaClient;
+      rows = await client.task.findMany(page);
+      total = await client.task.count({ where });
+    }
     return { items: rows.map(toTask), total };
   }
 
@@ -132,5 +146,33 @@ export class PrismaTaskRepository implements TaskRepository {
     const counts: Record<Status, number> = { todo: 0, in_progress: 0, done: 0 };
     for (const g of groups) counts[g.status] = g._count._all;
     return counts;
+  }
+    async findByProject(projectId: number) {
+    const rows = await this.prisma.task.findMany({ where: { projectId }, orderBy: { id: "asc" } });
+    return rows.map(toTask);
+  }
+
+  // a single statement: atomic on its own
+  async moveAll(fromProjectId: number, toProjectId: number) {
+    try {
+      const result = await this.prisma.task.updateMany({
+        where: { projectId: fromProjectId },
+        data: { projectId: toProjectId },
+      });
+      return result.count;
+    } catch (err) {
+      throw mapWriteError(err);
+    }
+  }
+
+  async insertMany(items: TaskData[]) {
+    try {
+      const result = await this.prisma.task.createMany({
+        data: items.map((i) => ({ ...toColumns(i), title: i.title })),
+      });
+      return result.count;
+    } catch (err) {
+      throw mapWriteError(err);
+    }
   }
 }

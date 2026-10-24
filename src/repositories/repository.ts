@@ -7,6 +7,9 @@ export interface TaskRepository extends Repository<Task> {
   query(q: TaskQuery): Promise<{ items: Task[]; total: number }>;
   findOverdue(today: string): Promise<Task[]>;
   countByStatus(): Promise<Record<Status, number>>;
+  findByProject(projectId: number): Promise<Task[]>;
+  moveAll(fromProjectId: number, toProjectId: number): Promise<number>;
+  insertMany(items: Array<Omit<Task, "id">>): Promise<number>;
 }
 export interface ProjectRepository extends Repository<Project> {
   findAllWithTaskCount(): Promise<Array<Project & { taskCount: number }>>;

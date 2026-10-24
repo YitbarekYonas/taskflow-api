@@ -1,4 +1,5 @@
-import type { PrismaClient, Project as ProjectRow } from "../../generated/prisma/client.js";
+import type { Project as ProjectRow } from "../../generated/prisma/client.js";
+import type { Db } from "./db.js";
 import type { Project } from "../../types.js";
 import type { ProjectRepository, Repository } from "../repository.js";
 import { isPrismaError, mapDeleteError } from "./errors.js";
@@ -24,7 +25,7 @@ function toColumns(d: Partial<ProjectData>) {
 }
 
 export class PrismaProjectRepository  implements ProjectRepository {
-  constructor(private readonly prisma: PrismaClient) {}
+  constructor(private readonly prisma: Db) {}
 
   async findAll() {
     return (await this.prisma.project.findMany({ orderBy: { id: "asc" } })).map(toProject);

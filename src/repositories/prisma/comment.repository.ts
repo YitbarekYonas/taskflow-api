@@ -1,4 +1,5 @@
-import type { Comment as CommentRow, PrismaClient } from "../../generated/prisma/client.js";
+import type { Comment as CommentRow } from "../../generated/prisma/client.js";
+import type { Db } from "./db.js";
 import type { Comment } from "../../types.js";
 import type { Repository } from "../repository.js";
 import { isPrismaError } from "./errors.js";
@@ -30,7 +31,7 @@ function toColumns(d: Partial<CommentData>) {
 }
 
 export class PrismaCommentRepository implements Repository<Comment> {
-  constructor(private readonly prisma: PrismaClient) {}
+  constructor(private readonly prisma: Db) {}
 
   async findAll() {
     return (await this.prisma.comment.findMany({ orderBy: { id: "asc" } })).map(toComment);
