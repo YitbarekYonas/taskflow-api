@@ -2,6 +2,7 @@ import type { Request, Response } from "express";
 import { projectService } from "../container.js";
 import type { NewProject, ProjectPatch } from "../schemas/project.schemas.js";
 import type { TaskQuery } from "../schemas/task.schemas.js";
+import {MergeProject, DuplicateProject} from "../schemas/project.schemas.js";
 
 export async function listTasks(_req: Request, res: Response) {
   const { id } = res.locals.params as { id: number };
@@ -34,4 +35,15 @@ export async function remove(_req: Request, res: Response) {
   const { id } = res.locals.params as { id: number };
   await projectService.deleteProject(id);
   res.status(204).end();
+}
+export async function duplicate(_req: Request, res: Response) {
+  const { id } = res.locals.params as { id: number };
+  const result = await projectService.duplicateProject(id, res.locals.body as DuplicateProject);
+  res.status(201).location(`/projects/${result.project.id}`).json({ data: result });
+}
+
+export async function merge(_req: Request, res: Response) {
+  const { id } = res.locals.params as { id: number };
+  const { intoProjectId } = res.locals.body as MergeProject;
+  res.json({ data: await projectService.mergeProjects(id, intoProjectId) });
 }
