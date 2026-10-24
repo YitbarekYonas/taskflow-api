@@ -18,7 +18,8 @@
     "db:n1": "tsx scripts/n-plus-one.ts",
     "db:bench-seed": "tsx scripts/seed-bench.ts",
     "db:bench-clean": "tsx scripts/seed-bench.ts --clean",
-    "bench": "tsx scripts/bench.ts"
+    "bench": "tsx scripts/bench.ts",
+    "db:tx-demo": "tsx scripts/tx-demo.ts"
   },
   "keywords": [
     "taskflow",
