@@ -51,6 +51,12 @@
 - **`EXPLAIN ANALYZE`:** Reading query plans to see `Seq Scan` vs `Index Scan` and measuring execution time.
 - **Search wildcards:** Discovering that `%` and `_` in `ILIKE` act as wildcards, matching everything if not escaped.
 
+### Week 3 (Transactions & Unit of Work)
+- **Atomicity:** Using `prisma.$transaction` to ensure that either all operations in a block succeed or none do. This prevents half-copied projects or orphaned tasks.
+- **The `tx` rule:** Inside an interactive transaction, every query *must* use the `tx` client. If you accidentally call `prisma`, it runs outside the transaction and won't roll back.
+- **Unit of Work pattern:** An interface (`UnitOfWork`) that wraps `$transaction` and provides repositories bound to that transaction. Services stay decoupled from Prisma.
+- **Deadlocks:** How concurrent transactions touching the same rows in different orders can lock each other up. Fixed by locking in a consistent order or retrying (`P2034`).
+
 ## Checkpoint answers (Days 2–6)
 
 *(Skipped or filled in as you go)*
@@ -169,6 +175,20 @@
 6. **Why can't a normal index speed up `ILIKE '%text%'`?**
    > A standard index is sorted from left to right. A leading wildcard (`%text`) means the database has no starting point to search from, forcing it to scan every row.
 
+## Day 19 Checkpoint Answers
+1. **Which of today's operations needed an explicit transaction, and why didn't `updateMany` alone?**
+   > `duplicateProject` needed one because it inserts a project and then many tasks (multiple statements). `mergeProjects` needed one because it moves tasks *and* deletes the source project. A single `updateMany` is atomic by itself, but separate statements are not.
+2. **What happens if you call `prisma.x` instead of `tx.x` inside an interactive transaction?**
+   > That specific query runs *outside* the transaction. If the transaction rolls back later, the changes made by `prisma.x` are not rolled back. We saw this in the demo when `prisma.task.create` left a stray task.
+3. **Why does `mergeProjects` still check that the target exists, when a foreign key exists?**
+   > Because moving *zero* tasks means the database never evaluates the foreign key on the target. If the target doesn't exist, the merge would succeed (moving nothing) and delete the source, leaving an empty invalid state.
+4. **What's a deadlock, how did you create one, and what two strategies avoid or handle it?**
+   > A deadlock happens when two transactions wait for locks held by each other. (We created one by updating row X then Y in one terminal, and Y then X in another). Strategies: 1) Retry the transaction (`P2034`), 2) Lock rows in a consistent order (`ORDER BY id`).
+5. **Why should you never send an email or call an external API inside a transaction?**
+   > The transaction holds a database connection and locks. If the external API is slow or fails, the transaction stays open longer, blocking other requests and risking timeouts.
+6. **What does the `UnitOfWork` interface buy you?**
+   > It hides Prisma's `$transaction` from the service layer. Services just say "run these operations atomically" without importing or knowing about Prisma, making them easier to test and swap.
+
 ## API Conventions (Day 13 Audit)
 - **POST:** Returns `201` and a `Location` header.
 - **Errors:** All errors use the `{ "error": { "message": "..." } }` shape.
@@ -180,8 +200,9 @@
 *(Each of these is fixed by a specific upcoming week, showing forward planning).*
 
 1. **Search Wildcards:** Searching for `%` or `_` returns all tasks because SQL `LIKE` interprets them as wildcards. To fix, escape these characters in the service layer before querying.
-2. **Unauthenticated Authors:** The `author` field for comments is currently a plain string supplied by the client. Anyone can pretend to be anyone. This will be fixed in **Week 4** when we add JWT authentication.
-3. **No Automated Tests:** We currently rely on a manual `npm run smoke` test. Proper unit and integration tests will be added in **Week 5**.
+2. **No Retries on `P2034`:** We haven't implemented automatic retries for deadlocks yet. If two merges clash, the user must retry manually.
+3. **Unauthenticated Authors:** The `author` field for comments is currently a plain string supplied by the client. Anyone can pretend to be anyone. This will be fixed in **Week 4** when we add JWT authentication.
+4. **No Automated Tests:** We currently rely on a manual `npm run smoke` test. Proper unit and integration tests will be added in **Week 5**.
 
 ## Week 1 summary
 Three things I can do now that I couldn't on Day 1:
