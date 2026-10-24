@@ -5,11 +5,13 @@ import { PrismaTaskRepository } from "./repositories/prisma/task.repository.js";
 import { createCommentService } from "./services/comments.service.js";
 import { createProjectService } from "./services/projects.service.js";
 import { createTaskService } from "./services/tasks.service.js";
+import { PrismaUnitOfWork } from "./repositories/prisma/unitOfWork.js";
 
 const tasks = new PrismaTaskRepository(prisma);
 const projects = new PrismaProjectRepository(prisma);
 const comments = new PrismaCommentRepository(prisma);
+const uow = new PrismaUnitOfWork(prisma);
 
+export const projectService = createProjectService({ projects, tasks, uow });
 export const taskService = createTaskService({ tasks });
-export const projectService = createProjectService({ projects, tasks });
 export const commentService = createCommentService({ comments, tasks });

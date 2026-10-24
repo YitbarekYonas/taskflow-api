@@ -14,5 +14,17 @@ export const updateProjectSchema = createProjectSchema
     message: "Provide at least one field to update",
   });
 
+  // The body is optional: POST /projects/1/duplicate with no body is fine
+export const duplicateProjectSchema = z
+  .object({ name: z.string().trim().min(1).max(100).optional() })
+  .strict()
+  .default({});
+
+export const mergeProjectSchema = z
+  .object({ intoProjectId: z.number().int().positive() })
+  .strict();
+
+export type DuplicateProject = z.infer<typeof duplicateProjectSchema>;
+export type MergeProject = z.infer<typeof mergeProjectSchema>;
 export type NewProject = z.infer<typeof createProjectSchema>;
 export type ProjectPatch = z.infer<typeof updateProjectSchema>;

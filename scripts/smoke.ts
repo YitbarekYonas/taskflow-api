@@ -33,7 +33,31 @@ async function expectStatus(name: string, expected: number, method: string, path
   }
   return r;
 }
+// Transactions: duplicate and merge
+const a = (await expectStatus("tx: create project A", 201, "POST", "/projects", { name: "Merge A" })).json.data.id;
+const b = (await expectStatus("tx: create project B", 201, "POST", "/projects", { name: "Merge B" })).json.data.id;
+const at = (await expectStatus("tx: task in A", 201, "POST", "/tasks", { title: "Move me", projectId: a })).json.data.id;
 
+const dup = await expectStatus("duplicate A", 201, "POST", `/projects/${a}/duplicate`, { name: "Merge A copy" });
+check("  duplicate copied 1 task", dup.json.data.copiedTasks === 1, JSON.stringify(dup.json));
+check("  Location points to the copy", dup.headers.get("location") === `/projects/${dup.json.data.project.id}`);
+const copyId = dup.json.data.project.id;
+
+await expectStatus("merge into itself", 400, "POST", `/projects/${a}/merge`, { intoProjectId: a });
+await expectStatus("merge into missing project", 400, "POST", `/projects/${a}/merge`, { intoProjectId: 999999 });
+await expectStatus("merge missing source", 404, "POST", "/projects/999999/merge", { intoProjectId: b });
+const merged = await expectStatus("merge A into B", 200, "POST", `/projects/${a}/merge`, { intoProjectId: b });
+check("  moved 1 task", merged.json.data.movedTasks === 1, JSON.stringify(merged.json));
+await expectStatus("source gone after merge", 404, "GET", `/projects/${a}`);
+const inB = await call("GET", `/tasks?projectId=${b}`);
+check("  B now holds the task", inB.json.data.some((t: { id: number }) => t.id === at));
+
+// cleanup
+const copyTasks = await call("GET", `/tasks?projectId=${copyId}`);
+for (const t of copyTasks.json.data) await call("DELETE", `/tasks/${t.id}`);
+await expectStatus("cleanup copy", 204, "DELETE", `/projects/${copyId}`);
+await call("DELETE", `/tasks/${at}`);
+await expectStatus("cleanup B", 204, "DELETE", `/projects/${b}`);
 // Happy path
 await expectStatus("health", 200, "GET", "/health");
 const project = await expectStatus("create project", 201, "POST", "/projects", { name: "Smoke project" });

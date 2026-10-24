@@ -5,7 +5,7 @@ A team task-management API built with Node.js, Express, TypeScript, and Prisma.
 ## Features
 - **CLI:** Add, list, start, complete, delete, filter, and export tasks (CSV).
 - **HTTP API:** Full CRUD for tasks, projects, and comments, with SQL-powered pagination, sorting, searching, and filtering.
-- **Core:** Repository pattern, Zod validation, strict TypeScript, and centralized error handling.
+- **Core:** Repository pattern, Unit of Work for transactions, Zod validation, strict TypeScript, and centralized error handling.
 - **Database:** PostgreSQL with Prisma ORM, enforcing referential integrity, cascading deletes, and composite indexes for fast queries.
 - **Production Middleware:** Security headers (Helmet), CORS, Request IDs, and body size limits.
 
@@ -81,6 +81,8 @@ npm run smoke
 | PATCH | `/projects/:id` | Update a project | 200 |
 | DELETE | `/projects/:id` | Delete a project (fails with 409 if it has tasks) | 204 |
 | GET | `/projects/:id/tasks` | List the tasks of one project | 200 |
+| POST | `/projects/:id/duplicate` | Duplicate a project and its tasks (transaction) | 201 |
+| POST | `/projects/:id/merge` | Merge this project into another (transaction) | 200 |
 
 ### Comments
 | Method | Path | Description | Success |
@@ -128,10 +130,10 @@ HTTP request
   → route (validate params / query / body)
   → controller (HTTP in, HTTP out)
   → service (business rules)
-  → repository (SQL queries via Prisma)
+  → UnitOfWork (transactions) → repository (SQL queries via Prisma)
 ```
 
-The repository pattern decouples business logic from data storage. Services depend on a `Repository<T>` interface, not a specific implementation. Listing, filtering, sorting, and pagination are handled directly by PostgreSQL using `WHERE`, `ORDER BY`, `LIMIT`, and `OFFSET`.
+The repository pattern decouples business logic from data storage. Services depend on a `Repository<T>` interface, not a specific implementation. Listing, filtering, sorting, and pagination are handled directly by PostgreSQL using `WHERE`, `ORDER BY`, `LIMIT`, and `OFFSET`. Multi-step operations (like `duplicate` and `merge`) run through a `UnitOfWork`, ensuring they succeed or fail atomically without leaking Prisma details into the services.
 
 ## Performance
 
@@ -206,7 +208,7 @@ src/
 ├── docs/                 # OpenAPI spec
 ├── generated/prisma/     # Auto-generated Prisma Client (gitignored)
 ├── schemas/              # Zod validation
-├── repositories/         # Data storage: interface, Prisma impl
+├── repositories/         # Data storage: interface, Prisma impl, UnitOfWork
 ├── services/             # Business logic: tasks, projects, comments, queries
 ├── middleware/           # Logger, validation, error handling, request IDs
 ├── controllers/          # HTTP logic
@@ -219,9 +221,10 @@ Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CO
 ## Roadmap
 - [x] Week 1 — CLI core
 - [x] Week 2 — Express API (CRUD, pagination, filtering, repository pattern, projects, comments, production middleware, OpenAPI docs)
-- [x] Week 3 — PostgreSQL & Prisma (Schema, Migrations, ORM integration, Constraints, SQL Pagination)
+- [x] Week 3 — PostgreSQL & Prisma (Schema, Migrations, ORM integration, Constraints, SQL Pagination, Transactions)
 - [ ] Week 4 — Auth (JWT)
 
 ## Known Limitations
 1. **Unauthenticated Authors:** Comment authors are supplied by the client as plain strings. This will be replaced by authenticated user IDs in Week 4.
 2. **Search Wildcards:** Searching for `%` or `_` returns all tasks because SQL `LIKE` interprets them as wildcards. To fix, escape these characters in the service layer before querying.
+3. **No Retries on `P2034`:** We haven't implemented automatic retries for deadlocks yet. If two merges clash, the user must retry manually.
