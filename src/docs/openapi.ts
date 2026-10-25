@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { createCommentSchema, updateCommentSchema } from "../schemas/comment.schemas.js";
-import { createProjectSchema, updateProjectSchema } from "../schemas/project.schemas.js";
+import { createProjectSchema, duplicateProjectSchema, mergeProjectSchema, updateProjectSchema } from "../schemas/project.schemas.js";
 import { SORT_FIELDS, createTaskSchema, updateTaskSchema } from "../schemas/task.schemas.js";
 import { PRIORITIES, STATUSES, commentSchema, projectSchema, taskSchema } from "../types.js";
 
@@ -242,6 +242,60 @@ export const openApiSpec = {
         tags: ["Comments"],
         summary: "Delete a comment",
         responses: { 204: noContent, 400: errorRef("BadRequest"), 404: errorRef("NotFound") },
+      },
+    },    "/projects/{id}/duplicate": {
+      parameters: [{ $ref: "#/components/parameters/Id" }],
+      post: {
+        tags: ["Projects"],
+        summary: "Duplicate a project and its tasks",
+        description: "Runs in one transaction. Copied tasks start as `todo`. The body is optional.",
+        requestBody: { required: false, content: json(schemaOf(duplicateProjectSchema)) },
+        responses: {
+          201: {
+            description: "The new project and how many tasks were copied",
+            headers: { Location: { schema: { type: "string" } } },
+            content: json({
+              type: "object",
+              properties: {
+                data: {
+                  type: "object",
+                  properties: { project: ref("Project"), copiedTasks: { type: "integer" } },
+                },
+              },
+            }),
+          },
+          400: errorRef("BadRequest"),
+          404: errorRef("NotFound"),
+        },
+      },
+    },
+
+    "/projects/{id}/merge": {
+      parameters: [{ $ref: "#/components/parameters/Id" }],
+      post: {
+        tags: ["Projects"],
+        summary: "Merge this project into another",
+        description:
+          "Moves every task into the target project and deletes this one, in one transaction. " +
+          "409 if tasks were added to this project while the merge was running.",
+        requestBody: { required: true, content: json(schemaOf(mergeProjectSchema)) },
+        responses: {
+          200: {
+            description: "The target project and how many tasks moved",
+            content: json({
+              type: "object",
+              properties: {
+                data: {
+                  type: "object",
+                  properties: { project: ref("Project"), movedTasks: { type: "integer" } },
+                },
+              },
+            }),
+          },
+          400: errorRef("BadRequest"),
+          404: errorRef("NotFound"),
+          409: errorRef("Conflict"),
+        },
       },
     },
   },

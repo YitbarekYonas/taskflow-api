@@ -30,10 +30,9 @@ cp .env.example .env
    ```
    *(If you don't have it yet: `docker run --name taskflow-db -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=taskflow -p 5432:5432 -d postgres:17`)*
 
-2. Run the database migrations:
+2. Rebuild the database and seed it with sample data:
    ```bash
-   npm run db:migrate
-   npm run db:generate
+   npm run db:fresh
    ```
 
 ### Verify
@@ -48,6 +47,17 @@ npm run cli -- list  # Run CLI
 npm run build   # Build for production
 npm start       # Run compiled JS
 ```
+
+## Database Workflow
+
+| Task | Command |
+|---|---|
+| Start the database | `docker start taskflow-db` |
+| Apply migrations and create new ones (dev) | `npm run db:migrate` |
+| Apply migrations only (CI, production) | `npm run db:deploy` |
+| Rebuild the dev database with sample data | `npm run db:fresh` |
+| Add sample data (safe to repeat) | `npm run db:seed` |
+| Verify migrations from scratch | `npm run db:check-migrations` |
 
 ## Documentation & Testing
 
@@ -75,7 +85,7 @@ npm run smoke
 ### Projects
 | Method | Path | Description | Success |
 |--------|------|-------------|---------|
-| GET | `/projects` | List all projects (includes `taskCount`) | 200 |
+| GET | `/projects` | List all projects (includes `taskCount` and `slug`) | 200 |
 | GET | `/projects/:id` | Get one project | 200 |
 | POST | `/projects` | Create a project | 201 |
 | PATCH | `/projects/:id` | Update a project | 200 |
@@ -170,7 +180,8 @@ erDiagram
          string email UK
          string name }
   PROJECT { int id PK
-            string name }
+            string name
+            string slug UK }
   PROJECT_MEMBER { int projectId PK
                    int userId PK
                    string role }
@@ -184,7 +195,7 @@ erDiagram
   COMMENT { int id PK
             int taskId FK
             string author
-            string body }
+            string content }
 ```
 
 ## Production Middleware
@@ -198,6 +209,7 @@ erDiagram
 ```
 prisma/
 ├── schema.prisma         # Database schema
+├── seed.ts               # Development seed data
 └── migrations/           # SQL migration history
 
 src/
@@ -209,7 +221,7 @@ src/
 ├── generated/prisma/     # Auto-generated Prisma Client (gitignored)
 ├── schemas/              # Zod validation
 ├── repositories/         # Data storage: interface, Prisma impl, UnitOfWork
-├── services/             # Business logic: tasks, projects, comments, queries
+├── services/             # Business logic: tasks, projects, comments, queries, slugs
 ├── middleware/           # Logger, validation, error handling, request IDs
 ├── controllers/          # HTTP logic
 └── routes/               # Express routes
@@ -221,7 +233,7 @@ Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CO
 ## Roadmap
 - [x] Week 1 — CLI core
 - [x] Week 2 — Express API (CRUD, pagination, filtering, repository pattern, projects, comments, production middleware, OpenAPI docs)
-- [x] Week 3 — PostgreSQL & Prisma (Schema, Migrations, ORM integration, Constraints, SQL Pagination, Transactions)
+- [x] Week 3 — PostgreSQL & Prisma (Schema, Migrations, ORM integration, Constraints, SQL Pagination, Transactions, Seeding)
 - [ ] Week 4 — Auth (JWT)
 
 ## Known Limitations

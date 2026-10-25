@@ -11,16 +11,25 @@ function toProject(row: ProjectRow): Project {
   return {
     id: row.id,
     name: row.name,
+     slug: row.slug,
     description: row.description ?? undefined,
     createdAt: row.createdAt.toISOString(),
   };
 }
 
 function toColumns(d: Partial<ProjectData>) {
-  const c: { name?: string; description?: string | null; createdAt?: Date } = {};
+  const c: { 
+    name?: string; 
+    slug?: string; 
+    description?: string | null; 
+    createdAt?: Date 
+  } = {};
+  
   if (d.name !== undefined) c.name = d.name;
+  if (d.slug !== undefined) c.slug = d.slug; 
   if (d.createdAt !== undefined) c.createdAt = new Date(d.createdAt);
   if ("description" in d) c.description = d.description ?? null;
+  
   return c;
 }
 

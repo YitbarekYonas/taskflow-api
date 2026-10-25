@@ -19,7 +19,12 @@
     "db:bench-seed": "tsx scripts/seed-bench.ts",
     "db:bench-clean": "tsx scripts/seed-bench.ts --clean",
     "bench": "tsx scripts/bench.ts",
-    "db:tx-demo": "tsx scripts/tx-demo.ts"
+    "db:tx-demo": "tsx scripts/tx-demo.ts",
+    "db:seed": "prisma db seed",
+    "db:status": "prisma migrate status",
+    "db:deploy": "prisma migrate deploy",
+    "db:fresh": "prisma migrate reset --force && prisma db seed",
+    "db:check-migrations": "bash scripts/check-migrations.sh"
   },
   "keywords": [
     "taskflow",

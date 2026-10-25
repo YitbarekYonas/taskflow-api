@@ -37,5 +37,6 @@ export const projectSchema = z.object({
   name: z.string().min(1),
   description: z.string().optional(),
   createdAt: z.string(),
+  slug: z.string().min(1),
 });
 export type Project = z.infer<typeof projectSchema>;
