@@ -11,6 +11,7 @@ const USERS = [
 const PROJECTS = [
   {
     name: "TaskFlow API",
+    slug: "taskflow-api",
     description: "The backend you are building",
     tasks: [
       { title: "Design the schema", status: "done", priority: "high", dueDate: "2026-09-20" },
@@ -22,6 +23,7 @@ const PROJECTS = [
   },
   {
     name: "Website redesign",
+    slug: "taskflow-api",
     description: "A smaller project for variety",
     tasks: [
       { title: "Collect brand assets", status: "done", priority: "low", dueDate: undefined },
@@ -43,7 +45,7 @@ try {
     // name is not unique, so look it up first
     const project =
       (await prisma.project.findFirst({ where: { name: def.name } })) ??
-      (await prisma.project.create({ data: { name: def.name, description: def.description } }));
+      (await prisma.project.create({ data: { name: def.name,slug: def.slug, description: def.description } }));
 
     // membership has a composite primary key, so it can be upserted too
     for (const [i, user] of users.entries()) {

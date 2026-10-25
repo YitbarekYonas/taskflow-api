@@ -33,7 +33,58 @@ async function expectStatus(name: string, expected: number, method: string, path
   }
   return r;
 }
-// Transactions: duplicate and merge
+
+// --- Happy path ---
+await expectStatus("health", 200, "GET", "/health");
+const project = await expectStatus("create project", 201, "POST", "/projects", { name: "Smoke project" });
+const pid = project.json.data.id;
+check("  project has a slug", typeof project.json.data.slug === "string" && project.json.data.slug.length > 0);
+
+const task = await expectStatus("create task", 201, "POST", "/tasks", { title: "Smoke task", projectId: pid });
+const tid = task.json.data.id;
+check("  Location header on create", task.headers.get("location") === `/tasks/${tid}`);
+await expectStatus("get task", 200, "GET", `/tasks/${tid}`);
+const patched = await expectStatus("patch task", 200, "PATCH", `/tasks/${tid}`, { status: "done" });
+check("  patch changed the status", patched.json.data.status === "done");
+
+const list = await expectStatus("list with filters", 200, "GET", `/tasks?projectId=${pid}&limit=5`);
+check("  list has meta.total >= 1", list.json.meta.total >= 1);
+
+const p1 = await call("GET", "/tasks?sort=priority&order=desc&limit=5&page=1");
+const p2 = await call("GET", "/tasks?sort=priority&order=desc&limit=5&page=2");
+const pagedIds = [...p1.json.data, ...p2.json.data].map((t: { id: number }) => t.id);
+check("  pages with many ties never overlap", new Set(pagedIds).size === pagedIds.length);
+
+const comment = await expectStatus("add comment", 201, "POST", `/tasks/${tid}/comments`, { author: "Smoke", body: "Hello" });
+const cid = comment.json.data.id;
+await expectStatus("get comment", 200, "GET", `/tasks/${tid}/comments/${cid}`);
+
+const projectTasks = await expectStatus("tasks of project", 200, "GET", `/projects/${pid}/tasks`);
+check("  nested list contains the task", projectTasks.json.data.some((t: { id: number }) => t.id === tid));
+await expectStatus("tasks of missing project", 404, "GET", "/projects/999999/tasks");
+
+const projectList = await call("GET", "/projects");
+const mine = projectList.json.data.find((p: { id: number }) => p.id === pid);
+check("  project list has taskCount", mine?.taskCount === 1, JSON.stringify(mine));
+
+// --- Rules and failures ---
+await expectStatus("project with tasks cannot be deleted", 409, "DELETE", `/projects/${pid}`);
+await expectStatus("empty title", 400, "POST", "/tasks", { title: "" });
+await expectStatus("unknown field", 400, "POST", "/tasks", { title: "x", id: 1 });
+await expectStatus("malformed JSON", 400, "POST", "/tasks", "{bad json");
+await expectStatus("limit too large", 400, "GET", "/tasks?limit=1000");
+await expectStatus("non-numeric id", 400, "GET", "/tasks/abc");
+await expectStatus("empty patch", 400, "PATCH", `/tasks/${tid}`, {});
+await expectStatus("task in missing project", 400, "POST", "/tasks", { title: "x", projectId: 999999 });
+await expectStatus("missing task", 404, "GET", "/tasks/999999");
+await expectStatus("unknown route", 404, "GET", "/nope");
+
+// --- Ownership: a comment must not be reachable through a different task ---
+const other = await expectStatus("create second task", 201, "POST", "/tasks", { title: "Other task" });
+const oid = other.json.data.id;
+await expectStatus("comment via wrong task", 404, "GET", `/tasks/${oid}/comments/${cid}`);
+
+// --- Transactions: duplicate and merge ---
 const a = (await expectStatus("tx: create project A", 201, "POST", "/projects", { name: "Merge A" })).json.data.id;
 const b = (await expectStatus("tx: create project B", 201, "POST", "/projects", { name: "Merge B" })).json.data.id;
 const at = (await expectStatus("tx: task in A", 201, "POST", "/tasks", { title: "Move me", projectId: a })).json.data.id;
@@ -52,61 +103,18 @@ await expectStatus("source gone after merge", 404, "GET", `/projects/${a}`);
 const inB = await call("GET", `/tasks?projectId=${b}`);
 check("  B now holds the task", inB.json.data.some((t: { id: number }) => t.id === at));
 
-// cleanup
-const copyTasks = await call("GET", `/tasks?projectId=${copyId}`);
-for (const t of copyTasks.json.data) await call("DELETE", `/tasks/${t.id}`);
-await expectStatus("cleanup copy", 204, "DELETE", `/projects/${copyId}`);
-await call("DELETE", `/tasks/${at}`);
-await expectStatus("cleanup B", 204, "DELETE", `/projects/${b}`);
-// Happy path
-await expectStatus("health", 200, "GET", "/health");
-const project = await expectStatus("create project", 201, "POST", "/projects", { name: "Smoke project" });
-const pid = project.json.data.id;
-const task = await expectStatus("create task", 201, "POST", "/tasks", { title: "Smoke task", projectId: pid });
-const tid = task.json.data.id;
-check("  Location header on create", task.headers.get("location") === `/tasks/${tid}`);
-await expectStatus("get task", 200, "GET", `/tasks/${tid}`);
-const patched = await expectStatus("patch task", 200, "PATCH", `/tasks/${tid}`, { status: "done" });
-check("  patch changed the status", patched.json.data.status === "done");
-const list = await expectStatus("list with filters", 200, "GET", `/tasks?projectId=${pid}&limit=5`);
-check("  list has meta.total >= 1", list.json.meta.total >= 1);
-const p1 = await call("GET", "/tasks?sort=priority&order=desc&limit=5&page=1");
-const p2 = await call("GET", "/tasks?sort=priority&order=desc&limit=5&page=2");
-const pagedIds = [...p1.json.data, ...p2.json.data].map((t: { id: number }) => t.id);
-check("  pages with many ties never overlap", new Set(pagedIds).size === pagedIds.length);
-const comment = await expectStatus("add comment", 201, "POST", `/tasks/${tid}/comments`, { author: "Smoke", body: "Hello" });
-const cid = comment.json.data.id;
-await expectStatus("get comment", 200, "GET", `/tasks/${tid}/comments/${cid}`);
-const projectTasks = await expectStatus("tasks of project", 200, "GET", `/projects/${pid}/tasks`);
-check("  nested list contains the task", projectTasks.json.data.some((t: { id: number }) => t.id === tid));
-await expectStatus("tasks of missing project", 404, "GET", "/projects/999999/tasks");
-const projectList = await call("GET", "/projects");
-const mine = projectList.json.data.find((p: { id: number }) => p.id === pid);
-check("  project list has taskCount", mine?.taskCount === 1, JSON.stringify(mine));
-
-// Rules and failures
-await expectStatus("project with tasks cannot be deleted", 409, "DELETE", `/projects/${pid}`);
-await expectStatus("empty title", 400, "POST", "/tasks", { title: "" });
-await expectStatus("unknown field", 400, "POST", "/tasks", { title: "x", id: 1 });
-await expectStatus("malformed JSON", 400, "POST", "/tasks", "{bad json");
-await expectStatus("limit too large", 400, "GET", "/tasks?limit=1000");
-await expectStatus("non-numeric id", 400, "GET", "/tasks/abc");
-await expectStatus("empty patch", 400, "PATCH", `/tasks/${tid}`, {});
-await expectStatus("task in missing project", 400, "POST", "/tasks", { title: "x", projectId: 999999 });
-await expectStatus("missing task", 404, "GET", "/tasks/999999");
-await expectStatus("unknown route", 404, "GET", "/nope");
-
-// Ownership: a comment must not be reachable through a different task
-const other = await expectStatus("create second task", 201, "POST", "/tasks", { title: "Other task" });
-const oid = other.json.data.id;
-await expectStatus("comment via wrong task", 404, "GET", `/tasks/${oid}/comments/${cid}`);
-
-// Cleanup (and cascade check)
+// --- Cleanup (and cascade check) ---
 await expectStatus("delete other task", 204, "DELETE", `/tasks/${oid}`);
 await expectStatus("delete task", 204, "DELETE", `/tasks/${tid}`);
 await expectStatus("deleted task again", 404, "DELETE", `/tasks/${tid}`);
 await expectStatus("comments of deleted task", 404, "GET", `/tasks/${tid}/comments`);
 await expectStatus("delete project", 204, "DELETE", `/projects/${pid}`);
+
+const copyTasks = await call("GET", `/tasks?projectId=${copyId}`);
+for (const t of copyTasks.json.data) await call("DELETE", `/tasks/${t.id}`);
+await expectStatus("cleanup copy", 204, "DELETE", `/projects/${copyId}`);
+await call("DELETE", `/tasks/${at}`);
+await expectStatus("cleanup B", 204, "DELETE", `/projects/${b}`);
 
 console.log(failures === 0 ? "\nAll checks passed." : `\n${failures} check(s) failed.`);
 process.exit(failures === 0 ? 0 : 1);

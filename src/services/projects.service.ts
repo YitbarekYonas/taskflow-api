@@ -7,6 +7,7 @@ import {buildMeta} from "./pagination.js";
 import { ConflictError, InUseError, InvalidReferenceError, NotFoundError, UserError } from "../errors.js";
 import type { UnitOfWork } from "../repositories/unitOfWork.js";
 import type { DuplicateProject } from "../schemas/project.schemas.js";
+import { makeSlug } from "./slug.js";
 
 type Deps = { projects: ProjectRepository; tasks: TaskRepository; uow: UnitOfWork };
 
@@ -20,6 +21,7 @@ export function createProjectService({ projects, tasks, uow }: Deps) {
   async function createProject(input: NewProject): Promise<Project> {
     return projects.insert({
       name: input.name,
+      slug: makeSlug(input.name),
       description: input.description,
       createdAt: new Date().toISOString(),
     });
@@ -59,6 +61,7 @@ export function createProjectService({ projects, tasks, uow }: Deps) {
       const now = new Date().toISOString();
       const copy = await tx.projects.insert({
         name: input.name ?? `${source.name} (copy)`,
+        slug: makeSlug(input.name ?? source.name),
         description: source.description,
         createdAt: now,
       });
