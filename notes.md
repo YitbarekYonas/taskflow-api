@@ -57,6 +57,13 @@
 - **Unit of Work pattern:** An interface (`UnitOfWork`) that wraps `$transaction` and provides repositories bound to that transaction. Services stay decoupled from Prisma.
 - **Deadlocks:** How concurrent transactions touching the same rows in different orders can lock each other up. Fixed by locking in a consistent order or retrying (`P2034`).
 
+### Week 3 (Migrations & Seeding)
+- **Migration Ledger:** Prisma stores checksums of applied migrations in `_prisma_migrations`. Editing an applied migration breaks the history.
+- **Safe Renames:** Prisma generates `DROP` + `ADD` for renames (data loss). Fixed by using `--create-only` and editing the SQL to `RENAME COLUMN`.
+- **Expand → Backfill → Contract:** Adding a `NOT NULL` column to a table with data requires three steps: add as nullable, update existing rows, then set to `NOT NULL`.
+- **Idempotent Seeds:** Using `upsert` so running the seed multiple times doesn't duplicate data.
+- **Migration Check Script:** Spinning up a scratch database, applying all migrations (`migrate deploy`), and using `migrate diff` to ensure `schema.prisma` matches the migrations.
+
 ## Checkpoint answers (Days 2–6)
 
 *(Skipped or filled in as you go)*
@@ -189,12 +196,34 @@
 6. **What does the `UnitOfWork` interface buy you?**
    > It hides Prisma's `$transaction` from the service layer. Services just say "run these operations atomically" without importing or knowing about Prisma, making them easier to test and swap.
 
+## Day 20 Checkpoint Answers
+1. **What's the difference between `migrate dev` and `migrate deploy`, and why must production only ever use the second?**
+   > `migrate dev` generates new migrations from schema changes, and it may offer to reset the database. `migrate deploy` only applies pending migrations and never resets. Production must use `deploy` because resetting would delete real user data.
+2. **Why does Prisma generate `DROP` + `ADD` for a rename, and how did you turn it into a rename?**
+   > Prisma only sees the before and after schema; it can't know that `body` and `content` are the same data. We used `--create-only` to generate the SQL, then hand-edited it to use `RENAME COLUMN`.
+3. **Why can't you add a `NOT NULL` column without a default to a table with rows, and what are the three steps that fix it?**
+   > Because existing rows would have no value for the new column. The three steps are: 1) add the column as nullable, 2) backfill existing rows with a value, 3) set the column to `NOT NULL` and add the unique index.
+4. **Why must you never edit a migration that has already been applied?**
+   > Prisma stores a checksum of the migration file in `_prisma_migrations`. If you change the file, the checksum no longer matches, and Prisma will block all future migrations until you reset the database.
+5. **What makes a seed script idempotent?**
+   > It uses `upsert` (or checks for existence) instead of `create`, so running it twice produces the same state without crashing or duplicating data.
+6. **What two different kinds of mistakes does `npm run db:check-migrations` catch?**
+   > 1) Migrations that fail to apply to an empty database (e.g., syntax errors). 2) A schema that has drifted from the migrations (e.g., you edited `schema.prisma` but forgot to run `migrate dev`).
+
 ## API Conventions (Day 13 Audit)
 - **POST:** Returns `201` and a `Location` header.
 - **Errors:** All errors use the `{ "error": { "message": "..." } }` shape.
 - **Lists:** All list responses are wrapped in a `data` array. Projects do not have `meta` yet because we haven't added pagination to them.
 - **Casing:** All JSON field names are `camelCase`.
 - **Status Codes:** 400 (bad input), 404 (missing URL resource), 409 (state conflict).
+
+## Migration Rules (Day 20)
+- Never edit an applied migration (Prisma checks the checksum).
+- Rename columns with `RENAME COLUMN`, not `DROP` + `ADD`.
+- Adding a required column: expand (nullable) → backfill → contract (`NOT NULL`).
+- `migrate dev` on your laptop; `migrate deploy` in CI and production.
+- Seeds are idempotent (`upsert`) and never run in production.
+- `npm run db:check-migrations` verifies migrations from scratch.
 
 ## Known limitations
 *(Each of these is fixed by a specific upcoming week, showing forward planning).*
