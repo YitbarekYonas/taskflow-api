@@ -58,7 +58,7 @@ export const openApiSpec = {
   openapi: "3.1.0",
   info: {
     title: "TaskFlow API",
-    version: "0.2.0",
+    version: "0.3.0",
     description:
       "A task-management API built with Node.js, Express and TypeScript.\n\n" +
       "All errors share one shape: `{ \"error\": { \"message\": \"...\" } }`. " +

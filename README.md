@@ -19,21 +19,10 @@ A team task-management API built with Node.js, Express, TypeScript, and Prisma.
 ```bash
 git clone https://github.com/YitbarekYonas/taskflow-api.git
 cd taskflow-api
-npm install
 cp .env.example .env
+npm install
+npm run setup
 ```
-
-### Database
-1. Start the PostgreSQL container:
-   ```bash
-   docker start taskflow-db
-   ```
-   *(If you don't have it yet: `docker run --name taskflow-db -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=taskflow -p 5432:5432 -d postgres:17`)*
-
-2. Rebuild the database and seed it with sample data:
-   ```bash
-   npm run db:fresh
-   ```
 
 ### Verify
 ```bash
@@ -52,7 +41,8 @@ npm start       # Run compiled JS
 
 | Task | Command |
 |---|---|
-| Start the database | `docker start taskflow-db` |
+| Start the database | `npm run db:up` |
+| Stop the database | `npm run db:down` |
 | Apply migrations and create new ones (dev) | `npm run db:migrate` |
 | Apply migrations only (CI, production) | `npm run db:deploy` |
 | Rebuild the dev database with sample data | `npm run db:fresh` |
@@ -240,3 +230,9 @@ Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CO
 1. **Unauthenticated Authors:** Comment authors are supplied by the client as plain strings. This will be replaced by authenticated user IDs in Week 4.
 2. **Search Wildcards:** Searching for `%` or `_` returns all tasks because SQL `LIKE` interprets them as wildcards. To fix, escape these characters in the service layer before querying.
 3. **No Retries on `P2034`:** We haven't implemented automatic retries for deadlocks yet. If two merges clash, the user must retry manually.
+4. **No CI:** We don't have a GitHub Actions pipeline yet. This will be added in Week 7.
+5. **Offset pagination is slow on deep pages:** `OFFSET 49980` still walks past 49,980 rows. This will be fixed in Week 5 with keyset pagination.
+6. **`ILIKE` search lacks a trigram index:** The search is slow on large tables because it does a full scan. This will be fixed in Week 5.
+7. **CSV export loads all rows:** The export uses `findAll()`, which loads the entire table into memory. This will be fixed in Week 5 with a streaming query.
+8. **`/health` doesn't check the database:** It returns `ok` even if Postgres is down. This will be fixed in Week 7 with a proper readiness check.
+9. **The API is fully public:** There is no authentication or authorization yet. This will be fixed in Week 4.

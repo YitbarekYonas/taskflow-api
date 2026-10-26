@@ -1,0 +1,22 @@
+# Development database only. Week 7 adds the app itself.
+# These credentials are for local development. Never reuse them anywhere real.
+services:
+  db:
+    image: postgres:17
+    container_name: taskflow-db   # keeps scripts/check-migrations.sh working
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: taskflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d taskflow"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  pgdata:
