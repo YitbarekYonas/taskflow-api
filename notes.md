@@ -232,6 +232,12 @@
 2. **No Retries on `P2034`:** We haven't implemented automatic retries for deadlocks yet. If two merges clash, the user must retry manually.
 3. **Unauthenticated Authors:** The `author` field for comments is currently a plain string supplied by the client. Anyone can pretend to be anyone. This will be fixed in **Week 4** when we add JWT authentication.
 4. **No Automated Tests:** We currently rely on a manual `npm run smoke` test. Proper unit and integration tests will be added in **Week 5**.
+5. **No CI:** We don't have a GitHub Actions pipeline yet. This will be added in **Week 7**.
+6. **Offset pagination is slow on deep pages:** `OFFSET 49980` still walks past 49,980 rows. This will be fixed in **Week 5** with keyset pagination.
+7. **`ILIKE` search lacks a trigram index:** The search is slow on large tables because it does a full scan. This will be fixed in **Week 5**.
+8. **CSV export loads all rows:** The export uses `findAll()`, which loads the entire table into memory. This will be fixed in **Week 5** with a streaming query.
+9. **`/health` doesn't check the database:** It returns `ok` even if Postgres is down. This will be fixed in **Week 7** with a proper readiness check.
+10. **The API is fully public:** There is no authentication or authorization yet. This will be fixed in **Week 4**.
 
 ## Week 1 summary
 Three things I can do now that I couldn't on Day 1:
@@ -258,3 +264,19 @@ What I'd do differently:
 
 One thing I want to get better at in Week 3:
 - Writing raw SQL and understanding database constraints.
+
+## Week 3 summary
+Three things I can do now that I couldn't on Day 15:
+- Design database schemas with relations and constraints.
+- Write and safely apply migrations to a database with existing data.
+- Use transactions to keep multi-step operations atomic.
+
+Things that confused me:
+- The difference between `migrate dev` and `migrate deploy`.
+- Why a rename requires `RENAME COLUMN` instead of `DROP` + `ADD`.
+
+What I'd do differently:
+- Write the migration check script earlier so I catch schema drift sooner.
+
+One thing I want to get better at in Week 4:
+- Implementing authentication and authorization securely.
