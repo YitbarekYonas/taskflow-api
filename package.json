@@ -1,6 +1,6 @@
 {
   "name": "taskflow",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Task manager API built with Node.js, Express, and TypeScript",
   "main": "index.js",
   "scripts": {
@@ -24,7 +24,10 @@
     "db:status": "prisma migrate status",
     "db:deploy": "prisma migrate deploy",
     "db:fresh": "prisma migrate reset --force && prisma db seed",
-    "db:check-migrations": "bash scripts/check-migrations.sh"
+    "db:check-migrations": "bash scripts/check-migrations.sh",
+    "db:up": "docker compose up -d --wait",
+    "db:down": "docker compose down",
+    "setup": "npm run db:up && npm run db:deploy && npm run db:generate && npm run db:seed"
   },
   "keywords": [
     "taskflow",
