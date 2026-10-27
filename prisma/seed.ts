@@ -23,7 +23,7 @@ const PROJECTS = [
   },
   {
     name: "Website redesign",
-    slug: "taskflow-api",
+    slug: "website-redesign",
     description: "A smaller project for variety",
     tasks: [
       { title: "Collect brand assets", status: "done", priority: "low", dueDate: undefined },
