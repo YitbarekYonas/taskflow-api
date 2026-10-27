@@ -40,3 +40,10 @@ export const projectSchema = z.object({
   slug: z.string().min(1),
 });
 export type Project = z.infer<typeof projectSchema>;
+export const userSchema = z.object({
+  id: z.number().int().positive(),
+  email: z.string().email(),
+  name: z.string().min(1),
+  createdAt: z.string(),
+});
+export type User = z.infer<typeof userSchema>;
