@@ -67,6 +67,23 @@ const projectList = await call("GET", "/projects");
 const mine = projectList.json.data.find((p: { id: number }) => p.id === pid);
 check("  project list has taskCount", mine?.taskCount === 1, JSON.stringify(mine));
 
+// Registration
+const stamp = Date.now();
+const email = `smoke+${stamp}@example.com`;
+const reg = await expectStatus("register", 201, "POST", "/auth/register", {
+  email: ` Smoke+${stamp}@Example.com `, name: "Smoke", password: "smoke-test-password",
+});
+check("  email normalised", reg.json.data.email === email, JSON.stringify(reg.json));
+check("  no password or hash in response", !JSON.stringify(reg.json).toLowerCase().includes("password"));
+await expectStatus("duplicate email", 409, "POST", "/auth/register", {
+  email: email.toUpperCase(), name: "Dup", password: "smoke-test-password",
+});
+await expectStatus("short password", 400, "POST", "/auth/register", { email: `x${stamp}@example.com`, name: "X", password: "short" });
+await expectStatus("bad email", 400, "POST", "/auth/register", { email: "nope", name: "X", password: "smoke-test-password" });
+await expectStatus("role injection", 400, "POST", "/auth/register", {
+  email: `y${stamp}@example.com`, name: "Y", password: "smoke-test-password", role: "admin",
+});
+
 // --- Rules and failures ---
 await expectStatus("project with tasks cannot be deleted", 409, "DELETE", `/projects/${pid}`);
 await expectStatus("empty title", 400, "POST", "/tasks", { title: "" });
