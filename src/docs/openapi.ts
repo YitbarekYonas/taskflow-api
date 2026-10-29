@@ -4,6 +4,7 @@ import { createProjectSchema, duplicateProjectSchema, mergeProjectSchema, update
 import { SORT_FIELDS, createTaskSchema, updateTaskSchema } from "../schemas/task.schemas.js";
 import { PRIORITIES, STATUSES, commentSchema, projectSchema, taskSchema,userSchema } from "../types.js";
 import { registerSchema } from "../schemas/auth.schemas.js";
+import {loginSchema} from "../schemas/auth.schemas.js";
 
 function schemaOf(schema: z.ZodType, io: "input" | "output" = "input") {
   const { $schema, ...rest } = z.toJSONSchema(schema, { io }) as Record<string, unknown>;
@@ -20,7 +21,7 @@ const listOf = (name: string) => ({
   type: "object",
   properties: { data: { type: "array", items: ref(name) } },
 });
-const errorRef = (name: "BadRequest" | "NotFound" | "Conflict") => ({
+const errorRef = (name:"BadRequest" | "NotFound" | "Conflict" | "Unauthorized") => ({
   $ref: `#/components/responses/${name}`,
 });
 const query = (name: string, schema: object, description?: string) => ({
@@ -315,6 +316,46 @@ export const openApiSpec = {
         },
       },
     },
+        "/auth/login": {
+      post: {
+        tags: ["Auth"],
+        summary: "Log in",
+        description:
+          "Returns a short-lived access token. Every failure returns the same 401 message " +
+          "(\"Invalid email or password.\") so the response never reveals whether an email exists.",
+        requestBody: { required: true, content: json(schemaOf(loginSchema)) },
+        responses: {
+          200: {
+            description: "Logged in",
+            content: json({
+              type: "object",
+              properties: {
+                data: {
+                  type: "object",
+                  properties: {
+                    accessToken: { type: "string" },
+                    tokenType: { type: "string", example: "Bearer" },
+                    expiresIn: { type: "integer", description: "Seconds until the token expires" },
+                    user: ref("User"),
+                  },
+                },
+              },
+            }),
+          },
+          400: errorRef("BadRequest"),
+          401: errorRef("Unauthorized"),
+        },
+      },
+    },
+
+    "/auth/me": {
+      get: {
+        tags: ["Auth"],
+        summary: "The logged-in user",
+        security: [{ bearerAuth: [] }],
+        responses: { 200: ok("User"), 401: errorRef("Unauthorized") },
+      },
+    },
   },
 
   components: {
@@ -378,6 +419,13 @@ export const openApiSpec = {
         description: "The request is valid but conflicts with the current state",
         content: json(ref("Error")),
       },
+            Unauthorized: {
+        description: "Missing, invalid or expired credentials",
+        content: json(ref("Error")),
+      },
+    },
+    securitySchemes: {
+      bearerAuth: { type: "http", scheme: "bearer", bearerFormat: "JWT" },
     },
   },
 };
