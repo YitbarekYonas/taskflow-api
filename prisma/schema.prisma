@@ -28,8 +28,7 @@ model User {
   id           Int      @id @default(autoincrement())
   email        String   @unique
   name         String
-  // optional for now; Week 4 (auth) makes it required
-  passwordHash String?  @map("password_hash")
+  passwordHash String  @map("password_hash")
   createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
 
   memberships   ProjectMember[]

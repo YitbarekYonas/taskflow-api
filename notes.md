@@ -64,6 +64,15 @@
 - **Idempotent Seeds:** Using `upsert` so running the seed multiple times doesn't duplicate data.
 - **Migration Check Script:** Spinning up a scratch database, applying all migrations (`migrate deploy`), and using `migrate diff` to ensure `schema.prisma` matches the migrations.
 
+### Week 4 (Authentication & Hashing)
+- **Argon2id:** Deliberately slow and memory-hungry. The current standard for password hashing. Avoids SHA-256 (too fast) and MD5 (broken).
+- **Hashing vs Encryption:** Hashing is one-way, encryption is reversible. Passwords must be hashed, never encrypted.
+- **Salt:** A random value added to each password before hashing. Prevents rainbow table attacks. Argon2 stores the salt inside the hash string.
+- **Unique Constraints for Duplicates:** Instead of a racy "check then insert", let the database reject duplicate emails with a `P2002` error, mapped to a `409`.
+- **Mass Assignment:** Using `.strict()` in Zod to reject unknown fields like `role: "admin"` or `id: 1`.
+- **Email Normalization:** Trimming and lowercasing at the schema level so `Sam@Example.com` and `sam@example.com` are the same account.
+- **No Secrets in Responses:** The `User` type deliberately excludes `passwordHash` so the compiler prevents accidentally returning it.
+
 ## Checkpoint answers (Days 2–6)
 
 *(Skipped or filled in as you go)*
@@ -209,6 +218,22 @@
    > It uses `upsert` (or checks for existence) instead of `create`, so running it twice produces the same state without crashing or duplicating data.
 6. **What two different kinds of mistakes does `npm run db:check-migrations` catch?**
    > 1) Migrations that fail to apply to an empty database (e.g., syntax errors). 2) A schema that has drifted from the migrations (e.g., you edited `schema.prisma` but forgot to run `migrate dev`).
+
+## Day 22 Checkpoint Answers
+1. **Why is Argon2id better than SHA-256 for passwords, even though SHA-256 is "more secure" as a general hash?**
+   > Argon2id is deliberately slow and memory-hungry. SHA-256 is fast (billions of hashes per second on a GPU). For passwords, "slow" is a feature — it makes brute-force attacks impractical.
+2. **What's inside a stored Argon2 hash, and why can you raise the cost settings later without breaking old users?**
+   > The hash string contains the algorithm, version, cost settings (`m`, `t`, `p`), salt, and hash. When verifying, Argon2 reads the settings from the string, so old hashes still verify even after you raise the cost for new ones.
+3. **Why did eight parallel registrations produce exactly one `201`, and why is that better than checking `findByEmail` first?**
+   > The database's unique constraint on `email` is atomic. Eight parallel inserts race, but only one wins. A `findByEmail` check would have a race condition (two requests could both see "not found" and both try to insert).
+4. **Why is `passwordHash` missing from the `User` type, and what does that protect you from?**
+   > It's a safety feature. The TypeScript compiler will refuse to compile any code that tries to return `passwordHash` from a function typed as `User`.
+5. **Why do we lowercase and trim emails but never touch passwords?**
+   > Emails are identifiers, so normalization is required (`Sam@Example.com` and `sam@example.com` must be the same account). Passwords are secrets — even trimming a space could break a user's login.
+6. **What does a `409` on registration reveal, and why will login need to be more careful?**
+   > A `409` on registration reveals that an email is already registered (user enumeration). For login, we'll always return `401 "Invalid email or password"` without specifying which one was wrong, to prevent attackers from discovering valid emails.
+7. **Why can lots of simultaneous hashing hurt a server even though Argon2 doesn't block the event loop?**
+   > Argon2 uses libuv's thread pool (default: 4 threads). A flood of hashes queues up, consuming CPU and memory. This is why rate limiting is needed (Day 27).
 
 ## API Conventions (Day 13 Audit)
 - **POST:** Returns `201` and a `Location` header.

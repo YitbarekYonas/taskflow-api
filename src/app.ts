@@ -7,6 +7,7 @@ import { requestId } from "./middleware/requestId.js";
 import { requestLogger } from "./middleware/requestLogger.js";
 import { projectsRouter } from "./routes/projects.routes.js";
 import { tasksRouter } from "./routes/tasks.routes.js";
+import { authRouter } from "./routes/auth.routes.js";
 
 export function createApp() {
   const app = express();
@@ -30,6 +31,7 @@ export function createApp() {
   });
   app.use("/tasks", tasksRouter);
   app.use("/projects", projectsRouter);
+  app.use("/auth", authRouter);
 
   app.use(notFound);
   app.use(errorHandler);

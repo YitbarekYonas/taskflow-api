@@ -16,7 +16,7 @@ await prisma.projectMember.deleteMany();
 await prisma.project.deleteMany();
 await prisma.user.deleteMany();
 
-const sam = await prisma.user.create({ data: { email: "sam@example.com", name: "Sam" } });
+const sam = await prisma.user.create({ data: { email: "sam@example.com", name: "Sam",passwordHash: "!" } });
 const project = await prisma.project.create({
   data: {
     name: "TaskFlow API",
@@ -43,7 +43,7 @@ console.log(JSON.stringify(loaded, null, 2));
 
 // The rules the database enforces for you
 await expectFailure("duplicate email (unique)", () =>
-  prisma.user.create({ data: { email: "sam@example.com", name: "Clone" } })
+  prisma.user.create({ data: { email: "sam@example.com", name: "Clone",passwordHash: "!" } })
 );
 await expectFailure("task in missing project (foreign key)", () =>
   prisma.task.create({ data: { title: "Ghost", projectId: 99999 } })

@@ -1,5 +1,12 @@
 import { prisma } from "../src/db.js";
+import { hashPassword } from "../src/auth/password.js";
 
+if (process.env.NODE_ENV === "production") {
+  console.error("Refusing to seed fake users in production.");
+  process.exit(1);
+}
+
+const DEV_PASSWORD = "dev-password-123"; 
 const USERS = [
   { email: "sam@example.com", name: "Sam" },
   { email: "alex@example.com", name: "Alex" },
@@ -36,8 +43,12 @@ try {
   // Users: upsert on a unique column, so re-running never duplicates or crashes
   const users = [];
   for (const u of USERS) {
-    users.push(
-      await prisma.user.upsert({ where: { email: u.email }, update: { name: u.name }, create: u })
+        users.push(
+      await prisma.user.upsert({
+        where: { email: u.email },
+        update: { name: u.name },
+        create: { ...u, passwordHash: await hashPassword(DEV_PASSWORD) },
+      })
     );
   }
 

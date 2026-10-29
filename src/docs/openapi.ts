@@ -2,7 +2,8 @@ import { z } from "zod";
 import { createCommentSchema, updateCommentSchema } from "../schemas/comment.schemas.js";
 import { createProjectSchema, duplicateProjectSchema, mergeProjectSchema, updateProjectSchema } from "../schemas/project.schemas.js";
 import { SORT_FIELDS, createTaskSchema, updateTaskSchema } from "../schemas/task.schemas.js";
-import { PRIORITIES, STATUSES, commentSchema, projectSchema, taskSchema } from "../types.js";
+import { PRIORITIES, STATUSES, commentSchema, projectSchema, taskSchema,userSchema } from "../types.js";
+import { registerSchema } from "../schemas/auth.schemas.js";
 
 function schemaOf(schema: z.ZodType, io: "input" | "output" = "input") {
   const { $schema, ...rest } = z.toJSONSchema(schema, { io }) as Record<string, unknown>;
@@ -68,6 +69,7 @@ export const openApiSpec = {
   servers: [{ url: "/" }],
   tags: [
     { name: "System" },
+    { name: "Auth" },
     { name: "Tasks" },
     { name: "Projects" },
     { name: "Comments" },
@@ -213,6 +215,21 @@ export const openApiSpec = {
           404: errorRef("NotFound"),
         },
       },
+          "/auth/register": {
+      post: {
+        tags: ["Auth"],
+        summary: "Create an account",
+        description:
+          "Email is trimmed and lowercased. Passwords need 10 to 128 characters and are stored as Argon2id hashes. " +
+          "The response never contains the password or its hash.",
+        requestBody: { required: true, content: json(schemaOf(registerSchema)) },
+        responses: {
+          201: { description: "Account created", content: json(envelope("User")) },
+          400: errorRef("BadRequest"),
+          409: errorRef("Conflict"),
+        },
+      },
+    },
       post: {
         tags: ["Comments"],
         summary: "Add a comment to a task",
@@ -309,6 +326,7 @@ export const openApiSpec = {
     schemas: {
       Task: schemaOf(taskSchema, "output"),
       Project: schemaOf(projectSchema, "output"),
+      User: schemaOf(userSchema, "output"), 
       ProjectWithCount: {
         allOf: [
           ref("Project"),
