@@ -27,7 +27,9 @@
     "db:check-migrations": "bash scripts/check-migrations.sh",
     "db:up": "docker compose up -d --wait",
     "db:down": "docker compose down",
-    "setup": "npm run db:up && npm run db:deploy && npm run db:generate && npm run db:seed"
+    "setup": "npm run db:up && npm run db:deploy && npm run db:generate && npm run db:seed",
+    "test:tokens": "tsx scripts/token-attacks.ts",
+    "bench:login": "tsx scripts/login-timing.ts"
   },
   "keywords": [
     "taskflow",
