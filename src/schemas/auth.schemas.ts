@@ -7,5 +7,13 @@ export const registerSchema = z
     password: z.string().min(10, "Use at least 10 characters").max(128),
   })
   .strict();
+  
+export const loginSchema = z
+  .object({
+    email: z.string().trim().toLowerCase().min(1).max(254),
+    password: z.string().min(1).max(128),
+  })
+  .strict();
 
+export type LoginInput = z.infer<typeof loginSchema>;
 export type RegisterInput = z.infer<typeof registerSchema>;

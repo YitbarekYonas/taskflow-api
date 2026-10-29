@@ -5,7 +5,6 @@ import type { UserRecord, UserRepository } from "../userRepository.js";
 import type { Db } from "./db.js";
 import { isPrismaError } from "./errors.js";
 
-// Accepts a row with or without the hash: this function never reads it
 function toUser(row: Omit<UserRow, "passwordHash">): User {
   return { id: row.id, email: row.email, name: row.name, createdAt: row.createdAt.toISOString() };
 }
