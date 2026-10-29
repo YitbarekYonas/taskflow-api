@@ -5,7 +5,7 @@ A team task-management API built with Node.js, Express, TypeScript, and Prisma.
 ## Features
 - **CLI:** Add, list, start, complete, delete, filter, and export tasks (CSV).
 - **HTTP API:** Full CRUD for tasks, projects, and comments, with SQL-powered pagination, sorting, searching, and filtering.
-- **Auth:** User registration with Argon2id password hashing and unique email constraints.
+- **Auth:** User registration and login using Argon2id password hashing and short-lived JWT access tokens.
 - **Core:** Repository pattern, Unit of Work for transactions, Zod validation, strict TypeScript, and centralized error handling.
 - **Database:** PostgreSQL with Prisma ORM, enforcing referential integrity, cascading deletes, and composite indexes for fast queries.
 - **Production Middleware:** Security headers (Helmet), CORS, Request IDs, and body size limits.
@@ -70,6 +70,8 @@ npm run smoke
 | Method | Path | Description | Success |
 |--------|------|-------------|---------|
 | POST | `/auth/register` | Create an account (Argon2id hashed) | 201 |
+| POST | `/auth/login` | Log in and receive a JWT access token | 200 |
+| GET | `/auth/me` | Get the logged-in user (requires token) | 200 |
 
 ### Tasks
 | Method | Path | Description | Success |
@@ -128,7 +130,26 @@ npm run smoke
   "error": { "message": "Validation failed", "details": [{ "path": "title", "message": "Required" }] }
 }
 ```
-*Status codes: 400 (Bad Input), 404 (Not Found), 409 (Conflict), 413 (Payload Too Large), 500 (Server Error)*
+*Status codes: 400 (Bad Input), 401 (Unauthorized), 404 (Not Found), 409 (Conflict), 413 (Payload Too Large), 500 (Server Error)*
+
+## Authentication
+
+Log in to receive a short-lived JWT (15 minutes):
+
+```bash
+curl -s -X POST http://localhost:3000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"sam@example.com","password":"dev-password-123"}'
+```
+
+Use the token in the `Authorization: Bearer <token>` header:
+
+```bash
+curl http://localhost:3000/auth/me \
+  -H "Authorization: Bearer <your-token-here>"
+```
+
+*Note: The `/auth/login` and `/auth/register` endpoints never reveal whether an email exists. They always return the same error message and take roughly the same amount of time (thanks to a dummy Argon2 hash).*
 
 ## Architecture
 
@@ -164,6 +185,8 @@ Moving list queries from JavaScript to SQL drastically reduced response times, e
 | `DATABASE_URL` | PostgreSQL connection string | (required) |
 | `CORS_ORIGIN` | Allowed origins for browser requests | `http://localhost:5173` |
 | `LOG_LEVEL` | Logging verbosity (`info` or `debug`) | `info` |
+| `JWT_SECRET` | Secret used to sign access tokens (min 32 chars) | (required) |
+| `ACCESS_TOKEN_TTL_SECONDS` | Access token lifetime in seconds | `900` (15 min) |
 
 ## Database
 
@@ -214,7 +237,7 @@ prisma/
 
 src/
 ├── app.ts, server.ts, cli.ts
-├── auth/                 # Password hashing utilities
+├── auth/                 # Password hashing and JWT utilities
 ├── container.ts          # Composition root
 ├── db.ts                 # Prisma Client instance
 ├── config.ts, logger.ts, errors.ts, types.ts, utils.ts
@@ -223,30 +246,32 @@ src/
 ├── schemas/              # Zod validation
 ├── repositories/         # Data storage: interface, Prisma impl, UnitOfWork
 ├── services/             # Business logic: tasks, projects, comments, auth
-├── middleware/           # Logger, validation, error handling, request IDs
+├── middleware/           # Logger, validation, error handling, request IDs, authenticate
 ├── controllers/          # HTTP logic
 └── routes/               # Express routes
 ```
 
 ## Tech Stack
-Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CORS, Swagger UI, Argon2.
+Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CORS, Swagger UI, Argon2, jose.
 
 ## Roadmap
 - [x] Week 1 — CLI core
 - [x] Week 2 — Express API (CRUD, pagination, filtering, repository pattern, projects, comments, production middleware, OpenAPI docs)
 - [x] Week 3 — PostgreSQL & Prisma (Schema, Migrations, ORM integration, Constraints, SQL Pagination, Transactions, Seeding)
-- [ ] Week 4 — Auth (JWT)
+- [x] Week 4 — Auth (JWT)
 - [x] User registration with Argon2id
-- [ ] Login and access tokens (Day 23)
+- [x] Login and access tokens
+- [ ] Protect the API (Day 24)
 
 ## Known Limitations
-1. **No Login Yet:** The API can register users but not log them in or issue tokens. This will be fixed in Day 23.
-2. **Unauthenticated Authors:** Comment authors are supplied by the client as plain strings. This will be replaced by authenticated user IDs in Week 4.
-3. **Search Wildcards:** Searching for `%` or `_` returns all tasks because SQL `LIKE` interprets them as wildcards. To fix, escape these characters in the service layer before querying.
-4. **No Retries on `P2034`:** We haven't implemented automatic retries for deadlocks yet. If two merges clash, the user must retry manually.
-5. **No CI:** We don't have a GitHub Actions pipeline yet. This will be added in Week 7.
-6. **Offset pagination is slow on deep pages:** `OFFSET 49980` still walks past 49,980 rows. This will be fixed in Week 5 with keyset pagination.
-7. **`ILIKE` search lacks a trigram index:** The search is slow on large tables because it does a full scan. This will be fixed in Week 5.
-8. **CSV export loads all rows:** The export uses `findAll()`, which loads the entire table into memory. This will be fixed in Week 5 with a streaming query.
-9. **`/health` doesn't check the database:** It returns `ok` even if Postgres is down. This will be fixed in Week 7 with a proper readiness check.
-10. **The API is fully public:** There is no authentication or authorization yet. This will be fixed in Week 4.
+1. **The API is mostly public:** Only `/auth/me` requires a token. All task, project, and comment endpoints are still unauthenticated. This will be fixed in Day 24.
+2. **No Refresh Tokens / Logout Yet:** Access tokens expire after 15 minutes, and there's no way to log out before then. This will be fixed in Day 25.
+3. **Unauthenticated Authors:** Comment authors are supplied by the client as plain strings. This will be replaced by authenticated user IDs in Week 4.
+4. **Search Wildcards:** Searching for `%` or `_` returns all tasks because SQL `LIKE` interprets them as wildcards. To fix, escape these characters in the service layer before querying.
+5. **No Retries on `P2034`:** We haven't implemented automatic retries for deadlocks yet. If two merges clash, the user must retry manually.
+6. **No CI:** We don't have a GitHub Actions pipeline yet. This will be added in Week 7.
+7. **Offset pagination is slow on deep pages:** `OFFSET 49980` still walks past 49,980 rows. This will be fixed in Week 5 with keyset pagination.
+8. **`ILIKE` search lacks a trigram index:** The search is slow on large tables because it does a full scan. This will be fixed in Week 5.
+9. **CSV export loads all rows:** The export uses `findAll()`, which loads the entire table into memory. This will be fixed in Week 5 with a streaming query.
+10. **`/health` doesn't check the database:** It returns `ok` even if Postgres is down. This will be fixed in Week 7 with a proper readiness check.
+11. **Login is unthrottled:** There's no rate limiting on `/auth/login`, making it vulnerable to brute-force attacks. This will be fixed in Day 27.
