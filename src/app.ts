@@ -17,9 +17,10 @@ export function createApp() {
     cors({
       origin: config.corsOrigins,
       methods: ["GET", "POST", "PATCH", "DELETE"],
-      allowedHeaders: ["Content-Type", "X-Request-Id"],
+      allowedHeaders: ["Content-Type", "X-Request-Id", "Authorization"],
       exposedHeaders: ["X-Request-Id", "Location"],
       maxAge: 600,
+     
     })
   );
   app.use(requestId);

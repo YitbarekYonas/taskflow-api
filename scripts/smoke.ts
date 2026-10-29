@@ -3,20 +3,15 @@ import process from "node:process";
 const base = process.env.BASE_URL ?? "http://localhost:3000";
 let failures = 0;
 
-async function call(method: string, path: string, body?: unknown) {
+async function call(method: string, path: string, body?: unknown, extraHeaders: Record<string, string> = {}) {
   const hasBody = body !== undefined;
   const res = await fetch(base + path, {
     method,
-    headers: hasBody ? { "Content-Type": "application/json" } : undefined,
-    // a string body is sent as-is, which lets us send deliberately broken JSON
+    headers: { ...(hasBody ? { "Content-Type": "application/json" } : {}), ...extraHeaders },
     body: hasBody ? (typeof body === "string" ? body : JSON.stringify(body)) : undefined,
   });
   const text = await res.text();
-  return {
-    status: res.status,
-    headers: res.headers,
-    json: text ? JSON.parse(text) : undefined,
-  };
+  return { status: res.status, headers: res.headers, json: text ? JSON.parse(text) : undefined };
 }
 
 function check(name: string, ok: boolean, detail = "") {
@@ -24,9 +19,11 @@ function check(name: string, ok: boolean, detail = "") {
   if (!ok) failures++;
 }
 
-// Calls an endpoint and checks the status. Failures must also use the shared error shape.
-async function expectStatus(name: string, expected: number, method: string, path: string, body?: unknown) {
-  const r = await call(method, path, body);
+async function expectStatus(
+  name: string, expected: number, method: string, path: string,
+  body?: unknown, headers?: Record<string, string>
+) {
+  const r = await call(method, path, body, headers);
   check(`${method} ${path} -> ${expected} (${name})`, r.status === expected, `got ${r.status}`);
   if (expected >= 400) {
     check(`  error shape for "${name}"`, typeof r.json?.error?.message === "string", JSON.stringify(r.json));
@@ -67,7 +64,7 @@ const projectList = await call("GET", "/projects");
 const mine = projectList.json.data.find((p: { id: number }) => p.id === pid);
 check("  project list has taskCount", mine?.taskCount === 1, JSON.stringify(mine));
 
-// Registration
+// --- Registration ---
 const stamp = Date.now();
 const email = `smoke+${stamp}@example.com`;
 const reg = await expectStatus("register", 201, "POST", "/auth/register", {
@@ -83,6 +80,23 @@ await expectStatus("bad email", 400, "POST", "/auth/register", { email: "nope", 
 await expectStatus("role injection", 400, "POST", "/auth/register", {
   email: `y${stamp}@example.com`, name: "Y", password: "smoke-test-password", role: "admin",
 });
+
+// --- Login and tokens ---
+const goodLogin = await expectStatus("login", 200, "POST", "/auth/login", { email, password: "smoke-test-password" });
+const token = goodLogin.json.data.accessToken as string;
+check("  token is a string", typeof token === "string" && token.split(".").length === 3);
+check("  expiresIn present", typeof goodLogin.json.data.expiresIn === "number");
+
+const wrongPw = await expectStatus("wrong password", 401, "POST", "/auth/login", { email, password: "not-the-password" });
+const noUser = await expectStatus("unknown email", 401, "POST", "/auth/login", { email: `nobody${stamp}@example.com`, password: "whatever-123" });
+check("  both failures give the identical message", wrongPw.json.error.message === noUser.json.error.message);
+await expectStatus("login without password", 400, "POST", "/auth/login", { email });
+
+const meOk = await expectStatus("me with token", 200, "GET", "/auth/me", undefined, { Authorization: `Bearer ${token}` });
+check("  me returns the same user", meOk.json.data.email === email);
+const meNone = await expectStatus("me without token", 401, "GET", "/auth/me");
+check("  WWW-Authenticate header present", (meNone.headers.get("www-authenticate") ?? "").includes("Bearer"));
+await expectStatus("me with garbage token", 401, "GET", "/auth/me", undefined, { Authorization: "Bearer garbage" });
 
 // --- Rules and failures ---
 await expectStatus("project with tasks cannot be deleted", 409, "DELETE", `/projects/${pid}`);

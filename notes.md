@@ -72,6 +72,9 @@
 - **Mass Assignment:** Using `.strict()` in Zod to reject unknown fields like `role: "admin"` or `id: 1`.
 - **Email Normalization:** Trimming and lowercasing at the schema level so `Sam@Example.com` and `sam@example.com` are the same account.
 - **No Secrets in Responses:** The `User` type deliberately excludes `passwordHash` so the compiler prevents accidentally returning it.
+- **JWT (JSON Web Token):** Three base64url parts (`header.payload.signature`). Signed by the server, readable by anyone. Never put secrets in the payload.
+- **Algorithm Pinning:** Always verify with `algorithms: ["HS256"]`. This prevents `alg: none` and algorithm confusion attacks.
+- **Timing Attacks:** Even with identical error messages, a login endpoint can leak whether an email exists if the response times differ. Fix: always run a dummy hash when the user isn't found.
 
 ## Checkpoint answers (Days 2–6)
 
@@ -235,12 +238,28 @@
 7. **Why can lots of simultaneous hashing hurt a server even though Argon2 doesn't block the event loop?**
    > Argon2 uses libuv's thread pool (default: 4 threads). A flood of hashes queues up, consuming CPU and memory. This is why rate limiting is needed (Day 27).
 
+## Day 23 Checkpoint Answers
+1. **A JWT payload is readable by anyone. Then why can't an attacker change `sub` to `1`?**
+   > Because the signature is computed over the header and payload. Changing `sub` invalidates the signature, and `jwtVerify` rejects the token.
+2. **What attack does `algorithms: ["HS256"]` prevent, and what would trusting the token's own `alg` header allow?**
+   > It prevents the `alg: none` attack (where an attacker crafts a token with no signature) and algorithm confusion (switching between HS256 and RS256). Trusting the `alg` header would allow an attacker to pick an algorithm that bypasses the signature check.
+3. **Why does the token contain only the user id and not the user's role or project memberships?**
+   > Because roles and memberships can change. A token that says "user is admin" would still grant admin access after the user is demoted, until the token expires. Looking up the roles from the database on each request keeps them fresh.
+4. **Why does `authenticate` look the user up even though the signature is valid?**
+   > A valid signature means the token was issued by us, but the user might have been deleted since then. Looking them up in the database ensures the account still exists.
+5. **Name two different ways a login endpoint can reveal that an email exists, and how you closed each one.**
+   > 1) Different error messages ("User not found" vs "Wrong password") — closed by using the same message. 2) Different response times (fast for unknown email, slow for real email because of hashing) — closed by always running a hash against a dummy value for unknown users.
+6. **Why must `Authorization` be in the CORS `allowedHeaders`, and why did `curl` never show that problem?**
+   > CORS is enforced by browsers, not by `curl`. Without it, the browser's preflight request would be rejected, and any request with a token would fail. `curl` ignores CORS headers entirely.
+7. **Why is a 15-minute expiry a security feature, and what problem does it create that refresh tokens solve?**
+   > A short expiry limits the damage if a token leaks. The problem is the user has to log in again every 15 minutes, which is annoying. Refresh tokens (Day 25) allow the user to get a new access token without re-entering their password.
+
 ## API Conventions (Day 13 Audit)
 - **POST:** Returns `201` and a `Location` header.
 - **Errors:** All errors use the `{ "error": { "message": "..." } }` shape.
 - **Lists:** All list responses are wrapped in a `data` array. Projects do not have `meta` yet because we haven't added pagination to them.
 - **Casing:** All JSON field names are `camelCase`.
-- **Status Codes:** 400 (bad input), 404 (missing URL resource), 409 (state conflict).
+- **Status Codes:** 400 (bad input), 404 (missing URL resource), 409 (state conflict), 401 (unauthenticated).
 
 ## Migration Rules (Day 20)
 - Never edit an applied migration (Prisma checks the checksum).
@@ -253,16 +272,17 @@
 ## Known limitations
 *(Each of these is fixed by a specific upcoming week, showing forward planning).*
 
-1. **Search Wildcards:** Searching for `%` or `_` returns all tasks because SQL `LIKE` interprets them as wildcards. To fix, escape these characters in the service layer before querying.
-2. **No Retries on `P2034`:** We haven't implemented automatic retries for deadlocks yet. If two merges clash, the user must retry manually.
-3. **Unauthenticated Authors:** The `author` field for comments is currently a plain string supplied by the client. Anyone can pretend to be anyone. This will be fixed in **Week 4** when we add JWT authentication.
-4. **No Automated Tests:** We currently rely on a manual `npm run smoke` test. Proper unit and integration tests will be added in **Week 5**.
-5. **No CI:** We don't have a GitHub Actions pipeline yet. This will be added in **Week 7**.
-6. **Offset pagination is slow on deep pages:** `OFFSET 49980` still walks past 49,980 rows. This will be fixed in **Week 5** with keyset pagination.
-7. **`ILIKE` search lacks a trigram index:** The search is slow on large tables because it does a full scan. This will be fixed in **Week 5**.
-8. **CSV export loads all rows:** The export uses `findAll()`, which loads the entire table into memory. This will be fixed in **Week 5** with a streaming query.
-9. **`/health` doesn't check the database:** It returns `ok` even if Postgres is down. This will be fixed in **Week 7** with a proper readiness check.
-10. **The API is fully public:** There is no authentication or authorization yet. This will be fixed in **Week 4**.
+1. **No Refresh Tokens / Logout Yet:** Access tokens expire after 15 minutes, and there's no way to log out before then. This will be fixed in **Day 25**.
+2. **Search Wildcards:** Searching for `%` or `_` returns all tasks because SQL `LIKE` interprets them as wildcards. To fix, escape these characters in the service layer before querying.
+3. **No Retries on `P2034`:** We haven't implemented automatic retries for deadlocks yet. If two merges clash, the user must retry manually.
+4. **Unauthenticated Authors:** The `author` field for comments is currently a plain string supplied by the client. This will be fixed in **Day 26** when we use the logged-in user's ID.
+5. **No Automated Tests:** We currently rely on a manual `npm run smoke` test. Proper unit and integration tests will be added in **Week 5**.
+6. **No CI:** We don't have a GitHub Actions pipeline yet. This will be added in **Week 7**.
+7. **Offset pagination is slow on deep pages:** `OFFSET 49980` still walks past 49,980 rows. This will be fixed in **Week 5** with keyset pagination.
+8. **`ILIKE` search lacks a trigram index:** The search is slow on large tables because it does a full scan. This will be fixed in **Week 5**.
+9. **CSV export loads all rows:** The export uses `findAll()`, which loads the entire table into memory. This will be fixed in **Week 5** with a streaming query.
+10. **`/health` doesn't check the database:** It returns `ok` even if Postgres is down. This will be fixed in **Week 7** with a proper readiness check.
+11. **The API is still mostly public:** Only `/auth/me` requires a token. All task, project, and comment endpoints are still unauthenticated. This will be fixed in **Day 24** (Protecting the API).
 
 ## Week 1 summary
 Three things I can do now that I couldn't on Day 1:
@@ -294,14 +314,4 @@ One thing I want to get better at in Week 3:
 Three things I can do now that I couldn't on Day 15:
 - Design database schemas with relations and constraints.
 - Write and safely apply migrations to a database with existing data.
-- Use transactions to keep multi-step operations atomic.
-
-Things that confused me:
-- The difference between `migrate dev` and `migrate deploy`.
-- Why a rename requires `RENAME COLUMN` instead of `DROP` + `ADD`.
-
-What I'd do differently:
-- Write the migration check script earlier so I catch schema drift sooner.
-
-One thing I want to get better at in Week 4:
-- Implementing authentication and authorization securely.
+- Use transactions to keep multi-step operations
