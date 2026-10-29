@@ -9,6 +9,7 @@ import type { User } from "../types.js";
 let dummyHash: Promise<string> | undefined;
 const getDummyHash = () => (dummyHash ??= hashPassword("not-a-real-password"));
 
+
 export function createAuthService({ users }: { users: UserRepository }) {
   async function register(input: RegisterInput): Promise<User> {
     const passwordHash = await hashPassword(input.password);
@@ -17,11 +18,9 @@ export function createAuthService({ users }: { users: UserRepository }) {
 
   async function login(input: LoginInput) {
     const record = await users.findByEmail(input.email);
-
-    const hash = record?.passwordHash ?? (await getDummyHash());
-    const passwordOk = await verifyPassword(hash, input.password);
-
-    if (!record || !passwordOk) throw new UnauthorizedError("Invalid email or password.");
+    if (!record) throw new UnauthorizedError("Invalid email or password.");   // early exit
+    const passwordOk = await verifyPassword(record.passwordHash, input.password);
+    if (!passwordOk) throw new UnauthorizedError("Invalid email or password.");
 
     const user: User = {
       id: record.id,
@@ -46,5 +45,6 @@ export function createAuthService({ users }: { users: UserRepository }) {
 
   return { register, login, authenticate };
 }
+
 
 export type AuthService = ReturnType<typeof createAuthService>;
