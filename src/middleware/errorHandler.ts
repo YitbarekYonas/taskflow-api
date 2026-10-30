@@ -1,6 +1,6 @@
 import type { ErrorRequestHandler, RequestHandler } from "express";
 import { ZodError } from "zod";
-import { NotFoundError, UserError,ConflictError,UnauthorizedError } from "../errors.js";
+import { NotFoundError, UserError,ConflictError,UnauthorizedError,ForbiddenError } from "../errors.js";
 import { logger } from "../logger.js";
 
 export const notFound: RequestHandler = (req, res) => {
@@ -34,6 +34,10 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
       .status(401)
       .set("WWW-Authenticate", 'Bearer realm="taskflow"')
       .json({ error: { message: err.message } });
+    return;
+  }
+    if (err instanceof ForbiddenError) {
+    res.status(403).json({ error: { message: err.message } });
     return;
   }
     if (err instanceof ConflictError) {

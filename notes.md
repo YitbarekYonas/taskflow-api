@@ -76,6 +76,14 @@
 - **Algorithm Pinning:** Always verify with `algorithms: ["HS256"]`. This prevents `alg: none` and algorithm confusion attacks.
 - **Timing Attacks:** Even with identical error messages, a login endpoint can leak whether an email exists if the response times differ. Fix: always run a dummy hash when the user isn't found.
 
+### Week 4 (Authorization & Ownership)
+- **401 vs 403 vs 404:** `401` = "Who are you?" (missing/invalid token). `403` = "I know you, but you can't do this." `404` = "That doesn't exist" (used when existence itself is private).
+- **Default Deny:** A route is private unless explicitly marked public. `authenticate` is attached to the router mount so it runs before `validate`, preventing anonymous users from learning your schema.
+- **Ownership Policy:** `assertOwner(actor, ownerId)` in `src/auth/policy.ts`. If `ownerId` is `undefined` (legacy rows), only `SYSTEM` can modify it.
+- **The `Actor` Type:** An explicit `Actor` argument (`user` or `system`) is passed to every service mutation method. It's impossible to forget, because TypeScript will refuse to compile.
+- **BOLA / IDOR:** Broken Object Level Authorization. The defense is `assertOwner(actor, task.createdById)` in the service.
+- **Auth Coverage:** A script (`test:auth-coverage`) iterates through every documented route and asserts it returns `401` without a token (unless marked public).
+
 ## Checkpoint answers (Days 2–6)
 
 *(Skipped or filled in as you go)*
@@ -254,18 +262,35 @@
 7. **Why is a 15-minute expiry a security feature, and what problem does it create that refresh tokens solve?**
    > A short expiry limits the damage if a token leaks. The problem is the user has to log in again every 15 minutes, which is annoying. Refresh tokens (Day 25) allow the user to get a new access token without re-entering their password.
 
+## Day 24 Checkpoint Answers
+1. **When is a failed request a `401`, a `403` and a `404`?**
+   > `401`: No credentials or invalid token. `403`: Valid token, but you aren't the creator (or don't have permission). `404`: The resource doesn't exist at all (including when we want to hide its existence).
+2. **What is Broken Object Level Authorization, and which line of your code is the defense?**
+   > BOLA (IDOR) is when an endpoint checks you're logged in but not that *the specific object* is yours. The defense is the `assertOwner(actor, task.createdById)` call in the service.
+3. **Why does the policy live in a function that services call, instead of in the routes?**
+   > If the check is in the route, a new route or a CLI call might forget it. Putting it in the service ensures every code path goes through the same rule.
+4. **Why does `authenticate` run before `validate`, and what would an attacker learn if the order were reversed?**
+   > `authenticate` runs before `validate` so an unauthenticated caller gets `401` before learning anything about the request body. If `validate` ran first, they'd see `400` errors and learn the schema (useful for fuzzing).
+5. **Why can the `Actor` argument not be forgotten (compile error), and what kind of mistake can it still not catch?**
+   > The compiler enforces that every service call provides an `Actor` argument. But it can't check that you passed the *right* actor (e.g., passing `SYSTEM` in an HTTP controller would compile but be wrong).
+6. **What does `scripts/auth-coverage.ts` guard against?**
+   > It iterates through every documented route and asserts that it returns `401` without a token (unless it's marked public). This catches a new route added without the `authenticate` middleware.
+7. **Why do legacy rows with no owner become read-only?**
+   > `assertOwner` rejects any user (except `SYSTEM`) from modifying a resource with `createdById: undefined`. This is safe because we don't know who should have permission.
+
 ## API Conventions (Day 13 Audit)
 - **POST:** Returns `201` and a `Location` header.
 - **Errors:** All errors use the `{ "error": { "message": "..." } }` shape.
 - **Lists:** All list responses are wrapped in a `data` array. Projects do not have `meta` yet because we haven't added pagination to them.
 - **Casing:** All JSON field names are `camelCase`.
-- **Status Codes:** 400 (bad input), 404 (missing URL resource), 409 (state conflict), 401 (unauthenticated).
+- **Status Codes:** 400 (bad input), 401 (unauthenticated), 403 (forbidden), 404 (missing URL resource), 409 (state conflict).
 
 ## Migration Rules (Day 20)
 - Never edit an applied migration (Prisma checks the checksum).
 - Rename columns with `RENAME COLUMN`, not `DROP` + `ADD`.
 - Adding a required column: expand (nullable) → backfill → contract (`NOT NULL`).
 - `migrate dev` on your laptop; `migrate deploy` in CI and production.
+- Seeds are idempotent (`upsert`) and never run
 - Seeds are idempotent (`upsert`) and never run in production.
 - `npm run db:check-migrations` verifies migrations from scratch.
 
@@ -282,7 +307,8 @@
 8. **`ILIKE` search lacks a trigram index:** The search is slow on large tables because it does a full scan. This will be fixed in **Week 5**.
 9. **CSV export loads all rows:** The export uses `findAll()`, which loads the entire table into memory. This will be fixed in **Week 5** with a streaming query.
 10. **`/health` doesn't check the database:** It returns `ok` even if Postgres is down. This will be fixed in **Week 7** with a proper readiness check.
-11. **The API is still mostly public:** Only `/auth/me` requires a token. All task, project, and comment endpoints are still unauthenticated. This will be fixed in **Day 24** (Protecting the API).
+11. **The API is mostly protected, but not fully:** Task and project mutations are owner-only, but comments are still open to any logged-in user. This will be addressed in **Day 26**.
+12. **No token revocation:** Once a JWT is issued, it can't be revoked until it expires (15 minutes). Refresh tokens and a token blacklist will fix this in **Day 25**.
 
 ## Week 1 summary
 Three things I can do now that I couldn't on Day 1:
@@ -314,4 +340,14 @@ One thing I want to get better at in Week 3:
 Three things I can do now that I couldn't on Day 15:
 - Design database schemas with relations and constraints.
 - Write and safely apply migrations to a database with existing data.
-- Use transactions to keep multi-step operations
+- Use transactions to keep multi-step operations atomic.
+
+Things that confused me:
+- The difference between `migrate dev` and `migrate deploy`.
+- Why a rename requires `RENAME COLUMN` instead of `DROP` + `ADD`.
+
+What I'd do differently:
+- Write the migration check script earlier so I catch schema drift sooner.
+
+One thing I want to get better at in Week 4:
+- Implementing authentication and authorization securely.

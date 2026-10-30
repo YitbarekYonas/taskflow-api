@@ -6,15 +6,13 @@ if (process.env.NODE_ENV === "production") {
   process.exit(1);
 }
 
-const DEV_PASSWORD = "dev-password-123"; 
+const DEV_PASSWORD = "dev-password-123";
 const USERS = [
   { email: "sam@example.com", name: "Sam" },
   { email: "alex@example.com", name: "Alex" },
   { email: "mina@example.com", name: "Mina" },
 ];
 
-// Fixed dates (not "now") so every run produces the same data.
-// Two dates are in the past, so the overdue endpoint has something to find.
 const PROJECTS = [
   {
     name: "TaskFlow API",
@@ -40,10 +38,10 @@ const PROJECTS = [
 ] as const;
 
 try {
-  // Users: upsert on a unique column, so re-running never duplicates or crashes
+  // Users
   const users = [];
   for (const u of USERS) {
-        users.push(
+    users.push(
       await prisma.user.upsert({
         where: { email: u.email },
         update: { name: u.name },
@@ -53,12 +51,17 @@ try {
   }
 
   for (const def of PROJECTS) {
-    // name is not unique, so look it up first
     const project =
       (await prisma.project.findFirst({ where: { name: def.name } })) ??
-      (await prisma.project.create({ data: { name: def.name,slug: def.slug, description: def.description } }));
+      (await prisma.project.create({
+        data: {
+          name: def.name,
+          slug: def.slug,
+          description: def.description,
+          createdById: users[0].id, 
+        },
+      }));
 
-    // membership has a composite primary key, so it can be upserted too
     for (const [i, user] of users.entries()) {
       await prisma.projectMember.upsert({
         where: { projectId_userId: { projectId: project.id, userId: user.id } },
@@ -67,7 +70,6 @@ try {
       });
     }
 
-    // only fill an empty project, so edits you make by hand are never overwritten
     if ((await prisma.task.count({ where: { projectId: project.id } })) === 0) {
       for (const [i, t] of def.tasks.entries()) {
         await prisma.task.create({
@@ -78,6 +80,7 @@ try {
             dueDate: t.dueDate ? new Date(t.dueDate) : null,
             projectId: project.id,
             assigneeId: users[i % users.length].id,
+            createdById: users[0].id, 
             comments:
               i % 2 === 0
                 ? { create: [{ author: users[0].name, body: `Kicking off: ${t.title}` }] }

@@ -21,7 +21,7 @@ const listOf = (name: string) => ({
   type: "object",
   properties: { data: { type: "array", items: ref(name) } },
 });
-const errorRef = (name:"BadRequest" | "NotFound" | "Conflict" | "Unauthorized") => ({
+const errorRef = (name:"BadRequest" | "NotFound" | "Conflict" | "Unauthorized" | "Forbidden") => ({
   $ref: `#/components/responses/${name}`,
 });
 const query = (name: string, schema: object, description?: string) => ({
@@ -56,7 +56,7 @@ const taskListParams = [
   query("limit", { type: "integer", minimum: 1, maximum: 100, default: 10 }),
 ];
 
-export const openApiSpec = {
+export const baseSpec = {
   openapi: "3.1.0",
   info: {
     title: "TaskFlow API",
@@ -67,6 +67,7 @@ export const openApiSpec = {
       "Validation errors add a `details` array, and unexpected 500s include a `requestId`.",
     license: { name: "MIT" },
   },
+  security: [{ bearerAuth: [] }],
   servers: [{ url: "/" }],
   tags: [
     { name: "System" },
@@ -419,8 +420,12 @@ export const openApiSpec = {
         description: "The request is valid but conflicts with the current state",
         content: json(ref("Error")),
       },
-            Unauthorized: {
+    Unauthorized: {
         description: "Missing, invalid or expired credentials",
+        content: json(ref("Error")),
+      },
+    Forbidden: {
+        description: "You are logged in but not allowed to do this",
         content: json(ref("Error")),
       },
     },
@@ -429,3 +434,33 @@ export const openApiSpec = {
     },
   },
 };
+const METHODS = ["get", "post", "put", "patch", "delete"] as const;
+const PUBLIC_OPS = new Set(["GET /health", "POST /auth/register", "POST /auth/login"]);
+const FORBIDDEN_OPS = new Set([
+  "PATCH /tasks/{id}",
+  "DELETE /tasks/{id}",
+  "PATCH /projects/{id}",
+  "DELETE /projects/{id}",
+  "POST /projects/{id}/merge",
+]);
+
+type Operation = { security?: unknown[]; responses: Record<string, unknown> };
+
+function withSecurity<T extends { paths: object }>(spec: T): T {
+  for (const [path, item] of Object.entries(spec.paths)) {
+    for (const method of METHODS) {
+      const op = (item as Record<string, Operation | undefined>)[method];
+      if (!op) continue;
+      const key = `${method.toUpperCase()} ${path}`;
+      if (PUBLIC_OPS.has(key)) {
+        op.security = []; // overrides the global requirement
+        continue;
+      }
+      op.responses["401"] ??= errorRef("Unauthorized");
+      if (FORBIDDEN_OPS.has(key)) op.responses["403"] ??= errorRef("Forbidden");
+    }
+  }
+  return spec;
+}
+
+export const openApiSpec = withSecurity(baseSpec);

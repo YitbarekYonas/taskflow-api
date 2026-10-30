@@ -8,9 +8,20 @@ const cases: Array<[string, string]> = [
   ["deep page", "/tasks?page=4999&limit=10"],
 ];
 
+const loginRes = await fetch(`${base}/auth/login`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    email: process.env.BENCH_EMAIL ?? "sam@example.com",
+    password: process.env.BENCH_PASSWORD ?? "dev-password-123",
+  }),
+});
+if (!loginRes.ok) throw new Error(`login failed with ${loginRes.status}; run npm run db:fresh first`);
+const authHeaders = { Authorization: `Bearer ${(await loginRes.json()).data.accessToken}` };
+
 async function time(path: string): Promise<number> {
   const start = performance.now();
-  const res = await fetch(base + path);
+  const res = await fetch(base + path, { headers: authHeaders });
   await res.arrayBuffer();
   if (!res.ok) throw new Error(`${path} returned ${res.status}`);
   return performance.now() - start;
