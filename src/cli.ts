@@ -3,7 +3,8 @@ import { taskService } from "./container.js";
 import { UserError } from "./errors.js";
 import { PRIORITIES, STATUSES, type Priority, type Status, type Task } from "./types.js";
 import { parseChoice } from "./utils.js";
-import {prisma} from "./db.js";
+import { prisma } from "./db.js";
+import { SYSTEM } from "./auth/policy.js";
 
 const { addTask, listTasks, setStatus, deleteTask, exportCsv, listOverdue, summary } = taskService;
 
@@ -87,11 +88,14 @@ function parseCommand(argv: string[]): Command {
 async function run(cmd: Command): Promise<void> {
   switch (cmd.kind) {
     case "add": {
-      const task = await addTask({
-        title: cmd.title,
-        priority: cmd.priority,
-        dueDate: cmd.dueDate,
-      });
+      const task = await addTask(
+        {
+          title: cmd.title,
+          priority: cmd.priority,
+          dueDate: cmd.dueDate,
+        },
+        SYSTEM
+      );
       console.log(`Added #${task.id}: ${task.title}`);
       break;
     }
@@ -102,17 +106,17 @@ async function run(cmd: Command): Promise<void> {
       break;
     }
     case "start": {
-      const task = await setStatus(cmd.id, "in_progress");
+      const task = await setStatus(cmd.id, "in_progress", SYSTEM);
       console.log(`Started #${task.id}: ${task.title}`);
       break;
     }
     case "done": {
-      const task = await setStatus(cmd.id, "done");
+      const task = await setStatus(cmd.id, "done", SYSTEM);
       console.log(`Completed #${task.id}: ${task.title}`);
       break;
     }
     case "delete": {
-      const task = await deleteTask(cmd.id);
+      const task = await deleteTask(cmd.id, SYSTEM);
       console.log(`Deleted #${task.id}: ${task.title}`);
       break;
     }
@@ -160,6 +164,6 @@ main()
     } else {
       console.error("Unexpected error:", err);
     }
-    process.exitCode = 1; 
+    process.exitCode = 1;
   })
   .finally(() => prisma.$disconnect());

@@ -9,6 +9,7 @@ import { buildMeta } from "./pagination.js";
 import type { NewTask, Status, Task} from "../types.js";
 import { InvalidReferenceError } from "../errors.js";
 import {TaskRepository} from "../repositories/repository.js";
+import {assertOwner, creatorOf , Actor} from "../auth/policy.js";
 
 type Deps = { tasks: TaskRepository };
 
@@ -41,7 +42,7 @@ export function createTaskService({ tasks }: Deps){
     return `"${value.replaceAll('"', '""')}"`;
   }
 
-  async function addTask(input: NewTask): Promise<Task> {
+    async function addTask(input: NewTask, actor: Actor): Promise<Task> {
     const title = input.title.trim();
     if (!title) throw new UserError("Task title cannot be empty.");
 
@@ -50,7 +51,8 @@ export function createTaskService({ tasks }: Deps){
       priority: input.priority ?? "medium",
       dueDate: input.dueDate ? validateDate(input.dueDate) : undefined,
       createdAt: new Date().toISOString(),
-      projectId: input.projectId,}));
+      projectId: input.projectId,
+      createdById: creatorOf(actor)}));
 
   }
 
@@ -64,7 +66,8 @@ export function createTaskService({ tasks }: Deps){
     return { items, meta: buildMeta(total, q.page, q.limit) };
   }
 
-  async function updateTask(id: number, patch: TaskPatch): Promise<Task> {
+   async function updateTask(id: number, patch: TaskPatch, actor: Actor): Promise<Task> {
+    assertOwner(actor, (await getTask(id)).createdById, "task");
     const changes: Partial<Omit<Task, "id">> = {};
     if (patch.title !== undefined) changes.title = patch.title;
     if (patch.status !== undefined) changes.status = patch.status;
@@ -81,14 +84,14 @@ export function createTaskService({ tasks }: Deps){
     return updated;
   }
 
-  async function setStatus(id: number, status: Status): Promise<Task> {
-    return updateTask(id, { status });
+  async function setStatus(id: number, status: Status, actor: Actor): Promise<Task> {
+    return updateTask(id, { status }, actor);
   }
 
-  async function deleteTask(id: number): Promise<Task> {
+  async function deleteTask(id: number, actor: Actor): Promise<Task> {
+    assertOwner(actor, (await getTask(id)).createdById, "task");
     const removed = await tasks.remove(id);
     if (!removed) throw new NotFoundError(`No task with id ${id}.`);
-
     return removed;
   }
 

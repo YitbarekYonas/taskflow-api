@@ -2,6 +2,7 @@ import type { Request, Response } from "express";
 import { taskService } from "../container.js";
 import type { TaskPatch, TaskQuery } from "../schemas/task.schemas.js";
 import type { NewTask } from "../types.js";
+import { actorOf } from "../middleware/authenticate.js";
 
 export async function list(_req: Request, res: Response) {
   const { items, meta } = await taskService.queryTasks(res.locals.query as TaskQuery);
@@ -14,17 +15,18 @@ export async function getById(_req: Request, res: Response) {
 }
 
 export async function create(_req: Request, res: Response) {
-  const task = await taskService.addTask(res.locals.body as NewTask);
+
+  const task = await taskService.addTask(res.locals.body as NewTask, actorOf(res));
   res.status(201).location(`/tasks/${task.id}`).json({ data: task });
 }
 
 export async function update(_req: Request, res: Response) {
   const { id } = res.locals.params as { id: number };
-  res.json({ data: await taskService.updateTask(id, res.locals.body as TaskPatch) });
+    res.json({ data: await taskService.updateTask(id, res.locals.body as TaskPatch, actorOf(res)) });
 }
 
 export async function remove(_req: Request, res: Response) {
   const { id } = res.locals.params as { id: number };
-  await taskService.deleteTask(id);
+  await taskService.deleteTask(id, actorOf(res));
   res.status(204).end();
 }
