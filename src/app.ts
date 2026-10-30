@@ -8,6 +8,7 @@ import { requestLogger } from "./middleware/requestLogger.js";
 import { projectsRouter } from "./routes/projects.routes.js";
 import { tasksRouter } from "./routes/tasks.routes.js";
 import { authRouter } from "./routes/auth.routes.js";
+import { authenticate } from "./middleware/authenticate.js";
 
 export function createApp() {
   const app = express();
@@ -30,8 +31,8 @@ export function createApp() {
   app.get("/health", (_req, res) => {
     res.json({ status: "ok", uptime: process.uptime() });
   });
-  app.use("/tasks", tasksRouter);
-  app.use("/projects", projectsRouter);
+  app.use("/tasks", authenticate, tasksRouter);
+  app.use("/projects", authenticate, projectsRouter);
   app.use("/auth", authRouter);
 
   app.use(notFound);
