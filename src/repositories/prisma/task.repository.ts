@@ -15,6 +15,7 @@ type TaskColumns = {
   dueDate?: Date | null;
   createdAt?: Date;
   projectId?: number | null;
+  createdById?: number;
 };
 
 // Database row -> domain object
@@ -27,6 +28,7 @@ function toTask(row: TaskRow): Task {
     dueDate: row.dueDate ? row.dueDate.toISOString().slice(0, 10) : undefined,
     createdAt: row.createdAt.toISOString(),
     projectId: row.projectId ?? undefined,
+    createdById: row.createdById ?? undefined
   };
 }
 
@@ -40,6 +42,7 @@ function toColumns(d: Partial<TaskData>): TaskColumns {
   // Prisma treats `undefined` as "leave alone", but here a PRESENT key means "set or clear it"
   if ("dueDate" in d) c.dueDate = d.dueDate ? new Date(d.dueDate) : null;
   if ("projectId" in d) c.projectId = d.projectId ?? null;
+  if (d.createdById !== undefined) c.createdById = d.createdById;
   return c;
 }
 

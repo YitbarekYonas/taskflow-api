@@ -14,6 +14,7 @@ export const taskSchema = z.object({
   dueDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   createdAt: z.string(),
   projectId: z.number().int().positive().optional(),
+  createdById: z.number().int().positive().optional(),
 });
 
 export const commentSchema = z.object({
@@ -38,6 +39,7 @@ export const projectSchema = z.object({
   description: z.string().optional(),
   createdAt: z.string(),
   slug: z.string().min(1),
+  createdById: z.number().int().positive().optional(),
 });
 export type Project = z.infer<typeof projectSchema>;
 export const userSchema = z.object({

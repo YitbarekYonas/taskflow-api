@@ -14,6 +14,7 @@ function toProject(row: ProjectRow): Project {
      slug: row.slug,
     description: row.description ?? undefined,
     createdAt: row.createdAt.toISOString(),
+    createdById: row.createdById ?? undefined,
   };
 }
 
@@ -22,14 +23,15 @@ function toColumns(d: Partial<ProjectData>) {
     name?: string; 
     slug?: string; 
     description?: string | null; 
-    createdAt?: Date 
+    createdAt?: Date
+    createdById?: number; 
   } = {};
   
   if (d.name !== undefined) c.name = d.name;
   if (d.slug !== undefined) c.slug = d.slug; 
   if (d.createdAt !== undefined) c.createdAt = new Date(d.createdAt);
   if ("description" in d) c.description = d.description ?? null;
-  
+  if (d.createdById !== undefined) c.createdById = d.createdById;
   return c;
 }
 
