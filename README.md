@@ -5,7 +5,7 @@ A team task-management API built with Node.js, Express, TypeScript, and Prisma.
 ## Features
 - **CLI:** Add, list, start, complete, delete, filter, and export tasks (CSV).
 - **HTTP API:** Full CRUD for tasks, projects, and comments, with SQL-powered pagination, sorting, searching, and filtering.
-- **Auth:** User registration and login using Argon2id password hashing and short-lived JWT access tokens.
+- **Auth:** User registration, login (JWT), and **creator-based ownership** (only the creator can modify their tasks and projects).
 - **Core:** Repository pattern, Unit of Work for transactions, Zod validation, strict TypeScript, and centralized error handling.
 - **Database:** PostgreSQL with Prisma ORM, enforcing referential integrity, cascading deletes, and composite indexes for fast queries.
 - **Production Middleware:** Security headers (Helmet), CORS, Request IDs, and body size limits.
@@ -66,35 +66,35 @@ npm run smoke
 
 ## API Endpoints
 
-### Auth
+**Auth** (public)
 | Method | Path | Description | Success |
 |--------|------|-------------|---------|
 | POST | `/auth/register` | Create an account (Argon2id hashed) | 201 |
 | POST | `/auth/login` | Log in and receive a JWT access token | 200 |
 | GET | `/auth/me` | Get the logged-in user (requires token) | 200 |
 
-### Tasks
+**Tasks** (login required)
 | Method | Path | Description | Success |
 |--------|------|-------------|---------|
 | GET | `/tasks` | List tasks (see params below) | 200 |
 | GET | `/tasks/:id` | Get one task | 200 |
 | POST | `/tasks` | Create a task | 201 |
-| PATCH | `/tasks/:id` | Update fields | 200 |
-| DELETE | `/tasks/:id` | Delete a task | 204 |
+| PATCH | `/tasks/:id` | Update fields (creator only) | 200 |
+| DELETE | `/tasks/:id` | Delete a task (creator only) | 204 |
 
-### Projects
+**Projects** (login required)
 | Method | Path | Description | Success |
 |--------|------|-------------|---------|
 | GET | `/projects` | List all projects (includes `taskCount` and `slug`) | 200 |
 | GET | `/projects/:id` | Get one project | 200 |
 | POST | `/projects` | Create a project | 201 |
-| PATCH | `/projects/:id` | Update a project | 200 |
-| DELETE | `/projects/:id` | Delete a project (fails with 409 if it has tasks) | 204 |
+| PATCH | `/projects/:id` | Update a project (creator only) | 200 |
+| DELETE | `/projects/:id` | Delete a project (fails with 409 if it has tasks, creator only) | 204 |
 | GET | `/projects/:id/tasks` | List the tasks of one project | 200 |
 | POST | `/projects/:id/duplicate` | Duplicate a project and its tasks (transaction) | 201 |
-| POST | `/projects/:id/merge` | Merge this project into another (transaction) | 200 |
+| POST | `/projects/:id/merge` | Merge this project into another (transaction, creator only) | 200 |
 
-### Comments
+**Comments** (login required)
 | Method | Path | Description | Success |
 |--------|------|-------------|---------|
 | GET | `/tasks/:taskId/comments` | List comments for a task | 200 |
@@ -130,9 +130,9 @@ npm run smoke
   "error": { "message": "Validation failed", "details": [{ "path": "title", "message": "Required" }] }
 }
 ```
-*Status codes: 400 (Bad Input), 401 (Unauthorized), 404 (Not Found), 409 (Conflict), 413 (Payload Too Large), 500 (Server Error)*
+*Status codes: 400 (Bad Input), 401 (Unauthorized), 403 (Forbidden), 404 (Not Found), 409 (Conflict), 413 (Payload Too Large), 500 (Server Error)*
 
-## Authentication
+## Authentication & Authorization
 
 Log in to receive a short-lived JWT (15 minutes):
 
@@ -145,9 +145,13 @@ curl -s -X POST http://localhost:3000/auth/login \
 Use the token in the `Authorization: Bearer <token>` header:
 
 ```bash
-curl http://localhost:3000/auth/me \
+curl http://localhost:3000/tasks \
   -H "Authorization: Bearer <your-token-here>"
 ```
+
+- **Public routes:** `/health`, `/docs`, `/openapi.json`, `/auth/register`, `/auth/login`.
+- **Login required:** All `/tasks`, `/projects`, `/comments` routes. Without a valid token, they return `401`.
+- **Creator only:** `PATCH`/`DELETE` on `/tasks/:id` and `/projects/:id`, plus `POST /projects/:id/merge`. A non-creator receives `403`.
 
 *Note: The `/auth/login` and `/auth/register` endpoints never reveal whether an email exists. They always return the same error message and take roughly the same amount of time (thanks to a dummy Argon2 hash).*
 
@@ -204,7 +208,8 @@ erDiagram
          string passwordHash }
   PROJECT { int id PK
             string name
-            string slug UK }
+            string slug UK
+            int createdById FK }
   PROJECT_MEMBER { int projectId PK
                    int userId PK
                    string role }
@@ -214,7 +219,8 @@ erDiagram
          string priority
          date dueDate
          int projectId FK
-         int assigneeId FK }
+         int assigneeId FK
+         int createdById FK }
   COMMENT { int id PK
             int taskId FK
             string author
@@ -237,7 +243,7 @@ prisma/
 
 src/
 ├── app.ts, server.ts, cli.ts
-├── auth/                 # Password hashing and JWT utilities
+├── auth/                 # Password hashing, JWT utilities, and policy (Actor, assertOwner)
 ├── container.ts          # Composition root
 ├── db.ts                 # Prisma Client instance
 ├── config.ts, logger.ts, errors.ts, types.ts, utils.ts
@@ -261,17 +267,18 @@ Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CO
 - [x] Week 4 — Auth (JWT)
 - [x] User registration with Argon2id
 - [x] Login and access tokens
-- [ ] Protect the API (Day 24)
+- [x] Protect the API (ownership & default deny)
+- [ ] Refresh tokens and logout (Day 25)
 
 ## Known Limitations
-1. **The API is mostly public:** Only `/auth/me` requires a token. All task, project, and comment endpoints are still unauthenticated. This will be fixed in Day 24.
-2. **No Refresh Tokens / Logout Yet:** Access tokens expire after 15 minutes, and there's no way to log out before then. This will be fixed in Day 25.
-3. **Unauthenticated Authors:** Comment authors are supplied by the client as plain strings. This will be replaced by authenticated user IDs in Week 4.
-4. **Search Wildcards:** Searching for `%` or `_` returns all tasks because SQL `LIKE` interprets them as wildcards. To fix, escape these characters in the service layer before querying.
-5. **No Retries on `P2034`:** We haven't implemented automatic retries for deadlocks yet. If two merges clash, the user must retry manually.
-6. **No CI:** We don't have a GitHub Actions pipeline yet. This will be added in Week 7.
-7. **Offset pagination is slow on deep pages:** `OFFSET 49980` still walks past 49,980 rows. This will be fixed in Week 5 with keyset pagination.
-8. **`ILIKE` search lacks a trigram index:** The search is slow on large tables because it does a full scan. This will be fixed in Week 5.
-9. **CSV export loads all rows:** The export uses `findAll()`, which loads the entire table into memory. This will be fixed in Week 5 with a streaming query.
-10. **`/health` doesn't check the database:** It returns `ok` even if Postgres is down. This will be fixed in Week 7 with a proper readiness check.
-11. **Login is unthrottled:** There's no rate limiting on `/auth/login`, making it vulnerable to brute-force attacks. This will be fixed in Day 27.
+1. **No Refresh Tokens / Logout Yet:** Access tokens expire after 15 minutes, and there's no way to log out before then. This will be fixed in Day 25.
+2. **Unauthenticated Authors:** Comment authors are supplied by the client as plain strings. This will be replaced by authenticated user IDs in Day 26.
+3. **Search Wildcards:** Searching for `%` or `_` returns all tasks because SQL `LIKE` interprets them as wildcards. To fix, escape these characters in the service layer before querying.
+4. **No Retries on `P2034`:** We haven't implemented automatic retries for deadlocks yet. If two merges clash, the user must retry manually.
+5. **No CI:** We don't have a GitHub Actions pipeline yet. This will be added in Week 7.
+6. **Offset pagination is slow on deep pages:** `OFFSET 49980` still walks past 49,980 rows. This will be fixed in Week 5 with keyset pagination.
+7. **`ILIKE` search lacks a trigram index:** The search is slow on large tables because it does a full scan. This will be fixed in Week 5.
+8. **CSV export loads all rows:** The export uses `findAll()`, which loads the entire table into memory. This will be fixed in Week 5 with a streaming query.
+9. **`/health` doesn't check the database:** It returns `ok` even if Postgres is down. This will be fixed in Week 7 with a proper readiness check.
+10. **Login is unthrottled:** There's no rate limiting on `/auth/login`, making it vulnerable to brute-force attacks. This will be fixed in Day 27.
+11. **Legacy ownership:** Tasks and projects created before this change have `createdById: null`, meaning only the CLI can modify them. There's no interface to assign ownership retroactively.
