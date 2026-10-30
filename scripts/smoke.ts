@@ -3,11 +3,21 @@ import process from "node:process";
 const base = process.env.BASE_URL ?? "http://localhost:3000";
 let failures = 0;
 
-async function call(method: string, path: string, body?: unknown, extraHeaders: Record<string, string> = {}) {
+let token: string | undefined;
+
+async function call(
+  method: string, path: string, body?: unknown, extraHeaders: Record<string, string> = {}
+) {
   const hasBody = body !== undefined;
+  const headers: Record<string, string> = {};
+  if (hasBody) headers["Content-Type"] = "application/json";
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  // explicit headers win; Authorization: "" means "send no credentials at all"
+  Object.assign(headers, extraHeaders);
+
   const res = await fetch(base + path, {
     method,
-    headers: { ...(hasBody ? { "Content-Type": "application/json" } : {}), ...extraHeaders },
+    headers,
     body: hasBody ? (typeof body === "string" ? body : JSON.stringify(body)) : undefined,
   });
   const text = await res.text();
@@ -30,6 +40,20 @@ async function expectStatus(
   }
   return r;
 }
+
+// --- Setup Users A and B ---
+async function newUser(label: string) {
+  const mail = `smoke-${label}-${Date.now()}@example.com`;
+  const password = "smoke-test-password";
+  const none = { Authorization: "" };
+  await call("POST", "/auth/register", { email: mail, name: label, password }, none);
+  const login = await call("POST", "/auth/login", { email: mail, password }, none);
+  return { email: mail, token: login.json.data.accessToken as string };
+}
+
+const userA = await newUser("a");
+const userB = await newUser("b");
+token = userA.token; // Default token for most tests
 
 // --- Happy path ---
 await expectStatus("health", 200, "GET", "/health");
@@ -69,32 +93,60 @@ const stamp = Date.now();
 const email = `smoke+${stamp}@example.com`;
 const reg = await expectStatus("register", 201, "POST", "/auth/register", {
   email: ` Smoke+${stamp}@Example.com `, name: "Smoke", password: "smoke-test-password",
-});
+}, { Authorization: "" });
 check("  email normalised", reg.json.data.email === email, JSON.stringify(reg.json));
 check("  no password or hash in response", !JSON.stringify(reg.json).toLowerCase().includes("password"));
 await expectStatus("duplicate email", 409, "POST", "/auth/register", {
   email: email.toUpperCase(), name: "Dup", password: "smoke-test-password",
-});
-await expectStatus("short password", 400, "POST", "/auth/register", { email: `x${stamp}@example.com`, name: "X", password: "short" });
-await expectStatus("bad email", 400, "POST", "/auth/register", { email: "nope", name: "X", password: "smoke-test-password" });
+}, { Authorization: "" });
+await expectStatus("short password", 400, "POST", "/auth/register", { email: `x${stamp}@example.com`, name: "X", password: "short" }, { Authorization: "" });
+await expectStatus("bad email", 400, "POST", "/auth/register", { email: "nope", name: "X", password: "smoke-test-password" }, { Authorization: "" });
 await expectStatus("role injection", 400, "POST", "/auth/register", {
   email: `y${stamp}@example.com`, name: "Y", password: "smoke-test-password", role: "admin",
-});
+}, { Authorization: "" });
+
+// Authentication: the API is closed
+const anon = { Authorization: "" };
+await expectStatus("tasks without a token", 401, "GET", "/tasks", undefined, anon);
+await expectStatus("projects without a token", 401, "GET", "/projects", undefined, anon);
+await expectStatus("create task without a token", 401, "POST", "/tasks", { title: "x" }, anon);
+await expectStatus("invalid body is still 401 first", 401, "POST", "/tasks", { title: "" }, anon);
+
+// Ownership: B can read A's things but not change them
+const mineTask = await expectStatus("A creates a task", 201, "POST", "/tasks", { title: "Owned by A" });
+check("  createdById is set", typeof mineTask.json.data.createdById === "number", JSON.stringify(mineTask.json));
+const mineId = mineTask.json.data.id;
+const asB = { Authorization: `Bearer ${userB.token}` };
+await expectStatus("B can read A's task", 200, "GET", `/tasks/${mineId}`, undefined, asB);
+await expectStatus("B cannot patch A's task", 403, "PATCH", `/tasks/${mineId}`, { title: "Hijacked" }, asB);
+await expectStatus("B cannot delete A's task", 403, "DELETE", `/tasks/${mineId}`, undefined, asB);
+const untouched = await call("GET", `/tasks/${mineId}`);
+check("  task unchanged after B's attempts", untouched.json.data.title === "Owned by A");
+await expectStatus("missing task is 404, not 403", 404, "PATCH", "/tasks/999999", { title: "x" }, asB);
+await expectStatus("A can patch own task", 200, "PATCH", `/tasks/${mineId}`, { title: "Edited by A" });
+await expectStatus("A can delete own task", 204, "DELETE", `/tasks/${mineId}`);
+
+const proj = await expectStatus("A creates a project", 201, "POST", "/projects", { name: "A's project" });
+const projId = proj.json.data.id;
+await expectStatus("B cannot rename A's project", 403, "PATCH", `/projects/${projId}`, { name: "Mine now" }, asB);
+await expectStatus("B cannot delete A's project", 403, "DELETE", `/projects/${projId}`, undefined, asB);
+await expectStatus("B cannot merge A's project away", 403, "POST", `/projects/${projId}/merge`, { intoProjectId: projId + 100000 }, asB);
+await expectStatus("A deletes own project", 204, "DELETE", `/projects/${projId}`);
 
 // --- Login and tokens ---
-const goodLogin = await expectStatus("login", 200, "POST", "/auth/login", { email, password: "smoke-test-password" });
-const token = goodLogin.json.data.accessToken as string;
-check("  token is a string", typeof token === "string" && token.split(".").length === 3);
+const goodLogin = await expectStatus("login", 200, "POST", "/auth/login", { email, password: "smoke-test-password" }, { Authorization: "" });
+const loginToken = goodLogin.json.data.accessToken as string;
+check("  token is a string", typeof loginToken === "string" && loginToken.split(".").length === 3);
 check("  expiresIn present", typeof goodLogin.json.data.expiresIn === "number");
 
-const wrongPw = await expectStatus("wrong password", 401, "POST", "/auth/login", { email, password: "not-the-password" });
-const noUser = await expectStatus("unknown email", 401, "POST", "/auth/login", { email: `nobody${stamp}@example.com`, password: "whatever-123" });
+const wrongPw = await expectStatus("wrong password", 401, "POST", "/auth/login", { email, password: "not-the-password" }, { Authorization: "" });
+const noUser = await expectStatus("unknown email", 401, "POST", "/auth/login", { email: `nobody${stamp}@example.com`, password: "whatever-123" }, { Authorization: "" });
 check("  both failures give the identical message", wrongPw.json.error.message === noUser.json.error.message);
-await expectStatus("login without password", 400, "POST", "/auth/login", { email });
+await expectStatus("login without password", 400, "POST", "/auth/login", { email }, { Authorization: "" });
 
-const meOk = await expectStatus("me with token", 200, "GET", "/auth/me", undefined, { Authorization: `Bearer ${token}` });
+const meOk = await expectStatus("me with token", 200, "GET", "/auth/me", undefined, { Authorization: `Bearer ${loginToken}` });
 check("  me returns the same user", meOk.json.data.email === email);
-const meNone = await expectStatus("me without token", 401, "GET", "/auth/me");
+const meNone = await expectStatus("me without token", 401, "GET", "/auth/me", undefined, { Authorization: "" });
 check("  WWW-Authenticate header present", (meNone.headers.get("www-authenticate") ?? "").includes("Bearer"));
 await expectStatus("me with garbage token", 401, "GET", "/auth/me", undefined, { Authorization: "Bearer garbage" });
 
