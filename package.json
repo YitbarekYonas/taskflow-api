@@ -31,7 +31,8 @@
     "test:tokens": "tsx scripts/token-attacks.ts",
     "bench:login": "tsx scripts/login-timing.ts",
     "test:auth-coverage": "tsx scripts/auth-coverage.ts",
-    "auth:purge": "tsx scripts/purge-tokens.ts"
+    "auth:purge": "tsx scripts/purge-tokens.ts",
+    "test:refresh": "tsx scripts/refresh-flow.ts"
   },
   "keywords": [
     "taskflow",
