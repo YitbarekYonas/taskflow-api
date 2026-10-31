@@ -1,7 +1,7 @@
 import { openApiSpec } from "../src/docs/openapi.js";
 
 const base = process.env.BASE_URL ?? "http://localhost:3000";
-const PUBLIC = new Set(["GET /health", "POST /auth/register", "POST /auth/login"]);
+const PUBLIC = new Set(["GET /health", "POST /auth/register", "POST /auth/login","POST /auth/refresh" , "POST /auth/logout"]);
 const METHODS = ["get", "post", "put", "patch", "delete"];
 let failures = 0;
 let checked = 0;

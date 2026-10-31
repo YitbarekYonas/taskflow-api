@@ -5,7 +5,7 @@ A team task-management API built with Node.js, Express, TypeScript, and Prisma.
 ## Features
 - **CLI:** Add, list, start, complete, delete, filter, and export tasks (CSV).
 - **HTTP API:** Full CRUD for tasks, projects, and comments, with SQL-powered pagination, sorting, searching, and filtering.
-- **Auth:** User registration, login (JWT), and **creator-based ownership** (only the creator can modify their tasks and projects).
+- **Auth:** User registration, login (JWT), refresh tokens (rotation + reuse detection), logout, and **creator-based ownership**.
 - **Core:** Repository pattern, Unit of Work for transactions, Zod validation, strict TypeScript, and centralized error handling.
 - **Database:** PostgreSQL with Prisma ORM, enforcing referential integrity, cascading deletes, and composite indexes for fast queries.
 - **Production Middleware:** Security headers (Helmet), CORS, Request IDs, and body size limits.
@@ -70,8 +70,11 @@ npm run smoke
 | Method | Path | Description | Success |
 |--------|------|-------------|---------|
 | POST | `/auth/register` | Create an account (Argon2id hashed) | 201 |
-| POST | `/auth/login` | Log in and receive a JWT access token | 200 |
+| POST | `/auth/login` | Log in and receive access + refresh tokens | 200 |
+| POST | `/auth/refresh` | Exchange a refresh token for a new pair | 200 |
+| POST | `/auth/logout` | Revoke the refresh token's family | 204 |
 | GET | `/auth/me` | Get the logged-in user (requires token) | 200 |
+| POST | `/auth/logout-all` | Log out every session (requires token) | 204 |
 
 **Tasks** (login required)
 | Method | Path | Description | Success |
@@ -134,7 +137,8 @@ npm run smoke
 
 ## Authentication & Authorization
 
-Log in to receive a short-lived JWT (15 minutes):
+### Login & Tokens
+Log in to receive a **short-lived access token** (15 min) and a **refresh token** (30 days):
 
 ```bash
 curl -s -X POST http://localhost:3000/auth/login \
@@ -142,16 +146,52 @@ curl -s -X POST http://localhost:3000/auth/login \
   -d '{"email":"sam@example.com","password":"dev-password-123"}'
 ```
 
-Use the token in the `Authorization: Bearer <token>` header:
+Use the access token in the `Authorization: Bearer <token>` header:
 
 ```bash
 curl http://localhost:3000/tasks \
   -H "Authorization: Bearer <your-token-here>"
 ```
 
-- **Public routes:** `/health`, `/docs`, `/openapi.json`, `/auth/register`, `/auth/login`.
-- **Login required:** All `/tasks`, `/projects`, `/comments` routes. Without a valid token, they return `401`.
-- **Creator only:** `PATCH`/`DELETE` on `/tasks/:id` and `/projects/:id`, plus `POST /projects/:id/merge`. A non-creator receives `403`.
+### Refresh Tokens
+Access tokens expire after 15 minutes. Use the refresh token to get a new pair:
+
+```bash
+curl -s -X POST http://localhost:3000/auth/refresh \
+  -H "Content-Type: application/json" \
+  -d '{"refreshToken":"<your-refresh-token>"}'
+```
+
+**Important:**
+- Each refresh token can be used **only once**.
+- A new refresh token is returned on every refresh (rotation).
+- If an already-used token is presented, the **entire family** is revoked (reuse detection). Both the thief and the real user will be logged out.
+
+### Logout
+```bash
+curl -X POST http://localhost:3000/auth/logout \
+  -H "Content-Type: application/json" \
+  -d '{"refreshToken":"<your-refresh-token>"}'
+```
+
+**Note:** Logout revokes the refresh token, but an access token that was already issued stays valid until it expires (15 min). This is the trade-off of stateless tokens.
+
+### Sessions Diagram
+
+```mermaid
+sequenceDiagram
+  participant C as Client
+  participant A as API
+  C->>A: POST /auth/login
+  A-->>C: access (15 min) + refresh R1
+  C->>A: GET /tasks (Bearer access)
+  A-->>C: 200
+  Note over C,A: access token expires
+  C->>A: POST /auth/refresh (R1)
+  A-->>C: new access + refresh R2 (R1 is now used)
+  C->>A: POST /auth/refresh (R1 again)
+  A-->>C: 401, whole family revoked
+```
 
 *Note: The `/auth/login` and `/auth/register` endpoints never reveal whether an email exists. They always return the same error message and take roughly the same amount of time (thanks to a dummy Argon2 hash).*
 
@@ -191,6 +231,7 @@ Moving list queries from JavaScript to SQL drastically reduced response times, e
 | `LOG_LEVEL` | Logging verbosity (`info` or `debug`) | `info` |
 | `JWT_SECRET` | Secret used to sign access tokens (min 32 chars) | (required) |
 | `ACCESS_TOKEN_TTL_SECONDS` | Access token lifetime in seconds | `900` (15 min) |
+| `REFRESH_TOKEN_TTL_DAYS` | Refresh token lifetime in days | `30` |
 
 ## Database
 
@@ -201,6 +242,7 @@ erDiagram
   PROJECT ||--o{ TASK : "contains (restrict)"
   USER ||--o{ TASK : "assigned (set null)"
   TASK ||--o{ COMMENT : "has (cascade)"
+  USER ||--o{ REFRESH_TOKEN : "has sessions"
 
   USER { int id PK
          string email UK
@@ -225,6 +267,13 @@ erDiagram
             int taskId FK
             string author
             string content }
+  REFRESH_TOKEN { int id PK
+                  int userId FK
+                  string tokenHash UK
+                  string familyId
+                  date expiresAt
+                  date usedAt
+                  date revokedAt }
 ```
 
 ## Production Middleware
@@ -243,7 +292,7 @@ prisma/
 
 src/
 ├── app.ts, server.ts, cli.ts
-├── auth/                 # Password hashing, JWT utilities, and policy (Actor, assertOwner)
+├── auth/                 # Password hashing, JWT utilities, refresh token helpers, policy (Actor, assertOwner)
 ├── container.ts          # Composition root
 ├── db.ts                 # Prisma Client instance
 ├── config.ts, logger.ts, errors.ts, types.ts, utils.ts
@@ -268,17 +317,21 @@ Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CO
 - [x] User registration with Argon2id
 - [x] Login and access tokens
 - [x] Protect the API (ownership & default deny)
-- [ ] Refresh tokens and logout (Day 25)
+- [x] Refresh tokens and logout
 
 ## Known Limitations
-1. **No Refresh Tokens / Logout Yet:** Access tokens expire after 15 minutes, and there's no way to log out before then. This will be fixed in Day 25.
-2. **Unauthenticated Authors:** Comment authors are supplied by the client as plain strings. This will be replaced by authenticated user IDs in Day 26.
-3. **Search Wildcards:** Searching for `%` or `_` returns all tasks because SQL `LIKE` interprets them as wildcards. To fix, escape these characters in the service layer before querying.
-4. **No Retries on `P2034`:** We haven't implemented automatic retries for deadlocks yet. If two merges clash, the user must retry manually.
-5. **No CI:** We don't have a GitHub Actions pipeline yet. This will be added in Week 7.
-6. **Offset pagination is slow on deep pages:** `OFFSET 49980` still walks past 49,980 rows. This will be fixed in Week 5 with keyset pagination.
-7. **`ILIKE` search lacks a trigram index:** The search is slow on large tables because it does a full scan. This will be fixed in Week 5.
-8. **CSV export loads all rows:** The export uses `findAll()`, which loads the entire table into memory. This will be fixed in Week 5 with a streaming query.
-9. **`/health` doesn't check the database:** It returns `ok` even if Postgres is down. This will be fixed in Week 7 with a proper readiness check.
-10. **Login is unthrottled:** There's no rate limiting on `/auth/login`, making it vulnerable to brute-force attacks. This will be fixed in Day 27.
-11. **Legacy ownership:** Tasks and projects created before this change have `createdById: null`, meaning only the CLI can modify them. There's no interface to assign ownership retroactively.
+1. **Unauthenticated Authors:** Comment authors are supplied by the client as plain strings. This will be replaced by authenticated user IDs in Day 26.
+2. **Search Wildcards:** Searching for `%` or `_` returns all tasks because SQL `LIKE` interprets them as wildcards. To fix, escape these characters in the service layer before querying.
+3. **No Retries on `P2034`:** We haven't implemented automatic retries for deadlocks yet. If two merges clash, the user must retry manually.
+4. **No CI:** We don't have a GitHub Actions pipeline yet. This will be added in Week 7.
+5. **Offset pagination is slow on deep pages:** `OFFSET 49980` still walks past 49,980 rows. This will be fixed in Week 5 with keyset pagination.
+6. **`ILIKE` search lacks a trigram index:** The search is slow on large tables because it does a full scan. This will be fixed in Week 5.
+7. **CSV export loads all rows:** The export uses `findAll()`, which loads the entire table into memory. This will be fixed in Week 5 with a streaming query.
+8. **`/health` doesn't check the database:** It returns `ok` even if Postgres is down. This will be fixed in Week 7 with a proper readiness check.
+9. **Login is unthrottled:** There's no rate limiting on `/auth/login`, making it vulnerable to brute-force attacks. This will be fixed in Day 27.
+10. **Refresh is unthrottled:** There's no rate limiting on `/auth/refresh`, so a flood of requests could exhaust the DB.
+11. **No grace window for concurrent refreshes:** Two parallel legitimate refreshes (e.g., a double-click) will kill the family and force a login. Real systems add a short grace window.
+12. **Rotation isn't wrapped in one transaction:** If the new token fails to save after the old one is used, the user must log in again.
+13. **No device list or session names:** Users can't see "logged in from iPhone" and revoke individual sessions.
+14. **Logout doesn't revoke already-issued access tokens:** A stolen access token stays valid for up to 15 minutes after logout.
+15. **Legacy ownership:** Tasks and projects created before Day 24 have `createdById: null`, meaning only the CLI can modify them.

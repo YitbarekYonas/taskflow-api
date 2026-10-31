@@ -84,6 +84,16 @@
 - **BOLA / IDOR:** Broken Object Level Authorization. The defense is `assertOwner(actor, task.createdById)` in the service.
 - **Auth Coverage:** A script (`test:auth-coverage`) iterates through every documented route and asserts it returns `401` without a token (unless marked public).
 
+### Week 4 (Sessions & Refresh Tokens)
+- **Stateless vs Stateful:** Access tokens are stateless (can't be revoked). Refresh tokens are stateful (stored in DB, revocable).
+- **Opaque Tokens:** Refresh tokens are 256 random bits. The server looks them up. No decoding, no forging.
+- **Storing Hashes:** The DB stores `SHA-256(token)`, not the token itself. If the DB leaks, the tokens are useless.
+- **Rotation:** Every refresh issues a new token and marks the old one used. A stolen token is only useful once.
+- **Reuse Detection:** If a used token is replayed, the entire family is revoked. This ends the theft at the cost of one annoyed user.
+- **Atomic Updates:** `UPDATE ... WHERE used_at IS NULL` ensures exactly one winner in a race. This prevents parallel refreshes from duplicating tokens.
+- **Logout:** Revokes the family. Idempotent and silent (always `204`) to prevent enumeration.
+- **The Limit:** Logout kills the refresh token but **not** the access token. The access token remains valid until it expires (15 min).
+
 ## Checkpoint answers (Days 2–6)
 
 *(Skipped or filled in as you go)*
@@ -276,7 +286,23 @@
 6. **What does `scripts/auth-coverage.ts` guard against?**
    > It iterates through every documented route and asserts that it returns `401` without a token (unless it's marked public). This catches a new route added without the `authenticate` middleware.
 7. **Why do legacy rows with no owner become read-only?**
-   > `assertOwner` rejects any user (except `SYSTEM`) from modifying a resource with `createdById: undefined`. This is safe because we don't know who should have permission.
+   > `assertOwner` rejects any user (   > `assertOwner` rejects any user (except `SYSTEM`) from modifying a resource with `createdById: undefined`. This is safe because we don't know who should have permission.
+
+## Day 25 Checkpoint Answers
+1. **Why does the refresh token live in your database while the access token doesn't?**
+   > The access token must be short-lived (15 min) because it can't be revoked. The refresh token must be revocable (logout, theft detection), which requires server-side state.
+2. **Why is SHA-256 fine for refresh tokens but wrong for passwords? Use the numbers from Experiment A.**
+   > A refresh token is 256 random bits (unguessable). Even at 10 billion guesses/second, exhausting 256 bits takes longer than the age of the universe. A password is low-entropy; a fast hash lets an attacker brute-force it quickly. Argon2 must be slow to make that infeasible.
+3. **What does rotation protect against, and what does reuse detection add on top?**
+   > Rotation ensures each refresh token works only once (a stolen token is useless after the real user uses it). Reuse detection catches the thief: if a used token is replayed, the whole family is revoked, logging out both the thief and the real user.
+4. **Why does `markUsed` use `UPDATE ... WHERE used_at IS NULL` and check the row count?**
+   > It's an atomic compare-and-swap. Of 10 parallel refreshes with the same token, only one gets `count === 1`. A read-then-write would let multiple win (we proved this: the test failed with the broken version).
+5. **Why is logout always `204`, even for an unknown token?**
+   > To prevent user enumeration. If we returned `404` for an unknown token, an attacker could distinguish "valid" from "invalid" tokens. `204` means "the token is dead, whatever it was."
+6. **Why must expired rows be kept until they expire, and what would break if the purge deleted used rows early?**
+   > Reuse detection looks up the old token by hash. If the row was deleted, the reuse looks like a "new" token and wouldn't revoke the family. Expired rows must stay until they can no longer be replayed.
+7. **What can a thief still do with a stolen access token after the owner logs out, and how long?**
+   > The access token remains valid until its 15-minute expiry, even after logout. The thief can make API calls during that window. This is the cost of stateless tokens, and the reason to keep them short.
 
 ## API Conventions (Day 13 Audit)
 - **POST:** Returns `201` and a `Location` header.
@@ -290,25 +316,27 @@
 - Rename columns with `RENAME COLUMN`, not `DROP` + `ADD`.
 - Adding a required column: expand (nullable) → backfill → contract (`NOT NULL`).
 - `migrate dev` on your laptop; `migrate deploy` in CI and production.
-- Seeds are idempotent (`upsert`) and never run
 - Seeds are idempotent (`upsert`) and never run in production.
 - `npm run db:check-migrations` verifies migrations from scratch.
 
 ## Known limitations
 *(Each of these is fixed by a specific upcoming week, showing forward planning).*
 
-1. **No Refresh Tokens / Logout Yet:** Access tokens expire after 15 minutes, and there's no way to log out before then. This will be fixed in **Day 25**.
-2. **Search Wildcards:** Searching for `%` or `_` returns all tasks because SQL `LIKE` interprets them as wildcards. To fix, escape these characters in the service layer before querying.
-3. **No Retries on `P2034`:** We haven't implemented automatic retries for deadlocks yet. If two merges clash, the user must retry manually.
-4. **Unauthenticated Authors:** The `author` field for comments is currently a plain string supplied by the client. This will be fixed in **Day 26** when we use the logged-in user's ID.
-5. **No Automated Tests:** We currently rely on a manual `npm run smoke` test. Proper unit and integration tests will be added in **Week 5**.
-6. **No CI:** We don't have a GitHub Actions pipeline yet. This will be added in **Week 7**.
-7. **Offset pagination is slow on deep pages:** `OFFSET 49980` still walks past 49,980 rows. This will be fixed in **Week 5** with keyset pagination.
-8. **`ILIKE` search lacks a trigram index:** The search is slow on large tables because it does a full scan. This will be fixed in **Week 5**.
-9. **CSV export loads all rows:** The export uses `findAll()`, which loads the entire table into memory. This will be fixed in **Week 5** with a streaming query.
-10. **`/health` doesn't check the database:** It returns `ok` even if Postgres is down. This will be fixed in **Week 7** with a proper readiness check.
-11. **The API is mostly protected, but not fully:** Task and project mutations are owner-only, but comments are still open to any logged-in user. This will be addressed in **Day 26**.
-12. **No token revocation:** Once a JWT is issued, it can't be revoked until it expires (15 minutes). Refresh tokens and a token blacklist will fix this in **Day 25**.
+1. **Search Wildcards:** Searching for `%` or `_` returns all tasks because SQL `LIKE` interprets them as wildcards. To fix, escape these characters in the service layer before querying.
+2. **No Retries on `P2034`:** We haven't implemented automatic retries for deadlocks yet. If two merges clash, the user must retry manually.
+3. **Unauthenticated Authors:** The `author` field for comments is currently a plain string supplied by the client. This will be fixed in **Day 26** when we use the logged-in user's ID.
+4. **No Automated Tests:** We currently rely on a manual `npm run smoke` test. Proper unit and integration tests will be added in **Week 5**.
+5. **No CI:** We don't have a GitHub Actions pipeline yet. This will be added in **Week 7**.
+6. **Offset pagination is slow on deep pages:** `OFFSET 49980` still walks past 49,980 rows. This will be fixed in **Week 5** with keyset pagination.
+7. **`ILIKE` search lacks a trigram index:** The search is slow on large tables because it does a full scan. This will be fixed in **Week 5**.
+8. **CSV export loads all rows:** The export uses `findAll()`, which loads the entire table into memory. This will be fixed in **Week 5** with a streaming query.
+9. **`/health` doesn't check the database:** It returns `ok` even if Postgres is down. This will be fixed in **Week 7** with a proper readiness check.
+10. **Login is unthrottled:** There's no rate limiting on `/auth/login`, making it vulnerable to brute-force attacks. This will be fixed in **Day 27**.
+11. **Refresh and login are unthrottled:** There's no rate limiting on `/auth/refresh` either, so a flood of requests could exhaust the DB.
+12. **No grace window for concurrent refreshes:** Two parallel legitimate refreshes (e.g., a double-click) will kill the family and force a login. Real systems add a short grace window.
+13. **Rotation isn't wrapped in one transaction:** If the new token fails to save after the old one is used, the user must log in again.
+14. **No device list or session names:** Users can't see "logged in from iPhone" and revoke individual sessions.
+15. **Logout doesn't revoke already-issued access tokens:** A stolen access token stays valid for up to 15 minutes after logout.
 
 ## Week 1 summary
 Three things I can do now that I couldn't on Day 1:
