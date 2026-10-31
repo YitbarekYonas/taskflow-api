@@ -4,7 +4,7 @@ import { createProjectSchema, duplicateProjectSchema, mergeProjectSchema, update
 import { SORT_FIELDS, createTaskSchema, updateTaskSchema } from "../schemas/task.schemas.js";
 import { PRIORITIES, STATUSES, commentSchema, projectSchema, taskSchema,userSchema } from "../types.js";
 import { registerSchema } from "../schemas/auth.schemas.js";
-import {loginSchema} from "../schemas/auth.schemas.js";
+import {loginSchema,refreshSchema} from "../schemas/auth.schemas.js";
 
 function schemaOf(schema: z.ZodType, io: "input" | "output" = "input") {
   const { $schema, ...rest } = z.toJSONSchema(schema, { io }) as Record<string, unknown>;
@@ -335,9 +335,11 @@ export const baseSpec = {
                   type: "object",
                   properties: {
                     accessToken: { type: "string" },
+                    refreshExpiresIn: { type: "integer", description: "Seconds until the refresh token expires" },
                     tokenType: { type: "string", example: "Bearer" },
                     expiresIn: { type: "integer", description: "Seconds until the token expires" },
                     user: ref("User"),
+                    refreshToken: { type: "string" }
                   },
                 },
               },
@@ -355,6 +357,60 @@ export const baseSpec = {
         summary: "The logged-in user",
         security: [{ bearerAuth: [] }],
         responses: { 200: ok("User"), 401: errorRef("Unauthorized") },
+      },
+    },
+        "/auth/refresh": {
+      post: {
+        tags: ["Auth"],
+        summary: "Exchange a refresh token for a new token pair",
+        description:
+          "Refresh tokens are single-use. Each call returns a NEW refresh token that replaces the old one. " +
+          "Presenting an already-used token revokes the whole session family (theft detection).",
+        requestBody: { required: true, content: json(schemaOf(refreshSchema)) },
+        responses: {
+          200: {
+            description: "A new access token and a new refresh token",
+            content: json({
+              type: "object",
+              properties: {
+                data: {
+                  type: "object",
+                  properties: {
+                    accessToken: { type: "string" },
+                    tokenType: { type: "string", example: "Bearer" },
+                    expiresIn: { type: "integer" },
+                    refreshToken: { type: "string" },
+                    refreshExpiresIn: { type: "integer" },
+                    user: ref("User"),
+                  },
+                },
+              },
+            }),
+          },
+          400: errorRef("BadRequest"),
+          401: errorRef("Unauthorized"),
+        },
+      },
+    },
+
+    "/auth/logout": {
+      post: {
+        tags: ["Auth"],
+        summary: "Log out this session",
+        description:
+          "Revokes the refresh token's whole family. Always returns 204, even for unknown tokens, so the " +
+          "endpoint reveals nothing. An access token that was already issued stays valid until it expires.",
+        requestBody: { required: true, content: json(schemaOf(refreshSchema)) },
+        responses: { 204: noContent, 400: errorRef("BadRequest") },
+      },
+    },
+
+    "/auth/logout-all": {
+      post: {
+        tags: ["Auth"],
+        summary: "Log out every session of the current user",
+        security: [{ bearerAuth: [] }],
+        responses: { 204: noContent, 401: errorRef("Unauthorized") },
       },
     },
   },
@@ -435,7 +491,7 @@ export const baseSpec = {
   },
 };
 const METHODS = ["get", "post", "put", "patch", "delete"] as const;
-const PUBLIC_OPS = new Set(["GET /health", "POST /auth/register", "POST /auth/login"]);
+const PUBLIC_OPS = new Set(["GET /health", "POST /auth/register", "POST /auth/login","POST /auth/refresh" , "POST /auth/logout"]);
 const FORBIDDEN_OPS = new Set([
   "PATCH /tasks/{id}",
   "DELETE /tasks/{id}",
