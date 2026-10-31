@@ -35,6 +35,7 @@ model User {
   assignedTasks  Task[]    @relation("TaskAssignee")
   createdProjects Project[] @relation("ProjectCreator")
   createdTasks   Task[]    @relation("TaskCreator")
+  refreshTokens   RefreshToken[]
   @@map("users")
 }
 
@@ -112,4 +113,24 @@ model Comment {
 
   @@index([taskId])
   @@map("comments")
+}
+
+model RefreshToken {
+  id        Int       @id @default(autoincrement())
+  userId    Int       @map("user_id")
+  // SHA-256 of the real token. The token itself is never stored.
+  tokenHash String    @unique @map("token_hash")
+  // every token descended from one login shares a family
+  familyId  String    @map("family_id")
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz(3)
+  usedAt    DateTime? @map("used_at") @db.Timestamptz(3)
+  revokedAt DateTime? @map("revoked_at") @db.Timestamptz(3)
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([familyId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
 }

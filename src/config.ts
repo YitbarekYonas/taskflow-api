@@ -12,6 +12,7 @@ const schema = z.object({
     DATABASE_URL: z.string().min(1).startsWith("postgres"),
     JWT_SECRET: z.string().min(32, "JWT_SECRET must be at least 32 characters"),
     ACCESS_TOKEN_TTL_SECONDS: z.coerce.number().int().min(60).max(86400).default(900),
+    REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().min(1).max(365).default(30),
 });
 const parsed = schema.safeParse(process.env);
 if(!parsed.success){
@@ -33,4 +34,5 @@ export const config ={
     databaseUrl: parsed.data.DATABASE_URL,
     jwtSecret: parsed.data.JWT_SECRET,
     accessTokenTtl: parsed.data.ACCESS_TOKEN_TTL_SECONDS,
+    refreshTokenTtlDays: parsed.data.REFRESH_TOKEN_TTL_DAYS,
 };
