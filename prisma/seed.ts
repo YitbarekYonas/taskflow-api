@@ -83,7 +83,13 @@ try {
             createdById: users[0].id, 
             comments:
               i % 2 === 0
-                ? { create: [{ author: users[0].name, body: `Kicking off: ${t.title}` }] }
+                ? { 
+                    create: [{ 
+                      author: users[0].name, 
+                      authorId: users[0].id, // 👈 Added
+                      body: `Kicking off: ${t.title}` 
+                    }] 
+                  }
                 : undefined,
           },
         });

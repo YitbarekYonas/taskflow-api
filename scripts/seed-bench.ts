@@ -21,6 +21,12 @@ try {
       orderBy: { id: "asc" },
     });
 
+        const sam = await prisma.user.findUnique({ where: { email: "sam@example.com" } });
+    if (sam) {
+      await prisma.projectMember.createMany({
+        data: projects.map((p) => ({ projectId: p.id, userId: sam.id, role: "member" as const })),
+      });
+    }
     for (let start = 0; start < TOTAL; start += CHUNK) {
       const data = Array.from({ length: CHUNK }, (_, k) => {
         const i = start + k;
