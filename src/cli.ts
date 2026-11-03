@@ -100,7 +100,7 @@ async function run(cmd: Command): Promise<void> {
       break;
     }
     case "list": {
-      const tasks = await listTasks({ status: cmd.status });
+      const tasks = await listTasks({ status: cmd.status },SYSTEM);
       if (tasks.length === 0) console.log("No tasks found.");
       tasks.forEach((t) => console.log(formatTask(t)));
       break;
@@ -121,7 +121,7 @@ async function run(cmd: Command): Promise<void> {
       break;
     }
     case "export": {
-      console.log(`Exported to ${await exportCsv(cmd.file)}`);
+      console.log(`Exported to ${await exportCsv(cmd.file,SYSTEM)}`);
       break;
     }
     case "help": {
@@ -135,13 +135,13 @@ async function run(cmd: Command): Promise<void> {
       break;
     }
     case "overdue": {
-      const tasks = await listOverdue();
+      const tasks = await listOverdue(SYSTEM);
       if (tasks.length === 0) console.log("Nothing overdue.");
       tasks.forEach((t) => console.log(formatTask(t)));
       break;
     }
     case "summary": {
-      const counts = await summary();
+      const counts = await summary(SYSTEM);
       console.log(`todo: ${counts.todo}  in progress: ${counts.in_progress}  done: ${counts.done}`);
       break;
     }

@@ -1,8 +1,8 @@
 import { Router } from "express";
-import { create, getById, list, remove, update } from "../controllers/projects.controller.js";
+import { addMember, changeRole, create, getById, list, listMembers, remove, removeMember, update } from "../controllers/projects.controller.js";
 import { validate } from "../middleware/validate.js";
-import { idParamSchema } from "../schemas/common.schemas.js";
-import { createProjectSchema, updateProjectSchema } from "../schemas/project.schemas.js";
+import { idParamSchema,memberParamsSchema } from "../schemas/common.schemas.js";
+import { createProjectSchema, updateProjectSchema,addMemberSchema,changeRoleSchema } from "../schemas/project.schemas.js";
 import { listTasks } from "../controllers/projects.controller.js";
 import { listTasksQuerySchema } from "../schemas/task.schemas.js";
 import { duplicate, merge } from "../controllers/projects.controller.js";
@@ -30,3 +30,15 @@ projectsRouter.post("/", validate({ body: createProjectSchema }), create);
 projectsRouter.get("/:id", validate({ params: idParamSchema }), getById);
 projectsRouter.patch("/:id", validate({ params: idParamSchema, body: updateProjectSchema }), update);
 projectsRouter.delete("/:id", validate({ params: idParamSchema }), remove);
+projectsRouter.get("/:id/members", validate({ params: idParamSchema }), listMembers);
+projectsRouter.post(
+  "/:id/members",
+  validate({ params: idParamSchema, body: addMemberSchema }),
+  addMember
+);
+projectsRouter.patch(
+  "/:id/members/:userId",
+  validate({ params: memberParamsSchema, body: changeRoleSchema }),
+  changeRole
+);
+projectsRouter.delete("/:id/members/:userId", validate({ params: memberParamsSchema }), removeMember);

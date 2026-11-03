@@ -10,3 +10,7 @@ export const taskIdParamSchema = z.object({
 export const commentParamsSchema = taskIdParamSchema.extend({
   commentId: z.coerce.number().int().positive(),
 });
+
+export const memberParamsSchema = idParamSchema.extend({
+  userId: z.coerce.number().int().positive(),
+});
