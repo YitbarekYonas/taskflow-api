@@ -36,6 +36,7 @@ model User {
   createdProjects Project[] @relation("ProjectCreator")
   createdTasks   Task[]    @relation("TaskCreator")
   refreshTokens   RefreshToken[]
+  comments        Comment[]      @relation("CommentAuthor")
   @@map("users")
 }
 
@@ -110,8 +111,10 @@ model Comment {
 
   // Cascade = a comment cannot outlive its task
   task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
-
+  authorId   Int?    @map("author_id")
+  authorUser User?   @relation("CommentAuthor", fields: [authorId], references: [id], onDelete: SetNull)
   @@index([taskId])
+  @@index([authorId])
   @@map("comments")
 }
 

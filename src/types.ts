@@ -24,6 +24,7 @@ export const commentSchema = z.object({
   body: z.string().min(1),
   createdAt: z.string(),
   updatedAt: z.string().optional(),
+  authorId: z.number().int().positive().optional(),
 });
 export type Comment = z.infer<typeof commentSchema>;
 
@@ -48,4 +49,6 @@ export const userSchema = z.object({
   name: z.string().min(1),
   createdAt: z.string(),
 });
+export const ROLES = ["owner", "member"] as const;
+export type Role = (typeof ROLES)[number];
 export type User = z.infer<typeof userSchema>;
