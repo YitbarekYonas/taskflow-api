@@ -4,7 +4,7 @@ import type { Status, Task } from "../types.js";
 
 export interface TaskRepository extends Repository<Task> {
   // filter + sort + one page, plus the total number of matches
-  query(q: TaskQuery): Promise<{ items: Task[]; total: number }>;
+  query(q: TaskQuery, scope?: { userId: number }): Promise<{ items: Task[]; total: number }>;
   findOverdue(today: string): Promise<Task[]>;
   countByStatus(): Promise<Record<Status, number>>;
   findByProject(projectId: number): Promise<Task[]>;
@@ -12,7 +12,7 @@ export interface TaskRepository extends Repository<Task> {
   insertMany(items: Array<Omit<Task, "id">>): Promise<number>;
 }
 export interface ProjectRepository extends Repository<Project> {
-  findAllWithTaskCount(): Promise<Array<Project & { taskCount: number }>>;
+  findAllWithTaskCount(scope?: { userId: number }): Promise<Array<Project & { taskCount: number }>>;
 }
 export interface Repository<T extends { id: number }> {
   findAll(): Promise<T[]>;

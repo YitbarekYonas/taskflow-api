@@ -1,10 +1,14 @@
 import type { Comment } from "../types.js";
+import type { MemberRepository } from "./memberRepository.js";
 import type { ProjectRepository, Repository, TaskRepository } from "./repository.js";
+import type { UserRepository } from "./userRepository.js";
 
 export type TxRepositories = {
   tasks: TaskRepository;
   projects: ProjectRepository;
   comments: Repository<Comment>;
+  members: MemberRepository;
+  users: UserRepository;
 };
 
 export interface UnitOfWork {
