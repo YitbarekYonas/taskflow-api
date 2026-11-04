@@ -104,6 +104,17 @@
 - **The Last-Owner Invariant:** `SELECT ... FOR UPDATE` locks the project row while checking if the last owner is being demoted/removed. Without it, two concurrent demotions can leave zero owners.
 - **Locking:** The row lock prevents the race condition. The check is done **twice** (before and after acquiring the lock) to ensure the user is still an owner after waiting.
 
+### Week 4 (Rate Limiting & Security Review)
+- **Rate limiting:** Prevents brute-force, credential stuffing, scraping, and enumeration. It's not a perfect defense, but it raises the cost of attacks.
+- **The key matters:** Per-IP (before login, shared by many), per-account (protects a victim, but allows lockout), per-user (precise, only after auth).
+- **`trust proxy`:** Must exactly match the number of proxies in front of the app. Too high → attackers can forge `X-Forwarded-For` and bypass limits. Too low → everyone behind a proxy shares one IP (false blocks).
+- **Rate limit headers:** `429` with `Retry-After` and `RateLimit` headers tells clients when to back off.
+- **Security headers:** Helmet sets `X-Content-Type-Options`, `Strict-Transport-Security`, etc. `X-Powered-By` is removed.
+- **CORS:** Browsers block cross-origin requests unless the server allows them. `curl` ignores CORS.
+- **NUL characters and out-of-range integers:** PostgreSQL rejects both with a `500`. Zod must reject them first with a `400`.
+- **OWASP API Top 10:** All ten risks were reviewed. Most are addressed (BOLA, authentication, authorization, etc.). API7 and API10 are not applicable yet.
+- **Secret scanning:** `gitleaks` found no secrets in 123 commits. `npm audit` found 0 vulnerabilities.
+
 ## Checkpoint answers (Days 2–6)
 
 *(Skipped or filled in as you go)*
@@ -276,7 +287,7 @@
 4. **Why does `authenticate` look the user up even though the signature is valid?**
    > A valid signature means the token was issued by us, but the user might have been deleted since then. Looking them up in the database ensures the account still exists.
 5. **Name two different ways a login endpoint can reveal that an email exists, and how you closed each one.**
-   > 1) Different error messages ("User not found" vs "Wrong password") — closed by using the same message. 2) Different response times (fast for unknown email, slow for real email because of hashing) — closed by always running a hash against a dummy value for unknown users.
+   > 1) Different error messages ("User not found" vs "Wrong password") — closed by using the same message. 2) Different response   > 1) Different error messages ("User not found" vs "Wrong password") — closed by using the same message. 2) Different response times (fast for unknown email, slow for real email because of hashing) — closed by always running a hash against a dummy value for unknown users.
 6. **Why must `Authorization` be in the CORS `allowedHeaders`, and why did `curl` never show that problem?**
    > CORS is enforced by browsers, not by `curl`. Without it, the browser's preflight request would be rejected, and any request with a token would fail. `curl` ignores CORS headers entirely.
 7. **Why is a 15-minute expiry a security feature, and what problem does it create that refresh tokens solve?**
@@ -286,7 +297,7 @@
 1. **When is a failed request a `401`, a `403` and a `404`?**
    > `401`: No credentials or invalid token. `403`: Valid token, but you aren't the creator (or don't have permission). `404`: The resource doesn't exist at all (including when we want to hide its existence).
 2. **What is Broken Object Level Authorization, and which line of your code is the defense?**
-   > BOLA (IDOR) is when an endpoint checks you're logged in but not that *the specific object* is yours. The defense is the `assertOwner(actor, task.createdById)` call in   > BOLA (IDOR) is when an endpoint checks you're logged in but not that *the specific object* is yours. The defense is the `assertOwner(actor, task.createdById)` call in the service.
+   > BOLA (IDOR) is when an endpoint checks you're logged in but not that *the specific object* is yours. The defense is the `assertOwner(actor, task.createdById)` call in the service.
 3. **Why does the policy live in a function that services call, instead of in the routes?**
    > If the check is in the route, a new route or a CLI call might forget it. Putting it in the service ensures every code path goes through the same rule.
 4. **Why does `authenticate` run before `validate`, and what would an attacker learn if the order were reversed?**
@@ -332,12 +343,45 @@
 8. **Which cells of your prediction table did you get wrong, and what does that tell you about how your intuition and your code disagree?**
    > (Write your own answer from the experiment.)
 
+## Day 27 Checkpoint Answers
+1. **Why does the limiter sit after CORS but before the body parser?**
+   > After CORS so a `429` still carries the CORS headers the browser needs to read it. Before the body parser so attackers can't make you parse huge bodies for free (the limiter runs before the expensive operation).
+2. **Which three keys did you use, and what attack does each one stop?**
+   > **IP:** stops a single machine spraying many accounts or flooding any route. **Account (email):** stops one attacker from guessing a single victim's password, even from many IPs. **User ID:** stops an authenticated user from hammering a sensitive flow (like member invites) too fast.
+3. **What can an attacker do to a victim when you throttle per account, and what would you change to reduce that?**
+   > An attacker can lock the victim out by sending wrong passwords until the account is throttled (`429`). To reduce this, we could use a shorter window, or add a challenge (CAPTCHA) instead of a hard block, or only throttle failures after a successful login attempt.
+4. **Explain both `trust proxy` mistakes: what happens with 0 hops behind a real proxy, and with 1 hop and no proxy at all?**
+   > **0 hops behind a proxy:** the app sees every request as coming from the proxy's IP, so per-IP limits become one global limit (false blocks). **1 hop with no proxy:** the app trusts the `X-Forwarded-For` header, so an attacker can forge it and get a fresh limit for each fake IP (complete bypass).
+5. **Why must a custom key function that falls back to an IP use `ipKeyGenerator`?**
+   > IPv6 clients often control a whole `/64` block of addresses. Without `ipKeyGenerator`, they could rotate through millions of IPs and bypass the limit. `ipKeyGenerator` groups addresses by subnet.
+6. **Why `skipSuccessfulRequests` for logins but not for registrations?**
+   > A successful login means the user entered the correct password, so it's not an attack. A successful registration always costs an Argon2 hash, so it must count even when it succeeds (to prevent someone spamming registrations).
+7. **Which inputs made the server return `500` before today's fixes, and why is a `500` on bad input a security problem and not just an annoyance?**
+   > Out-of-range integers (larger than 2,147,483,647) and NUL characters (`\u0000`). A `500` leaks that the input reached the database and crashed it — an attacker can use that to map your schema or trigger expensive queries. A `400` is safe and explicit.
+8. **What would stop working if you ran two server instances behind a load balancer with the current in-memory counters?**
+   > The counters are per-process. Two instances each have their own budget, so an attacker can double their attempts by spreading them across instances. Week 6 moves the counters to Redis so all instances share them.
+
+## OWASP API Top 10 (Day 27 Review)
+
+| Risk | In TaskFlow | Where | Gap? |
+|---|---|---|---|
+| API1 Broken Object Level Authorization | `requireProjectRole` / `requireTaskRole` in services | `src/auth/access.ts`, `src/services/*.ts` | No |
+| API2 Broken Authentication | Argon2id + timing-safe login + JWT + refresh rotation | `src/auth/password.ts`, `src/auth/tokens.ts`, `src/services/auth.service.ts` | No |
+| API3 Broken Object Property Level Authorization | `.strict()` Zod schemas, `passwordHash` not in `User` | `src/schemas/*.ts`, `src/types.ts` | No |
+| API4 Unrestricted Resource Consumption | Rate limits, body limit, server timeouts | `src/middleware/limiters.ts`, `src/app.ts`, `src/server.ts` | No |
+| API5 Broken Function Level Authorization | Role-based access on every mutation | `src/services/*.ts` | No |
+| API6 Unrestricted Access to Sensitive Business Flows | `/auth/login` + `/register` + `/refresh` throttled | `src/routes/auth.routes.ts` | No |
+| API7 Server-Side Request Forgery | Not applicable yet (server never fetches URLs) | — | — |
+| API8 Security Misconfiguration | Helmet, CORS allow-list, `JWT_SECRET` guard, `RATE_LIMIT_ENABLED` guard | `src/app.ts`, `src/config.ts` | No |
+| API9 Improper Inventory Management | `/docs` can be disabled via `DOCS_ENABLED=false` | `src/config.ts`, `src/app.ts` | Partial (docs are public by default) |
+| API10 Unsafe Consumption of APIs | Not applicable yet (server never calls other APIs) | — | — |
+
 ## API Conventions (Day 13 Audit)
 - **POST:** Returns `201` and a `Location` header.
 - **Errors:** All errors use the `{ "error": { "message": "..." } }` shape.
 - **Lists:** All list responses are wrapped in a `data` array. Projects do not have `meta` yet because we haven't added pagination to them.
 - **Casing:** All JSON field names are `camelCase`.
-- **Status Codes:** 400 (bad input), 401 (unauthenticated), 403 (forbidden), 404 (missing URL resource), 409 (state conflict).
+- **Status Codes:** 400 (bad input), 401 (unauthenticated), 403 (forbidden), 404 (missing URL resource), 409 (state conflict), 413 (payload too large), 429 (rate limited).
 
 ## Migration Rules (Day 20)
 - Never edit an applied migration (Prisma checks the checksum).
@@ -358,17 +402,17 @@
 6. **`ILIKE` search lacks a trigram index:** The search is slow on large tables because it does a full scan. This will be fixed in **Week 5**.
 7. **CSV export loads all rows:** The export uses `findAll()`, which loads the entire table into memory. This will be fixed in **Week 5** with a streaming query.
 8. **`/health` doesn't check the database:** It returns `ok` even if Postgres is down. This will be fixed in **Week 7** with a proper readiness check.
-9. **Login is unthrottled:** There's no rate limiting on `/auth/login`, making it vulnerable to brute-force attacks. This will be fixed in **Day 27**.
-10. **Refresh is unthrottled:** There's no rate limiting on `/auth/refresh`, so a flood of requests could exhaust the DB.
-11. **No grace window for concurrent refreshes:** Two parallel legitimate refreshes (e.g., a double-click) will kill the family and force a login. Real systems add a short grace window.
-12. **Rotation isn't wrapped in one transaction:** If the new token fails to save after the old one is used, the user must log in again.
-13. **No device list or session names:** Users can't see "logged in from iPhone" and revoke individual sessions.
-14. **Logout doesn't revoke already-issued access tokens:** A stolen access token stays valid for up to 15 minutes after logout.
-15. **Adding members by email reveals which emails have accounts:** Rate limiting (Day 27) makes probing slow, but not impossible. Invitations (challenge) would remove the oracle.
+9. **Rate limits are in-memory:** They reset on restart and don't share between instances. Week 6 moves them to Redis.
+10. **Per-account throttle can be abused to lock a victim out:** An attacker can flood `/auth/login` with wrong passwords until the account is throttled. Rate limiting makes it slow, but not impossible.
+11. **No CAPTCHA or MFA:** A determined attacker with a botnet can still try many passwords.
+12. **No email verification:** Accounts can be created with fake emails.
+13. **Access tokens cannot be revoked:** A stolen access token stays valid for up to 15 minutes after logout.
+14. **Member invites reveal email existence:** Adding a member by email returns `404` if the user doesn't exist. Rate limiting makes probing slow, but not impossible.
+15. **No automated alerting:** Repeated `auth 401` events are logged but not flagged.
 16. **Only two roles (owner, member):** No read-only "viewer" role yet.
-17. **Legacy tasks and projects with no owner are invisible:** Only the CLI can see/modify them. This is the safe default.
-18. **Moving a task out of a project can orphan it from a creator who left:** If a task is moved to a personal task, the original creator can no longer see it (since they aren't the current creator and it has no project).
-19. **`listComments` still loads every comment before filtering:** It uses `findAll()` instead of a `WHERE taskId = ?` query. This will be fixed in Week 5.
+17. **Legacy tasks and projects with no owner are invisible:** Only the CLI can see/modify them.
+18. **Moving a task out of a project can orphan it from a creator who left.**
+19. **`listComments` still loads every comment before filtering:** It uses `findAll()` instead of a `WHERE taskId = ?` query.
 
 ## Week 1 summary
 Three things I can do now that I couldn't on Day 1:
