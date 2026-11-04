@@ -35,7 +35,7 @@ const listOf = (name: string) => ({
   type: "object",
   properties: { data: { type: "array", items: ref(name) } },
 });
-const errorRef = (name: "BadRequest" | "NotFound" | "Conflict" | "Unauthorized" | "Forbidden") => ({
+const errorRef = (name: "BadRequest" | "NotFound" | "Conflict" | "Unauthorized" | "Forbidden"|"RateLimited") => ({
   $ref: `#/components/responses/${name}`,
 });
 const query = (name: string, schema: object, description?: string) => ({
@@ -550,6 +550,21 @@ export const baseSpec = {
       Conflict: { description: "The request is valid but conflicts with the current state", content: json(ref("Error")) },
       Unauthorized: { description: "Missing, invalid or expired credentials", content: json(ref("Error")) },
       Forbidden: { description: "You are logged in but not allowed to do this", content: json(ref("Error")) },
+            RateLimited: {
+        description: "Too many requests. Wait for `retryAfterSeconds` (also sent as a Retry-After header).",
+        headers: {
+          "Retry-After": { schema: { type: "integer" }, description: "Seconds until the limit resets" },
+        },
+        content: json({
+          type: "object",
+          properties: {
+            error: {
+              type: "object",
+              properties: { message: { type: "string" }, retryAfterSeconds: { type: "integer" } },
+            },
+          },
+        }),
+      },
     },
   },
 };
@@ -576,6 +591,7 @@ function withSecurity<T extends { paths: object }>(spec: T): T {
         op.security = []; // overrides the global requirement
         continue;
       }
+      if (key !== "GET /health") op.responses["429"] ??= errorRef("RateLimited");
       op.responses["401"] ??= errorRef("Unauthorized");
       if (FORBIDDEN_OPS.has(key)) op.responses["403"] ??= errorRef("Forbidden");
     }
