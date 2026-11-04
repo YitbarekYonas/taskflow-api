@@ -33,7 +33,8 @@
     "test:auth-coverage": "tsx scripts/auth-coverage.ts",
     "auth:purge": "tsx scripts/purge-tokens.ts",
     "test:refresh": "tsx scripts/refresh-flow.ts",
-    "test:access": "tsx scripts/access-attacks.ts"
+    "test:access": "tsx scripts/access-attacks.ts",
+    "test:ratelimit": "tsx scripts/test-ratelimit.ts"
   },
   "keywords": [
     "taskflow",

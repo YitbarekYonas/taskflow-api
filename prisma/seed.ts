@@ -86,7 +86,7 @@ try {
                 ? { 
                     create: [{ 
                       author: users[0].name, 
-                      authorId: users[0].id, // 👈 Added
+                      authorId: users[0].id, 
                       body: `Kicking off: ${t.title}` 
                     }] 
                   }

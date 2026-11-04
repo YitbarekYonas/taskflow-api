@@ -17,7 +17,6 @@ authRouter.use((_req, res, next) => {
 authRouter.post("/refresh", validate({ body: refreshSchema }), refresh);
 authRouter.post("/logout", validate({ body: refreshSchema }), logout);
 authRouter.post("/logout-all", authenticate, logoutAll);
-authRouter.post("/register", validate({ body: registerSchema }), register);
 authRouter.post("/login", validate({ body: loginSchema }), login);
 authRouter.get("/me", authenticate, me);
 authRouter.post("/register", registerLimiter, validate({ body: registerSchema }), register);
