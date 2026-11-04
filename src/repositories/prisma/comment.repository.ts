@@ -15,18 +15,20 @@ function toComment(row: CommentRow): Comment {
     body: row.body,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt?.toISOString(),
+    authorId: row.authorId ?? undefined
   };
 }
 
 function toColumns(d: Partial<CommentData>) {
   const c: {
-    taskId?: number; author?: string; body?: string; createdAt?: Date; updatedAt?: Date | null;
+    taskId?: number; author?: string; body?: string; createdAt?: Date; updatedAt?: Date | null; authorId?: number | null;
   } = {};
   if (d.taskId !== undefined) c.taskId = d.taskId;
   if (d.author !== undefined) c.author = d.author;
   if (d.body !== undefined) c.body = d.body;
   if (d.createdAt !== undefined) c.createdAt = new Date(d.createdAt);
   if ("updatedAt" in d) c.updatedAt = d.updatedAt ? new Date(d.updatedAt) : null;
+  if (d.authorId !== undefined) c.authorId = d.authorId;
   return c;
 }
 

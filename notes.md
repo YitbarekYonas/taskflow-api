@@ -94,6 +94,16 @@
 - **Logout:** Revokes the family. Idempotent and silent (always `204`) to prevent enumeration.
 - **The Limit:** Logout kills the refresh token but **not** the access token. The access token remains valid until it expires (15 min).
 
+### Week 4 (Roles & Project Membership)
+- **Horizontal vs Vertical Escalation:** Horizontal = reaching another user's data at your own level. Vertical = doing something your role forbids (e.g., a member renaming the project).
+- **Roles Belong to the Resource:** A user can be an `owner` of one project and a `member` of another. The role lives on the `ProjectMember` row, not the user.
+- **Stranger vs Member vs Owner:** Strangers get `404` (existence is hidden). Members get `403` for owner-only actions. Owners have full control.
+- **No Ownership in the JWT:** Roles are looked up on every request. Removing a user from a project takes effect immediately (no waiting for a 15-minute token expiry).
+- **Filter Lists in SQL:** `GET /tasks` filters by membership in the `WHERE` clause. This prevents leaking hidden rows via `meta.total`.
+- **Comment Authorship:** The author is the logged-in user. A client cannot forge `author` in the body.
+- **The Last-Owner Invariant:** `SELECT ... FOR UPDATE` locks the project row while checking if the last owner is being demoted/removed. Without it, two concurrent demotions can leave zero owners.
+- **Locking:** The row lock prevents the race condition. The check is done **twice** (before and after acquiring the lock) to ensure the user is still an owner after waiting.
+
 ## Checkpoint answers (Days 2–6)
 
 *(Skipped or filled in as you go)*
@@ -276,7 +286,7 @@
 1. **When is a failed request a `401`, a `403` and a `404`?**
    > `401`: No credentials or invalid token. `403`: Valid token, but you aren't the creator (or don't have permission). `404`: The resource doesn't exist at all (including when we want to hide its existence).
 2. **What is Broken Object Level Authorization, and which line of your code is the defense?**
-   > BOLA (IDOR) is when an endpoint checks you're logged in but not that *the specific object* is yours. The defense is the `assertOwner(actor, task.createdById)` call in the service.
+   > BOLA (IDOR) is when an endpoint checks you're logged in but not that *the specific object* is yours. The defense is the `assertOwner(actor, task.createdById)` call in   > BOLA (IDOR) is when an endpoint checks you're logged in but not that *the specific object* is yours. The defense is the `assertOwner(actor, task.createdById)` call in the service.
 3. **Why does the policy live in a function that services call, instead of in the routes?**
    > If the check is in the route, a new route or a CLI call might forget it. Putting it in the service ensures every code path goes through the same rule.
 4. **Why does `authenticate` run before `validate`, and what would an attacker learn if the order were reversed?**
@@ -286,7 +296,7 @@
 6. **What does `scripts/auth-coverage.ts` guard against?**
    > It iterates through every documented route and asserts that it returns `401` without a token (unless it's marked public). This catches a new route added without the `authenticate` middleware.
 7. **Why do legacy rows with no owner become read-only?**
-   > `assertOwner` rejects any user (   > `assertOwner` rejects any user (except `SYSTEM`) from modifying a resource with `createdById: undefined`. This is safe because we don't know who should have permission.
+   > `assertOwner` rejects any user (except `SYSTEM`) from modifying a resource with `createdById: undefined`. This is safe because we don't know who should have permission.
 
 ## Day 25 Checkpoint Answers
 1. **Why does the refresh token live in your database while the access token doesn't?**
@@ -303,6 +313,24 @@
    > Reuse detection looks up the old token by hash. If the row was deleted, the reuse looks like a "new" token and wouldn't revoke the family. Expired rows must stay until they can no longer be replayed.
 7. **What can a thief still do with a stolen access token after the owner logs out, and how long?**
    > The access token remains valid until its 15-minute expiry, even after logout. The thief can make API calls during that window. This is the cost of stateless tokens, and the reason to keep them short.
+
+## Day 26 Checkpoint Answers
+1. **When does a request get `404`, and when `403`, in TaskFlow? Why did Day 24's `403`s on strangers become `404`s?**
+   > `404` for strangers (they can't see the project exists). `403` for members who lack the required role (e.g., a member trying to rename a project). Day 24's `403`s became `404`s because today we hide a project's existence from strangers entirely.
+2. **Why are roles looked up in the database on every request instead of stored in the JWT?**
+   > Because roles change. If a user is removed from a project, a token that says "user is a member" would still grant access until the token expires (15 min). Looking up the role from the database on every request keeps it fresh.
+3. **Why must the visibility filter be part of the `WHERE` (and the `count`) instead of removing hidden rows afterwards?**
+   > If you filter after the database query, `meta.total` would include hidden rows (leaking counts) and pagination would skip rows (returning fewer results than expected). The `WHERE` must filter before both the page query and the count.
+4. **Why does `addComment` ignore any author the client sends, and why do we still store the name next to `authorId`?**
+   > The author comes from the token (`actor.id`), not the body. Storing the name is a snapshot for display. If the user is later deleted (or renamed), old comments still show the original name. The `authorId` is the real link for permissions.
+5. **Explain the last-owner race: what does each request see, and what does `FOR UPDATE` change?**
+   > Without `FOR UPDATE`, two owners can demote each other at the same time. Both requests see 2 owners, both check "is this the last owner?" → false, both succeed → 0 owners. `FOR UPDATE` locks the project row, so the second request waits until the first finishes, then re-checks and sees only 1 owner → rejects the demotion.
+6. **Why does `changeRole` check the caller's role twice, once before and once after taking the lock?**
+   > The first check is cheap (no lock) and rejects strangers/members early. The second check is after the lock: another transaction may have changed the caller's role while waiting for the lock. Without the second check, a demoted owner could still act as an owner.
+7. **What does "add member by email" reveal to an owner, and how will rate limiting (tomorrow) and invitations (challenge 2) limit it?**
+   > It reveals whether an email has an account ("No user with that email" vs "Added"). Rate limiting (Day 27) makes probing slow. Invitations (challenge 2) would remove the endpoint entirely, so the server never confirms whether an email is registered.
+8. **Which cells of your prediction table did you get wrong, and what does that tell you about how your intuition and your code disagree?**
+   > (Write your own answer from the experiment.)
 
 ## API Conventions (Day 13 Audit)
 - **POST:** Returns `201` and a `Location` header.
@@ -324,19 +352,23 @@
 
 1. **Search Wildcards:** Searching for `%` or `_` returns all tasks because SQL `LIKE` interprets them as wildcards. To fix, escape these characters in the service layer before querying.
 2. **No Retries on `P2034`:** We haven't implemented automatic retries for deadlocks yet. If two merges clash, the user must retry manually.
-3. **Unauthenticated Authors:** The `author` field for comments is currently a plain string supplied by the client. This will be fixed in **Day 26** when we use the logged-in user's ID.
-4. **No Automated Tests:** We currently rely on a manual `npm run smoke` test. Proper unit and integration tests will be added in **Week 5**.
-5. **No CI:** We don't have a GitHub Actions pipeline yet. This will be added in **Week 7**.
-6. **Offset pagination is slow on deep pages:** `OFFSET 49980` still walks past 49,980 rows. This will be fixed in **Week 5** with keyset pagination.
-7. **`ILIKE` search lacks a trigram index:** The search is slow on large tables because it does a full scan. This will be fixed in **Week 5**.
-8. **CSV export loads all rows:** The export uses `findAll()`, which loads the entire table into memory. This will be fixed in **Week 5** with a streaming query.
-9. **`/health` doesn't check the database:** It returns `ok` even if Postgres is down. This will be fixed in **Week 7** with a proper readiness check.
-10. **Login is unthrottled:** There's no rate limiting on `/auth/login`, making it vulnerable to brute-force attacks. This will be fixed in **Day 27**.
-11. **Refresh and login are unthrottled:** There's no rate limiting on `/auth/refresh` either, so a flood of requests could exhaust the DB.
-12. **No grace window for concurrent refreshes:** Two parallel legitimate refreshes (e.g., a double-click) will kill the family and force a login. Real systems add a short grace window.
-13. **Rotation isn't wrapped in one transaction:** If the new token fails to save after the old one is used, the user must log in again.
-14. **No device list or session names:** Users can't see "logged in from iPhone" and revoke individual sessions.
-15. **Logout doesn't revoke already-issued access tokens:** A stolen access token stays valid for up to 15 minutes after logout.
+3. **No Automated Tests:** We currently rely on a manual `npm run smoke` test. Proper unit and integration tests will be added in **Week 5**.
+4. **No CI:** We don't have a GitHub Actions pipeline yet. This will be added in **Week 7**.
+5. **Offset pagination is slow on deep pages:** `OFFSET 49980` still walks past 49,980 rows. This will be fixed in **Week 5** with keyset pagination.
+6. **`ILIKE` search lacks a trigram index:** The search is slow on large tables because it does a full scan. This will be fixed in **Week 5**.
+7. **CSV export loads all rows:** The export uses `findAll()`, which loads the entire table into memory. This will be fixed in **Week 5** with a streaming query.
+8. **`/health` doesn't check the database:** It returns `ok` even if Postgres is down. This will be fixed in **Week 7** with a proper readiness check.
+9. **Login is unthrottled:** There's no rate limiting on `/auth/login`, making it vulnerable to brute-force attacks. This will be fixed in **Day 27**.
+10. **Refresh is unthrottled:** There's no rate limiting on `/auth/refresh`, so a flood of requests could exhaust the DB.
+11. **No grace window for concurrent refreshes:** Two parallel legitimate refreshes (e.g., a double-click) will kill the family and force a login. Real systems add a short grace window.
+12. **Rotation isn't wrapped in one transaction:** If the new token fails to save after the old one is used, the user must log in again.
+13. **No device list or session names:** Users can't see "logged in from iPhone" and revoke individual sessions.
+14. **Logout doesn't revoke already-issued access tokens:** A stolen access token stays valid for up to 15 minutes after logout.
+15. **Adding members by email reveals which emails have accounts:** Rate limiting (Day 27) makes probing slow, but not impossible. Invitations (challenge) would remove the oracle.
+16. **Only two roles (owner, member):** No read-only "viewer" role yet.
+17. **Legacy tasks and projects with no owner are invisible:** Only the CLI can see/modify them. This is the safe default.
+18. **Moving a task out of a project can orphan it from a creator who left:** If a task is moved to a personal task, the original creator can no longer see it (since they aren't the current creator and it has no project).
+19. **`listComments` still loads every comment before filtering:** It uses `findAll()` instead of a `WHERE taskId = ?` query. This will be fixed in Week 5.
 
 ## Week 1 summary
 Three things I can do now that I couldn't on Day 1:

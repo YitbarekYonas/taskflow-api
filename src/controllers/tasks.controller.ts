@@ -5,13 +5,13 @@ import type { NewTask } from "../types.js";
 import { actorOf } from "../middleware/authenticate.js";
 
 export async function list(_req: Request, res: Response) {
-  const { items, meta } = await taskService.queryTasks(res.locals.query as TaskQuery);
+  const { items, meta } = await taskService.queryTasks(res.locals.query as TaskQuery, actorOf(res));
   res.json({ data: items, meta });
 }
 
 export async function getById(_req: Request, res: Response) {
   const { id } = res.locals.params as { id: number };
-  res.json({ data: await taskService.getTask(id) });
+  res.json({ data: await taskService.getTask(id, actorOf(res)) });
 }
 
 export async function create(_req: Request, res: Response) {

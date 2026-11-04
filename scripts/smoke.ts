@@ -76,7 +76,8 @@ const p2 = await call("GET", "/tasks?sort=priority&order=desc&limit=5&page=2");
 const pagedIds = [...p1.json.data, ...p2.json.data].map((t: { id: number }) => t.id);
 check("  pages with many ties never overlap", new Set(pagedIds).size === pagedIds.length);
 
-const comment = await expectStatus("add comment", 201, "POST", `/tasks/${tid}/comments`, { author: "Smoke", body: "Hello" });
+// Step 18: author is no longer required
+const comment = await expectStatus("add comment", 201, "POST", `/tasks/${tid}/comments`, { body: "Hello" });
 const cid = comment.json.data.id;
 await expectStatus("get comment", 200, "GET", `/tasks/${tid}/comments/${cid}`);
 
@@ -112,25 +113,33 @@ await expectStatus("projects without a token", 401, "GET", "/projects", undefine
 await expectStatus("create task without a token", 401, "POST", "/tasks", { title: "x" }, anon);
 await expectStatus("invalid body is still 401 first", 401, "POST", "/tasks", { title: "" }, anon);
 
-// Ownership: B can read A's things but not change them
-const mineTask = await expectStatus("A creates a task", 201, "POST", "/tasks", { title: "Owned by A" });
+// --- Step 18: Access control (strangers see nothing) ---
+const asB = { Authorization: `Bearer ${userB.token}` };
+
+const mineTask = await expectStatus("A creates a personal task", 201, "POST", "/tasks", { title: "Owned by A" });
 check("  createdById is set", typeof mineTask.json.data.createdById === "number", JSON.stringify(mineTask.json));
 const mineId = mineTask.json.data.id;
-const asB = { Authorization: `Bearer ${userB.token}` };
-await expectStatus("B can read A's task", 200, "GET", `/tasks/${mineId}`, undefined, asB);
-await expectStatus("B cannot patch A's task", 403, "PATCH", `/tasks/${mineId}`, { title: "Hijacked" }, asB);
-await expectStatus("B cannot delete A's task", 403, "DELETE", `/tasks/${mineId}`, undefined, asB);
+
+await expectStatus("B cannot read A's personal task", 404, "GET", `/tasks/${mineId}`, undefined, asB);
+await expectStatus("B cannot patch it", 404, "PATCH", `/tasks/${mineId}`, { title: "Hijacked" }, asB);
+await expectStatus("B cannot delete it", 404, "DELETE", `/tasks/${mineId}`, undefined, asB);
+const bList = await call("GET", "/tasks?limit=100", undefined, asB);
+check("  B's list does not contain A's task", !bList.json.data.some((t: { id: number }) => t.id === mineId));
 const untouched = await call("GET", `/tasks/${mineId}`);
 check("  task unchanged after B's attempts", untouched.json.data.title === "Owned by A");
-await expectStatus("missing task is 404, not 403", 404, "PATCH", "/tasks/999999", { title: "x" }, asB);
+await expectStatus("missing task is 404 too", 404, "PATCH", "/tasks/999999", { title: "x" }, asB);
 await expectStatus("A can patch own task", 200, "PATCH", `/tasks/${mineId}`, { title: "Edited by A" });
 await expectStatus("A can delete own task", 204, "DELETE", `/tasks/${mineId}`);
 
 const proj = await expectStatus("A creates a project", 201, "POST", "/projects", { name: "A's project" });
 const projId = proj.json.data.id;
-await expectStatus("B cannot rename A's project", 403, "PATCH", `/projects/${projId}`, { name: "Mine now" }, asB);
-await expectStatus("B cannot delete A's project", 403, "DELETE", `/projects/${projId}`, undefined, asB);
-await expectStatus("B cannot merge A's project away", 403, "POST", `/projects/${projId}/merge`, { intoProjectId: projId + 100000 }, asB);
+await expectStatus("B cannot see A's project", 404, "GET", `/projects/${projId}`, undefined, asB);
+await expectStatus("B cannot rename it", 404, "PATCH", `/projects/${projId}`, { name: "Mine now" }, asB);
+await expectStatus("B cannot delete it", 404, "DELETE", `/projects/${projId}`, undefined, asB);
+await expectStatus("B cannot merge it", 404, "POST", `/projects/${projId}/merge`, { intoProjectId: projId + 100000 }, asB);
+await expectStatus("B cannot add himself", 404, "POST", `/projects/${projId}/members`, { email: "x@example.com" }, asB);
+const bProjects = await call("GET", "/projects", undefined, asB);
+check("  B's project list does not contain it", !bProjects.json.data.some((p: { id: number }) => p.id === projId));
 await expectStatus("A deletes own project", 204, "DELETE", `/projects/${projId}`);
 
 // --- Login and tokens ---

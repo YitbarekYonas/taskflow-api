@@ -4,7 +4,6 @@ const body = z.string().trim().min(1, "Comment cannot be empty").max(2000);
 
 export const createCommentSchema = z
   .object({
-    author: z.string().trim().min(1).max(50),
     body,
   })
   .strict();

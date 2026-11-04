@@ -46,13 +46,25 @@ function toColumns(d: Partial<TaskData>): TaskColumns {
   return c;
 }
 
-function buildWhere(q: TaskQuery): Prisma.TaskWhereInput {
-  // `undefined` means "no filter" here, which is exactly the Prisma meaning we want
+type Scope = { userId: number };
+
+// A task is visible if it lives in one of my projects, or it is my own personal task
+function visibleTo(userId: number): Prisma.TaskWhereInput {
+  return {
+    OR: [
+      { project: { members: { some: { userId } } } },
+      { projectId: null, createdById: userId },
+    ],
+  };
+}
+
+function buildWhere(q: TaskQuery, scope?: Scope): Prisma.TaskWhereInput {
   return {
     status: q.status,
     priority: q.priority,
     projectId: q.projectId,
     title: q.search ? { contains: q.search, mode: "insensitive" } : undefined,
+    AND: scope ? [visibleTo(scope.userId)] : undefined,
   };
 }
 
@@ -108,8 +120,8 @@ export class PrismaTaskRepository implements TaskRepository {
     }
   }
 
-   async query(q: TaskQuery) {
-    const where = buildWhere(q);
+async query(q: TaskQuery, scope?: Scope) { 
+  const where = buildWhere(q, scope);
     const page = {
       where,
       orderBy: buildOrderBy(q.sort, q.order),

@@ -70,8 +70,9 @@ export class PrismaProjectRepository  implements ProjectRepository {
       throw mapDeleteError(err);
     }
   }
-    async findAllWithTaskCount() {
+  async findAllWithTaskCount(scope?: { userId: number }) {
     const rows = await this.prisma.project.findMany({
+      where: scope ? { members: { some: { userId: scope.userId } } } : undefined,
       orderBy: { id: "asc" },
       include: { _count: { select: { tasks: true } } },
     });
