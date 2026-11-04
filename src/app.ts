@@ -1,7 +1,7 @@
 import cors from "cors";
 import express from "express";
 import helmet from "helmet";
-import swaggerUi from "swagger-ui-express";                          
+import swaggerUi from "swagger-ui-express";
 import { config } from "./config.js";
 import { openApiSpec } from "./docs/openapi.js";
 import { errorHandler, notFound } from "./middleware/errorHandler.js";
@@ -16,11 +16,10 @@ import { globalLimiter } from "./middleware/limiters.js";
 export function createApp() {
   const app = express();
 
-  // Number of REAL proxies in front of this app. Getting this wrong breaks per-IP limits.
+  // Number of REAL proxies in front of this app.
   app.set("trust proxy", config.trustProxyHops > 0 ? config.trustProxyHops : false);
 
   // Docs are mounted before helmet so Swagger UI can load its assets.
-  // Only if config.docsEnabled is true.
   if (config.docsEnabled) {
     app.get("/openapi.json", (_req, res) => {
       res.json(openApiSpec);
@@ -44,7 +43,7 @@ export function createApp() {
   );
   app.use(requestId);
   app.use(requestLogger);
-  app.use(globalLimiter);                                         // 👈 After logger, before json
+  app.use(globalLimiter);
   app.use(express.json({ limit: "100kb" }));
 
   app.get("/health", (_req, res) => {

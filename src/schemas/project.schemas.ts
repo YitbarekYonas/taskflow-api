@@ -1,20 +1,18 @@
 import { z } from "zod";
 import { ROLES } from "../types.js";
+import { dbIdBody, noNul, NO_NUL_MESSAGE } from "./common.schemas.js";
 
-export const createProjectSchema = z
-  .object({
-    name: z.string().trim().min(1, "Name cannot be empty").max(100),
-    description: z.string().trim().max(500).optional(),
-  })
-  .strict();
+const projectName = z.string().trim().min(1).max(100).refine(noNul, NO_NUL_MESSAGE);
 
-export const updateProjectSchema = createProjectSchema
-  .partial()
-  .strict()
-  .refine((body) => Object.keys(body).length > 0, {
-    message: "Provide at least one field to update",
-  });
+export const createProjectSchema = z.object({
+  name: projectName,
+  description: z.string().trim().max(500).refine(noNul, NO_NUL_MESSAGE).optional(),
+}).strict();
 
+export const updateProjectSchema = z.object({
+  name: projectName.optional(),
+  description: z.string().trim().max(500).refine(noNul, NO_NUL_MESSAGE).optional(),
+}).strict().refine((body) => Object.keys(body).length > 0, { message: "Provide at least one field to update" });
   // The body is optional: POST /projects/1/duplicate with no body is fine
 export const duplicateProjectSchema = z
   .object({ name: z.string().trim().min(1).max(100).optional() })
@@ -22,7 +20,7 @@ export const duplicateProjectSchema = z
   .default({});
 
 export const mergeProjectSchema = z
-  .object({ intoProjectId: z.number().int().positive() })
+  .object({ intoProjectId: dbIdBody, })
   .strict();
 export const addMemberSchema = z
   .object({
