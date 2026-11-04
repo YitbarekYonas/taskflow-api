@@ -3,6 +3,9 @@ import { login, logout, logoutAll, me, refresh, register } from "../controllers/
 import { authenticate } from "../middleware/authenticate.js";
 import { validate } from "../middleware/validate.js";
 import { loginSchema, refreshSchema, registerSchema } from "../schemas/auth.schemas.js";
+import {
+  loginAccountLimiter, loginIpLimiter, refreshLimiter, registerLimiter,
+} from "../middleware/limiters.js";
 
 export const authRouter = Router();
 
@@ -17,3 +20,7 @@ authRouter.post("/logout-all", authenticate, logoutAll);
 authRouter.post("/register", validate({ body: registerSchema }), register);
 authRouter.post("/login", validate({ body: loginSchema }), login);
 authRouter.get("/me", authenticate, me);
+authRouter.post("/register", registerLimiter, validate({ body: registerSchema }), register);
+authRouter.post("/login", loginIpLimiter, loginAccountLimiter, validate({ body: loginSchema }), login);
+authRouter.post("/refresh", refreshLimiter, validate({ body: refreshSchema }), refresh);
+authRouter.post("/logout", refreshLimiter, validate({ body: refreshSchema }), logout);

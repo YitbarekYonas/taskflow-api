@@ -7,6 +7,8 @@ import { listTasks } from "../controllers/projects.controller.js";
 import { listTasksQuerySchema } from "../schemas/task.schemas.js";
 import { duplicate, merge } from "../controllers/projects.controller.js";
 import { duplicateProjectSchema, mergeProjectSchema } from "../schemas/project.schemas.js";
+import {inviteLimiter} from "../middleware/limiters.js";
+
 export const projectsRouter = Router();
 
 projectsRouter.get(
@@ -33,6 +35,7 @@ projectsRouter.delete("/:id", validate({ params: idParamSchema }), remove);
 projectsRouter.get("/:id/members", validate({ params: idParamSchema }), listMembers);
 projectsRouter.post(
   "/:id/members",
+  inviteLimiter,
   validate({ params: idParamSchema, body: addMemberSchema }),
   addMember
 );
