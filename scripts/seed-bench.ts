@@ -21,7 +21,7 @@ try {
       orderBy: { id: "asc" },
     });
 
-        const sam = await prisma.user.findUnique({ where: { email: "sam@example.com" } });
+    const sam = await prisma.user.findUnique({ where: { email: "sam@example.com" } });
     if (sam) {
       await prisma.projectMember.createMany({
         data: projects.map((p) => ({ projectId: p.id, userId: sam.id, role: "member" as const })),

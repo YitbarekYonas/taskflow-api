@@ -5,10 +5,10 @@ A team task-management API built with Node.js, Express, TypeScript, and Prisma.
 ## Features
 - **CLI:** Add, list, start, complete, delete, filter, and export tasks (CSV).
 - **HTTP API:** Full CRUD for tasks, projects, and comments, with SQL-powered pagination, sorting, searching, and filtering.
-- **Auth & Access Control:** User registration, login (JWT), refresh tokens (rotation + reuse detection), logout, and **role-based access control** (owners vs members).
+- **Auth & Access Control:** User registration, login (JWT), refresh tokens (rotation + reuse detection), logout, role-based access control, and **rate limiting**.
 - **Core:** Repository pattern, Unit of Work for transactions, Zod validation, strict TypeScript, and centralized error handling.
 - **Database:** PostgreSQL with Prisma ORM, enforcing referential integrity, cascading deletes, and composite indexes for fast queries.
-- **Production Middleware:** Security headers (Helmet), CORS, Request IDs, and body size limits.
+- **Production Middleware:** Security headers (Helmet), CORS, Request IDs, body size limits, and **rate limits**.
 
 ## Setup
 
@@ -63,6 +63,18 @@ npm run smoke
 *(The server must be running in another terminal).*
 
 ![Smoke Test Results](./docs/smoke-test.png)
+
+## Security
+
+See [SECURITY.md](./SECURITY.md) for reporting and known limitations.
+
+Test scripts:
+- `npm run test:tokens` — forged/tampered tokens rejected
+- `npm run test:auth-coverage` — every route checked for 401 without a token
+- `npm run test:refresh` — rotation and reuse detection
+- `npm run test:access` — role matrix and concurrency
+- `npm run test:ratelimit` — rate limits and Retry-After
+- `npm run test:security` — hostile input, NUL chars, out-of-range ids
 
 ## API Endpoints
 
@@ -141,7 +153,17 @@ npm run smoke
   "error": { "message": "Validation failed", "details": [{ "path": "title", "message": "Required" }] }
 }
 ```
-*Status codes: 400 (Bad Input), 401 (Unauthorized), 403 (Forbidden), 404 (Not Found), 409 (Conflict), 413 (Payload Too Large), 500 (Server Error)*
+*Status codes: 400 (Bad Input), 401 (Unauthorized), 403 (Forbidden), 404 (Not Found), 409 (Conflict), 413 (Payload Too Large), 429 (Too Many Requests), 500 (Server Error)*
+
+### Rate Limiting
+Rate limits are applied to protect sensitive endpoints:
+- `POST /auth/register`: 5 per hour per IP
+- `POST /auth/login`: 30 per 15 min per IP and 10 per 15 min per account (only failures count)
+- `POST /auth/refresh` / `/logout`: 60 per 15 min per IP
+- `POST /projects/:id/members`: 20 per hour per user
+- All routes: 300 per minute per IP
+
+A `429 Too Many Requests` response includes `Retry-After` and `RateLimit` headers. The error body includes `retryAfterSeconds`.
 
 ## Authentication & Authorization
 
@@ -222,14 +244,14 @@ sequenceDiagram
 
 ```
 HTTP request
-  → helmet → cors → requestId → logger → json parser
+  → helmet → cors → requestId → logger → rate limiter → json parser
   → route (validate params / query / body)
   → controller (HTTP in, HTTP out)
   → service (business rules)
   → UnitOfWork (transactions) → repository (SQL queries via Prisma)
 ```
 
-The repository pattern decouples business logic from data storage. Services depend on a `Repository<T>` interface, not a specific implementation. Listing, filtering, sorting, and pagination are handled directly by PostgreSQL. Multi-step operations (like `duplicate` and `merge`) run through a `UnitOfWork`. Role checks happen in the service layer, using a dedicated `Access` helper.
+The repository pattern decouples business logic from data storage. Services depend on a `Repository<T>` interface, not a specific implementation. Listing, filtering, sorting, and pagination are handled directly by PostgreSQL. Multi-step operations (like `duplicate` and `merge`) run through a `UnitOfWork`. Role checks happen in the service layer, using a dedicated `Access` helper. Rate limiting runs before body parsing to avoid resource exhaustion.
 
 ## Performance
 
@@ -255,6 +277,9 @@ Moving list queries from JavaScript to SQL drastically reduced response times, e
 | `JWT_SECRET` | Secret used to sign access tokens (min 32 chars) | (required) |
 | `ACCESS_TOKEN_TTL_SECONDS` | Access token lifetime in seconds | `900` (15 min) |
 | `REFRESH_TOKEN_TTL_DAYS` | Refresh token lifetime in days | `30` |
+| `RATE_LIMIT_ENABLED` | Enable rate limiting (must be `true` in production) | `false` (dev) |
+| `TRUST_PROXY_HOPS` | Number of reverse proxies in front of the app | `0` |
+| `DOCS_ENABLED` | Serve Swagger docs at `/docs` | `true` |
 
 ## Database
 
@@ -307,6 +332,7 @@ erDiagram
 - **CORS:** Restricts browser requests to allowed origins (`CORS_ORIGIN` in `.env`).
 - **Request IDs:** Each request gets an `X-Request-Id` header, echoed back and included in logs for tracing.
 - **Body Limit:** JSON payloads are capped at 100kb to prevent abuse (returns `413 Payload Too Large`).
+- **Rate Limiter:** Throttles brute-force and enumeration attacks. Returns `429` with `Retry-After` and `RateLimit` headers.
 
 ## Project Structure
 ```
@@ -326,13 +352,13 @@ src/
 ├── schemas/              # Zod validation
 ├── repositories/         # Data storage: interface, Prisma impl, UnitOfWork
 ├── services/             # Business logic: tasks, projects, comments, auth
-├── middleware/           # Logger, validation, error handling, request IDs, authenticate
+├── middleware/           # Logger, validation, error handling, request IDs, authenticate, rate limiters
 ├── controllers/          # HTTP logic
 └── routes/               # Express routes
 ```
 
 ## Tech Stack
-Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CORS, Swagger UI, Argon2, jose.
+Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CORS, Swagger UI, Argon2, jose, express-rate-limit.
 
 ## Roadmap
 - [x] Week 1 — CLI core
@@ -343,23 +369,27 @@ Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CO
 - [x] Login and access tokens
 - [x] Refresh tokens and logout
 - [x] Roles and project membership
-- [ ] Rate limiting (Day 27)
+- [x] Rate limiting and security hardening
+- [ ] Week 4 wrap-up and v0.4.0
 
 ## Known Limitations
-1. **Adding members by email reveals which emails have accounts:** Rate limiting (Day 27) makes probing slow, but not impossible. Invitations (challenge) would remove the oracle.
-2. **Only two roles (owner, member):** No read-only "viewer" role yet.
-3. **Legacy tasks and projects with no owner are invisible:** Only the CLI can see/modify them. This is the safe default.
-4. **Moving a task out of a project can orphan it:** If a task is moved to a personal task, the original creator can no longer see it.
-5. **Search Wildcards:** Searching for `%` or `_` returns all tasks because SQL `LIKE` interprets them as wildcards. To fix, escape these characters in the service layer before querying.
-6. **No Retries on `P2034`:** We haven't implemented automatic retries for deadlocks yet. If two merges clash, the user must retry manually.
-7. **No CI:** We don't have a GitHub Actions pipeline yet. This will be added in Week 7.
-8. **Offset pagination is slow on deep pages:** `OFFSET 49980` still walks past 49,980 rows. This will be fixed in Week 5 with keyset pagination.
-9. **`ILIKE` search lacks a trigram index:** The search is slow on large tables because it does a full scan. This will be fixed in Week 5.
-10. **CSV export loads all rows:** The export uses `findAll()`, which loads the entire table into memory. This will be fixed in Week 5 with a streaming query.
-11. **`/health` doesn't check the database:** It returns `ok` even if Postgres is down. This will be fixed in Week 7 with a proper readiness check.
-12. **Login is unthrottled:** There's no rate limiting on `/auth/login`, making it vulnerable to brute-force attacks. This will be fixed in Day 27.
-13. **Refresh is unthrottled:** There's no rate limiting on `/auth/refresh`, so a flood of requests could exhaust the DB.
-14. **No grace window for concurrent refreshes:** Two parallel legitimate refreshes (e.g., a double-click) will kill the family and force a login.
-15. **Rotation isn't wrapped in one transaction:** If the new token fails to save after the old one is used, the user must log in again.
-16. **No device list or session names:** Users can't see "logged in from iPhone" and revoke individual sessions.
-17. **Logout doesn't revoke already-issued access tokens:** A stolen access token stays valid for up to 15 minutes after logout.
+1. **In-memory rate limits:** Reset on restart and don't share between multiple server instances. Week 6 moves them to Redis.
+2. **Per-account throttle:** An attacker can intentionally lock a victim out by flooding `/auth/login` with wrong passwords.
+3. **No CAPTCHA or MFA:** A determined attacker with a botnet can still try many passwords.
+4. **No email verification:** Accounts can be created with fake emails.
+5. **Access tokens cannot be revoked:** A stolen access token stays valid for up to 15 minutes after logout.
+6. **Member invites reveal email existence:** Adding a member by email returns 404 if the user doesn't exist. Rate limiting makes probing slow, but not impossible.
+7. **No automated alerting:** Repeated `auth 401` events are logged but not flagged.
+8. **Search Wildcards:** Searching for `%` or `_` returns all tasks because SQL `LIKE` interprets them as wildcards.
+9. **No Retries on `P2034`:** We haven't implemented automatic retries for deadlocks yet.
+10. **No CI:** We don't have a GitHub Actions pipeline yet. This will be added in Week 7.
+11. **Offset pagination is slow on deep pages:** `OFFSET 49980` still walks past 49,980 rows. Week 5 fixes this.
+12. **`ILIKE` search lacks a trigram index:** The search is slow on large tables. Week 5 fixes this.
+13. **CSV export loads all rows:** The export uses `findAll()`, which loads the entire table into memory. Week 5 fixes this.
+14. **`/health` doesn't check the database:** It returns `ok` even if Postgres is down. Week 7 fixes this.
+15. **No grace window for concurrent refreshes:** Two parallel legitimate refreshes will kill the family and force a login.
+16. **Rotation isn't wrapped in one transaction:** If the new token fails to save after the old one is used, the user must log in again.
+17. **No device list or session names:** Users can't see "logged in from iPhone" and revoke individual sessions.
+18. **Only two roles (owner, member):** No read-only "viewer" role yet.
+19. **Legacy tasks and projects with no owner are invisible:** Only the CLI can see/modify them.
+20. **`listComments` still loads every comment before filtering:** It uses `findAll()` instead of a `WHERE taskId = ?` query. Week 5 fixes this.

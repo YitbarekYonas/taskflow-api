@@ -33,7 +33,9 @@
     "test:auth-coverage": "tsx scripts/auth-coverage.ts",
     "auth:purge": "tsx scripts/purge-tokens.ts",
     "test:refresh": "tsx scripts/refresh-flow.ts",
-    "test:access": "tsx scripts/access-attacks.ts"
+    "test:access": "tsx scripts/access-attacks.ts",
+    "test:ratelimit": "tsx scripts/test-ratelimit.ts",
+    "test:security": "tsx scripts/security-checks.ts"
   },
   "keywords": [
     "taskflow",
@@ -55,6 +57,7 @@
     "@types/express": "^5.0.6",
     "@types/node": "^26.6.4",
     "@types/pg": "^8.23.1",
+    "@types/swagger-ui-express": "^4.1.8",
     "prisma": "^7.10.1",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
@@ -66,9 +69,11 @@
     "cors": "^2.8.6",
     "dotenv": "^18.0.6",
     "express": "^5.3.0",
+    "express-rate-limit": "^8.7.3",
     "helmet": "^8.3.0",
     "jose": "^6.2.13",
     "pg": "^8.23.1",
+    "swagger-ui-express": "^5.0.1",
     "zod": "^4.6.5"
   }
 }

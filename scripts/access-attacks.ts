@@ -112,7 +112,8 @@ const T3 = (await api("POST", "/tasks", { title: "Max's second task", projectId:
 const C2 = (await api("POST", `/tasks/${T}/comments`, { body: "Max again" }, max.token)).json.data.id as number;
 await expectStatus("delete Max's task", 204, "DELETE", `/tasks/${T3}`, undefined, olga.token);
 await expectStatus("delete Max's comment", 204, "DELETE", `/tasks/${T}/comments/${C2}`, undefined, olga.token);
-await expectStatus("owner cannot edit Max's comment", 403, "PATCH", `/tasks/${T}/comments/${C}`, { body: "x" }, olga.token);
+const C3 = (await api("POST", `/tasks/${T}/comments`, { body: "Max's comment" }, max.token)).json.data.id as number;
+await expectStatus("owner cannot edit Max's comment", 403, "PATCH", `/tasks/${T}/comments/${C3}`, { body: "x" }, olga.token);
 await expectStatus("add an existing member again", 409, "POST", `/projects/${P}/members`, { email: max.email }, olga.token);
 await expectStatus("add an unknown email", 404, "POST", `/projects/${P}/members`, { email: `nobody+${stamp}@example.com` }, olga.token);
 await expectStatus("promote Max", 200, "PATCH", `/projects/${P}/members/${max.id}`, { role: "owner" }, olga.token);
