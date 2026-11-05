@@ -58,23 +58,29 @@ Interactive API docs are available at `http://localhost:3000/docs` when the serv
 
 To verify the API against a running server:
 ```bash
-npm run smoke
+npm run verify
 ```
 *(The server must be running in another terminal).*
 
 ![Smoke Test Results](./docs/smoke-test.png)
 
+### Test Scripts
+| Script | What it proves |
+|---|---|
+| `npm run test:unit` | Pure functions (pagination, slugs) |
+| `npm run smoke` | Every endpoint, happy path and failures |
+| `npm run test:tokens` | Forged, expired and tampered tokens are rejected |
+| `npm run test:auth-coverage` | Every documented route returns 401 without a token |
+| `npm run test:refresh` | Rotation, reuse detection, logout, concurrency |
+| `npm run test:access` | Role matrix (stranger, member, owner) |
+| `npm run test:ratelimit` | Rate limits and `Retry-After` headers |
+| `npm run test:security` | Hostile input, NUL characters, out-of-range IDs |
+
 ## Security
 
-See [SECURITY.md](./SECURITY.md) for reporting and known limitations.
+See [SECURITY.md](./SECURITY.md) for reporting vulnerabilities and the full list of known limitations.
 
-Test scripts:
-- `npm run test:tokens` — forged/tampered tokens rejected
-- `npm run test:auth-coverage` — every route checked for 401 without a token
-- `npm run test:refresh` — rotation and reuse detection
-- `npm run test:access` — role matrix and concurrency
-- `npm run test:ratelimit` — rate limits and Retry-After
-- `npm run test:security` — hostile input, NUL chars, out-of-range ids
+See [docs/THREAT_MODEL.md](./docs/THREAT_MODEL.md) for the threat model and what is not defended today.
 
 ## API Endpoints
 
@@ -286,44 +292,58 @@ Moving list queries from JavaScript to SQL drastically reduced response times, e
 ```mermaid
 erDiagram
   USER ||--o{ PROJECT_MEMBER : "belongs via"
-  PROJECT ||--o{ PROJECT_MEMBER : "has"
+  PROJECT ||--o{ PROJECT_MEMBER : "has (cascade)"
   PROJECT ||--o{ TASK : "contains (restrict)"
   USER ||--o{ TASK : "assigned (set null)"
+  USER ||--o{ TASK : "created (set null)"
+  USER ||--o{ PROJECT : "created (set null)"
   TASK ||--o{ COMMENT : "has (cascade)"
-  USER ||--o{ REFRESH_TOKEN : "has sessions"
-  USER ||--o{ COMMENT : "writes"
+  USER ||--o{ COMMENT : "wrote (set null)"
+  USER ||--o{ REFRESH_TOKEN : "owns (cascade)"
 
-  USER { int id PK
-         string email UK
-         string name
-         string passwordHash }
-  PROJECT { int id PK
-            string name
-            string slug UK
-            int createdById FK }
-  PROJECT_MEMBER { int projectId PK
-                   int userId PK
-                   string role }
-  TASK { int id PK
-         string title
-         string status
-         string priority
-         date dueDate
-         int projectId FK
-         int assigneeId FK
-         int createdById FK }
-  COMMENT { int id PK
-            int taskId FK
-            string author
-            string content
-            int authorId FK }
-  REFRESH_TOKEN { int id PK
-                  int userId FK
-                  string tokenHash UK
-                  string familyId
-                  date expiresAt
-                  date usedAt
-                  date revokedAt }
+  USER {
+    int id PK
+    string email UK
+    string name
+    string password_hash
+  }
+  PROJECT {
+    int id PK
+    string name
+    string slug UK
+    int created_by_id FK
+  }
+  PROJECT_MEMBER {
+    int project_id PK
+    int user_id PK
+    string role
+  }
+  TASK {
+    int id PK
+    string title
+    string status
+    string priority
+    date due_date
+    int project_id FK
+    int assignee_id FK
+    int created_by_id FK
+  }
+  COMMENT {
+    int id PK
+    int task_id FK
+    int author_id FK
+    string author
+    string content
+  }
+  REFRESH_TOKEN {
+    int id PK
+    int user_id FK
+    string token_hash UK
+    string family_id
+    datetime expires_at
+    datetime used_at
+    datetime revoked_at
+  }
 ```
 
 ## Production Middleware
@@ -370,7 +390,7 @@ Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CO
 - [x] Refresh tokens and logout
 - [x] Roles and project membership
 - [x] Rate limiting and security hardening
-- [ ] Week 4 wrap-up and v0.4.0
+- [x] Week 4 wrap-up and v0.4.0
 
 ## Known Limitations
 1. **In-memory rate limits:** Reset on restart and don't share between multiple server instances. Week 6 moves them to Redis.
@@ -393,3 +413,7 @@ Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CO
 18. **Only two roles (owner, member):** No read-only "viewer" role yet.
 19. **Legacy tasks and projects with no owner are invisible:** Only the CLI can see/modify them.
 20. **`listComments` still loads every comment before filtering:** It uses `findAll()` instead of a `WHERE taskId = ?` query. Week 5 fixes this.
+```
+
+### What Changed:
+Only the **ER Diagram** was updated to match the guide's version (snake_case, `created_by_id`, `author_id`, all relations).

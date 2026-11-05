@@ -287,7 +287,7 @@
 4. **Why does `authenticate` look the user up even though the signature is valid?**
    > A valid signature means the token was issued by us, but the user might have been deleted since then. Looking them up in the database ensures the account still exists.
 5. **Name two different ways a login endpoint can reveal that an email exists, and how you closed each one.**
-   > 1) Different error messages ("User not found" vs "Wrong password") — closed by using the same message. 2) Different response   > 1) Different error messages ("User not found" vs "Wrong password") — closed by using the same message. 2) Different response times (fast for unknown email, slow for real email because of hashing) — closed by always running a hash against a dummy value for unknown users.
+   > 1) Different error messages ("User not found" vs "Wrong password") — closed by using the same message. 2) Different response times (fast for unknown email, slow   > 1) Different error messages ("User not found" vs "Wrong password") — closed by using the same message. 2) Different response times (fast for unknown email, slow for real email because of hashing) — closed by always running a hash against a dummy value for unknown users.
 6. **Why must `Authorization` be in the CORS `allowedHeaders`, and why did `curl` never show that problem?**
    > CORS is enforced by browsers, not by `curl`. Without it, the browser's preflight request would be rejected, and any request with a token would fail. `curl` ignores CORS headers entirely.
 7. **Why is a 15-minute expiry a security feature, and what problem does it create that refresh tokens solve?**
@@ -455,3 +455,19 @@ What I'd do differently:
 
 One thing I want to get better at in Week 4:
 - Implementing authentication and authorization securely.
+
+## Week 4 summary
+Three things I can do now that I couldn't on Day 22:
+- Implement secure authentication (Argon2, JWT, refresh tokens with rotation).
+- Design and enforce role-based access control with a matrix.
+- Prove security properties with automated test scripts (tokens, access, rate limits).
+
+Things that confused me:
+- Why access tokens are stateless and refresh tokens are stateful.
+- The last-owner race condition and how `SELECT ... FOR UPDATE` fixes it.
+
+What I'd do differently:
+- Write the access matrix test *before* writing the services, so the tests guide the design.
+
+One thing I want to get better at in Week 5:
+- Writing proper unit and integration tests with a framework (Vitest), instead of ad-hoc scripts.
