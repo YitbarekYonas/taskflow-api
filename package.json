@@ -1,6 +1,6 @@
 {
   "name": "taskflow",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Task manager API built with Node.js, Express, and TypeScript",
   "main": "index.js",
   "scripts": {
@@ -35,7 +35,8 @@
     "test:refresh": "tsx scripts/refresh-flow.ts",
     "test:access": "tsx scripts/access-attacks.ts",
     "test:ratelimit": "tsx scripts/test-ratelimit.ts",
-    "test:security": "tsx scripts/security-checks.ts"
+    "test:security": "tsx scripts/security-checks.ts",
+    "typecheck:all": "tsc -p tsconfig.scripts.json"
   },
   "keywords": [
     "taskflow",
