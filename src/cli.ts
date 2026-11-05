@@ -3,6 +3,8 @@ import { taskService } from "./container.js";
 import { UserError } from "./errors.js";
 import { PRIORITIES, STATUSES, type Priority, type Status, type Task } from "./types.js";
 import { parseChoice } from "./utils.js";
+import { prisma } from "./db.js";
+import { SYSTEM } from "./auth/policy.js";
 
 const { addTask, listTasks, setStatus, deleteTask, exportCsv, listOverdue, summary } = taskService;
 
@@ -86,37 +88,40 @@ function parseCommand(argv: string[]): Command {
 async function run(cmd: Command): Promise<void> {
   switch (cmd.kind) {
     case "add": {
-      const task = await addTask({
-        title: cmd.title,
-        priority: cmd.priority,
-        dueDate: cmd.dueDate,
-      });
+      const task = await addTask(
+        {
+          title: cmd.title,
+          priority: cmd.priority,
+          dueDate: cmd.dueDate,
+        },
+        SYSTEM
+      );
       console.log(`Added #${task.id}: ${task.title}`);
       break;
     }
     case "list": {
-      const tasks = await listTasks({ status: cmd.status });
+      const tasks = await listTasks({ status: cmd.status },SYSTEM);
       if (tasks.length === 0) console.log("No tasks found.");
       tasks.forEach((t) => console.log(formatTask(t)));
       break;
     }
     case "start": {
-      const task = await setStatus(cmd.id, "in_progress");
+      const task = await setStatus(cmd.id, "in_progress", SYSTEM);
       console.log(`Started #${task.id}: ${task.title}`);
       break;
     }
     case "done": {
-      const task = await setStatus(cmd.id, "done");
+      const task = await setStatus(cmd.id, "done", SYSTEM);
       console.log(`Completed #${task.id}: ${task.title}`);
       break;
     }
     case "delete": {
-      const task = await deleteTask(cmd.id);
+      const task = await deleteTask(cmd.id, SYSTEM);
       console.log(`Deleted #${task.id}: ${task.title}`);
       break;
     }
     case "export": {
-      console.log(`Exported to ${await exportCsv(cmd.file)}`);
+      console.log(`Exported to ${await exportCsv(cmd.file,SYSTEM)}`);
       break;
     }
     case "help": {
@@ -130,13 +135,13 @@ async function run(cmd: Command): Promise<void> {
       break;
     }
     case "overdue": {
-      const tasks = await listOverdue();
+      const tasks = await listOverdue(SYSTEM);
       if (tasks.length === 0) console.log("Nothing overdue.");
       tasks.forEach((t) => console.log(formatTask(t)));
       break;
     }
     case "summary": {
-      const counts = await summary();
+      const counts = await summary(SYSTEM);
       console.log(`todo: ${counts.todo}  in progress: ${counts.in_progress}  done: ${counts.done}`);
       break;
     }
@@ -152,11 +157,13 @@ async function main() {
   await run(parseCommand(process.argv.slice(2)));
 }
 
-main().catch((err) => {
-  if (err instanceof UserError) {
-    console.error(`Error: ${err.message}`);
-  } else {
-    console.error("Unexpected error:", err);
-  }
-  process.exit(1);
-});
+main()
+  .catch((err) => {
+    if (err instanceof UserError) {
+      console.error(`Error: ${err.message}`);
+    } else {
+      console.error("Unexpected error:", err);
+    }
+    process.exitCode = 1;
+  })
+  .finally(() => prisma.$disconnect());

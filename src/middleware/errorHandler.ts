@@ -1,18 +1,18 @@
 import type { ErrorRequestHandler, RequestHandler } from "express";
 import { ZodError } from "zod";
-import { NotFoundError, UserError,ConflictError } from "../errors.js";
+import { NotFoundError, UserError, ConflictError, UnauthorizedError, ForbiddenError } from "../errors.js";
 import { logger } from "../logger.js";
 
 export const notFound: RequestHandler = (req, res) => {
   res.status(404).json({ error: { message: `Route not found: ${req.method} ${req.originalUrl}` } });
 };
 
-export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
-    if ((err as { type?: string }).type === "entity.parse.failed") {
+export const errorHandler: ErrorRequestHandler = (err, req, res, _next) => {
+  if ((err as { type?: string }).type === "entity.parse.failed") {
     res.status(400).json({ error: { message: "Request body is not valid JSON" } });
     return;
   }
-    if ((err as { type?: string }).type === "entity.too.large") {
+  if ((err as { type?: string }).type === "entity.too.large") {
     res.status(413).json({ error: { message: "Request body is too large" } });
     return;
   }
@@ -29,7 +29,17 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
     res.status(404).json({ error: { message: err.message } });
     return;
   }
-    if (err instanceof ConflictError) {
+  if (err instanceof UnauthorizedError) {
+    logger.info(`[${res.locals.requestId}] auth 401 ${req.method} ${req.originalUrl} ip=${req.ip}`);
+    res.status(401).set("WWW-Authenticate", 'Bearer realm="taskflow"').json({ error: { message: err.message } });
+    return;
+  }
+  if (err instanceof ForbiddenError) {
+    logger.info(`[${res.locals.requestId}] auth 403 ${req.method} ${req.originalUrl} ip=${req.ip}`);
+    res.status(403).json({ error: { message: err.message } });
+    return;
+  }
+  if (err instanceof ConflictError) {
     res.status(409).json({ error: { message: err.message } });
     return;
   }
@@ -37,8 +47,7 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
     res.status(400).json({ error: { message: err.message } });
     return;
   }
+
   logger.error(`[${res.locals.requestId}] Unhandled error:`, err);
-  res.status(500).json({
-    error: { message: "Internal server error", requestId: res.locals.requestId },
-  });
+  res.status(500).json({ error: { message: "Internal server error", requestId: res.locals.requestId } });
 };

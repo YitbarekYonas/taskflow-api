@@ -14,6 +14,7 @@ export const taskSchema = z.object({
   dueDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   createdAt: z.string(),
   projectId: z.number().int().positive().optional(),
+  createdById: z.number().int().positive().optional(),
 });
 
 export const commentSchema = z.object({
@@ -23,6 +24,7 @@ export const commentSchema = z.object({
   body: z.string().min(1),
   createdAt: z.string(),
   updatedAt: z.string().optional(),
+  authorId: z.number().int().positive().optional(),
 });
 export type Comment = z.infer<typeof commentSchema>;
 
@@ -37,5 +39,16 @@ export const projectSchema = z.object({
   name: z.string().min(1),
   description: z.string().optional(),
   createdAt: z.string(),
+  slug: z.string().min(1),
+  createdById: z.number().int().positive().optional(),
 });
 export type Project = z.infer<typeof projectSchema>;
+export const userSchema = z.object({
+  id: z.number().int().positive(),
+  email: z.string().email(),
+  name: z.string().min(1),
+  createdAt: z.string(),
+});
+export const ROLES = ["owner", "member"] as const;
+export type Role = (typeof ROLES)[number];
+export type User = z.infer<typeof userSchema>;
