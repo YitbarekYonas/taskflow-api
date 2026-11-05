@@ -1,6 +1,6 @@
 {
   "name": "taskflow",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Task manager API built with Node.js, Express, and TypeScript",
   "main": "index.js",
   "scripts": {
@@ -35,7 +35,10 @@
     "test:refresh": "tsx scripts/refresh-flow.ts",
     "test:access": "tsx scripts/access-attacks.ts",
     "test:ratelimit": "tsx scripts/test-ratelimit.ts",
-    "test:security": "tsx scripts/security-checks.ts"
+    "test:security": "tsx scripts/security-checks.ts",
+    "typecheck:all": "tsc -p tsconfig.scripts.json",
+    "verify": "bash scripts/verify.sh",
+    "test:unit": "vitest run"
   },
   "keywords": [
     "taskflow",
@@ -60,7 +63,8 @@
     "@types/swagger-ui-express": "^4.1.8",
     "prisma": "^7.10.1",
     "tsx": "^4.23.15",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.10.1",

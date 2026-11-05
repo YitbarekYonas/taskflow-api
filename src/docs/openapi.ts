@@ -19,7 +19,12 @@ import {
   userSchema,
 } from "../types.js";
 import { registerSchema, loginSchema, refreshSchema } from "../schemas/auth.schemas.js";
+import { readFileSync } from "node:fs";
 
+// package.json sits two folders above this file in both src/docs/ and dist/docs/
+const { version } = JSON.parse(
+  readFileSync(new URL("../../package.json", import.meta.url), "utf-8")
+) as { version: string };
 function schemaOf(schema: z.ZodType, io: "input" | "output" = "input") {
   const { $schema, ...rest } = z.toJSONSchema(schema, { io }) as Record<string, unknown>;
   return rest;
@@ -73,7 +78,7 @@ export const baseSpec = {
   openapi: "3.1.0",
   info: {
     title: "TaskFlow API",
-    version: "0.3.0",
+    version: version,
     description:
       "A task-management API built with Node.js, Express and TypeScript.\n\n" +
       "All errors share one shape: `{ \"error\": { \"message\": \"...\" } }`. " +
