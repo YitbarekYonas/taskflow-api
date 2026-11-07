@@ -11,7 +11,12 @@ import { projectsRouter } from "./routes/projects.routes.js";
 import { tasksRouter } from "./routes/tasks.routes.js";
 import { authRouter } from "./routes/auth.routes.js";
 import { authenticate } from "./middleware/authenticate.js";
-import { globalLimiter } from "./middleware/limiters.js";
+import { 
+  globalLimiter, 
+  loginIpLimiter, 
+  registerLimiter, 
+  refreshLimiter 
+} from "./middleware/limiters.js";
 
 export function createApp() {
   const app = express();
@@ -49,6 +54,11 @@ export function createApp() {
   app.get("/health", (_req, res) => {
     res.json({ status: "ok", uptime: process.uptime() });
   });
+
+  app.use("/auth/login", loginIpLimiter);
+  app.use("/auth/register", registerLimiter);
+  app.use("/auth/refresh", refreshLimiter);
+
   app.use("/tasks", authenticate, tasksRouter);
   app.use("/projects", authenticate, projectsRouter);
   app.use("/auth", authRouter);

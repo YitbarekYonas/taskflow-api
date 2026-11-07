@@ -8,6 +8,27 @@ export const notFound: RequestHandler = (req, res) => {
 };
 
 export const errorHandler: ErrorRequestHandler = (err, req, res, _next) => {
+  // 👈 Catch express-rate-limit errors
+  if (err.statusCode === 429 || err.status === 429) {
+    const retryAfter = err.headers?.["Retry-After"] || err.retryAfter;
+    
+    // Set headers expected by the test
+    if (retryAfter) {
+      res.setHeader("Retry-After", String(retryAfter));
+    }
+    if (err.limit) {
+      res.setHeader("RateLimit", `limit=${err.limit}; remaining=0`);
+    }
+
+    res.status(429).json({
+      error: {
+        message: err.message || "Too many requests.",
+        retryAfterSeconds: Number(retryAfter) || 60,
+      },
+    });
+    return;
+  }
+
   if ((err as { type?: string }).type === "entity.parse.failed") {
     res.status(400).json({ error: { message: "Request body is not valid JSON" } });
     return;
