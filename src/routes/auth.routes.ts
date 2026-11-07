@@ -14,12 +14,34 @@ authRouter.use((_req, res, next) => {
   next();
 });
 
-authRouter.post("/refresh", validate({ body: refreshSchema }), refresh);
-authRouter.post("/logout", validate({ body: refreshSchema }), logout);
+authRouter.post(
+  "/register", 
+  registerLimiter, 
+  validate({ body: registerSchema }), 
+  register
+);
+
+authRouter.post(
+  "/login", 
+  loginIpLimiter, 
+  loginAccountLimiter, 
+  validate({ body: loginSchema }), 
+  login
+);
+
+authRouter.post(
+  "/refresh", 
+  refreshLimiter, 
+  validate({ body: refreshSchema }), 
+  refresh
+);
+
+authRouter.post(
+  "/logout", 
+  refreshLimiter, 
+  validate({ body: refreshSchema }), 
+  logout
+);
+
 authRouter.post("/logout-all", authenticate, logoutAll);
-authRouter.post("/login", validate({ body: loginSchema }), login);
 authRouter.get("/me", authenticate, me);
-authRouter.post("/register", registerLimiter, validate({ body: registerSchema }), register);
-authRouter.post("/login", loginIpLimiter, loginAccountLimiter, validate({ body: loginSchema }), login);
-authRouter.post("/refresh", refreshLimiter, validate({ body: refreshSchema }), refresh);
-authRouter.post("/logout", refreshLimiter, validate({ body: refreshSchema }), logout);
