@@ -115,6 +115,14 @@
 - **OWASP API Top 10:** All ten risks were reviewed. Most are addressed (BOLA, authentication, authorization, etc.). API7 and API10 are not applicable yet.
 - **Secret scanning:** `gitleaks` found no secrets in 123 commits. `npm audit` found 0 vulnerabilities.
 
+### Week 5 (Testing & Quality)
+- **Vitest:** A fast unit test runner. Tests live in `tests/unit/` and mirror the `src/` structure.
+- **Test isolation:** `vitest.config.ts` sets all environment variables, so tests never depend on the developer's `.env`. `restoreMocks: true` prevents spies from leaking between tests.
+- **Fake vs Spy:** Use a **fake** (a tiny working implementation) for interfaces like `MemberRepository`, because it survives refactors. Use a **spy** (e.g., `vi.spyOn(process, "exit")`) only when you need to intercept a side effect.
+- **Faking only `Date`:** `vi.useFakeTimers({ toFake: ["Date"] })` controls token expiry without breaking async crypto functions that rely on timers.
+- **Mutation testing:** Deliberately breaking the code to prove the tests catch it. If a test doesn't fail, the test is useless.
+- **Coverage:** 15.5% coverage is correct after Day 29. It's 100% on pure logic (pagination, slugs, auth helpers, schemas) and 0% on plumbing (controllers, repositories). Integration tests will cover the plumbing.
+
 ## Checkpoint answers (Days 2–6)
 
 *(Skipped or filled in as you go)*
@@ -279,7 +287,7 @@
 
 ## Day 23 Checkpoint Answers
 1. **A JWT payload is readable by anyone. Then why can't an attacker change `sub` to `1`?**
-   > Because the signature is computed over the header and payload. Changing `sub` invalidates the signature, and `jwtVerify` rejects the token.
+   > Because the   > Because the signature is computed over the header and payload. Changing `sub` invalidates the signature, and `jwtVerify` rejects the token.
 2. **What attack does `algorithms: ["HS256"]` prevent, and what would trusting the token's own `alg` header allow?**
    > It prevents the `alg: none` attack (where an attacker crafts a token with no signature) and algorithm confusion (switching between HS256 and RS256). Trusting the `alg` header would allow an attacker to pick an algorithm that bypasses the signature check.
 3. **Why does the token contain only the user id and not the user's role or project memberships?**
@@ -287,7 +295,7 @@
 4. **Why does `authenticate` look the user up even though the signature is valid?**
    > A valid signature means the token was issued by us, but the user might have been deleted since then. Looking them up in the database ensures the account still exists.
 5. **Name two different ways a login endpoint can reveal that an email exists, and how you closed each one.**
-   > 1) Different error messages ("User not found" vs "Wrong password") — closed by using the same message. 2) Different response times (fast for unknown email, slow   > 1) Different error messages ("User not found" vs "Wrong password") — closed by using the same message. 2) Different response times (fast for unknown email, slow for real email because of hashing) — closed by always running a hash against a dummy value for unknown users.
+   > 1) Different error messages ("User not found" vs "Wrong password") — closed by using the same message. 2) Different response times (fast for unknown email, slow for real email because of hashing) — closed by always running a hash against a dummy value for unknown users.
 6. **Why must `Authorization` be in the CORS `allowedHeaders`, and why did `curl` never show that problem?**
    > CORS is enforced by browsers, not by `curl`. Without it, the browser's preflight request would be rejected, and any request with a token would fail. `curl` ignores CORS headers entirely.
 7. **Why is a 15-minute expiry a security feature, and what problem does it create that refresh tokens solve?**
@@ -360,6 +368,22 @@
    > Out-of-range integers (larger than 2,147,483,647) and NUL characters (`\u0000`). A `500` leaks that the input reached the database and crashed it — an attacker can use that to map your schema or trigger expensive queries. A `400` is safe and explicit.
 8. **What would stop working if you ran two server instances behind a load balancer with the current in-memory counters?**
    > The counters are per-process. Two instances each have their own budget, so an attacker can double their attempts by spreading them across instances. Week 6 moves the counters to Redis so all instances share them.
+
+## Day 29 Checkpoint Answers
+1. **Why did we use a fake for member roles but a spy for `process.exit`? Which would you rather maintain after a refactor?**
+   > A fake (`fakeMembers({ "10:1": "owner" })`) implements the real `MemberRepository` interface, so it survives refactors: if the interface changes, TypeScript tells us to update the fake. A spy (`vi.spyOn(process, "exit")`) is bound to the *implementation* — if we rename `process.exit`, the spy silently stops working. The fake is easier to maintain.
+2. **Why does `vitest.config.ts` set every environment variable, and what silent bug does that prevent?**
+   > Without it, `config.ts` reads the developer's local `.env`. A test that passes only because *your* `.env` has the right values would fail on CI where `.env` doesn't exist. The config sets every variable up front, so every test runs under the same controlled environment.
+3. **Why fake only `Date` and not all timers in the token tests?**
+   > Faking all timers also freezes `setTimeout` and async timer-based code (like `argon2` or `jose` crypto operations that may use timers internally). Faking only `Date` gives us control over token expiry without breaking async code.
+4. **Why is `restoreMocks: true` useful, and what goes wrong in test #5 if a spy leaks into test #6?**
+   > `restoreMocks: true` resets every `vi.spyOn` before each test, so a spy from test #5 doesn't affect test #6. Without it, a spy that mocked `logger.error` would keep intercepting calls in later tests, hiding a real error.
+5. **What did the failing `slugify` test teach you about writing the test before trusting the code?**
+   > The original `slugify` sliced to 50 characters *after* trimming dashes, so a cut could leave a trailing `-`. Without a test, this would have shipped. The test found it in seconds. Writing the test before trusting the code caught a real edge case that no one would have noticed manually.
+6. **Which mutation in the table was not caught at first, and what test did you add?**
+   > Row 4 (removing `algorithms: ["HS256"]`) was not caught by the first version of the tests because `jose` protects against HS512 by default. I added a test that explicitly checks the allowed algorithm by attempting to verify with a token signed using `HS512`.
+7. **Why is it correct that controllers and repositories show 0% coverage after today?**
+   > Their logic depends on a database. Unit tests can't verify Prisma queries meaningfully (mocking Prisma proves nothing). Their real bugs only appear when the real database runs the query — that's what Day 30's integration tests are for.
 
 ## OWASP API Top 10 (Day 27 Review)
 
@@ -471,3 +495,16 @@ What I'd do differently:
 
 One thing I want to get better at in Week 5:
 - Writing proper unit and integration tests with a framework (Vitest), instead of ad-hoc scripts.
+
+## Week 5 summary (Partial)
+Three things I can do now that I couldn't on Day 28:
+- Write fast unit tests for pure logic using Vitest.
+- Mock external dependencies (like `randomBytes` or `Date`) to make tests deterministic.
+- Use a fake implementation of an interface to test complex logic without a database.
+
+Things that confused me:
+- The difference between a fake, a stub, and a spy.
+- Why faking *all* timers broke the token tests.
+
+What I'd do differently:
+- Write the test *before* the code. The `slugify` test found a bug instantly that would have shipped otherwise.

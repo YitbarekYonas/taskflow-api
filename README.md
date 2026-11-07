@@ -8,6 +8,7 @@ A team task-management API built with Node.js, Express, TypeScript, and Prisma.
 - **Auth & Access Control:** User registration, login (JWT), refresh tokens (rotation + reuse detection), logout, role-based access control, and **rate limiting**.
 - **Core:** Repository pattern, Unit of Work for transactions, Zod validation, strict TypeScript, and centralized error handling.
 - **Database:** PostgreSQL with Prisma ORM, enforcing referential integrity, cascading deletes, and composite indexes for fast queries.
+- **Testing:** Vitest unit tests for pure logic, plus smoke, token, auth-coverage, refresh, access, rate-limit, and security scripts.
 - **Production Middleware:** Security headers (Helmet), CORS, Request IDs, body size limits, and **rate limits**.
 
 ## Setup
@@ -64,10 +65,32 @@ npm run verify
 
 ![Smoke Test Results](./docs/smoke-test.png)
 
+### Unit Tests (no database, no server)
+```bash
+npm run test:unit       # Fast unit tests (about a second)
+npm run test:watch      # Re-run affected tests on every save
+npm run test:coverage   # Coverage report in coverage/
+```
+
+Unit tests cover pure logic that needs no I/O:
+- Pagination metadata (`buildMeta`)
+- Slugs (`slugify`, `makeSlug` with controlled randomness)
+- Access rules (`requireProjectRole`, `taskRole`, `requireTaskRole`)
+- Passwords (`hashPassword`, `verifyPassword`)
+- Refresh-token helpers (generation, hashing, family ids)
+- Access tokens (sign/verify, expiry, and forged/tampered/`alg:none` rejection)
+- Config validation (including production guards)
+- Error-to-status mapping (with order locked in)
+- Zod schemas (ids, NUL characters, mass-assignment, query params)
+
+The tests are named after behavior, and the tables in `it.each` make gaps obvious. Coverage is used as a map of untested logic, not a score — controllers, repositories, and routes are covered by integration tests (Week 5, Days 30–32), not unit tests.
+
 ### Test Scripts
 | Script | What it proves |
 |---|---|
-| `npm run test:unit` | Pure functions (pagination, slugs) |
+| `npm run test:unit` | Pure functions (pagination, slugs, access rules, tokens, config, schemas) |
+| `npm run test:watch` | Re-runs affected tests on save |
+| `npm run test:coverage` | Coverage report for `src/` in `coverage/` |
 | `npm run smoke` | Every endpoint, happy path and failures |
 | `npm run test:tokens` | Forged, expired and tampered tokens are rejected |
 | `npm run test:auth-coverage` | Every documented route returns 401 without a token |
@@ -361,6 +384,9 @@ prisma/
 ├── seed.ts               # Development seed data
 └── migrations/           # SQL migration history
 
+tests/
+└── unit/                 # Vitest unit tests (mirrors src/)
+
 src/
 ├── app.ts, server.ts, cli.ts
 ├── auth/                 # Password hashing, JWT utilities, refresh token helpers, policy (Actor), access (roles)
@@ -378,7 +404,7 @@ src/
 ```
 
 ## Tech Stack
-Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CORS, Swagger UI, Argon2, jose, express-rate-limit.
+Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CORS, Swagger UI, Argon2, jose, express-rate-limit, Vitest.
 
 ## Roadmap
 - [x] Week 1 — CLI core
@@ -391,6 +417,10 @@ Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CO
 - [x] Roles and project membership
 - [x] Rate limiting and security hardening
 - [x] Week 4 wrap-up and v0.4.0
+- [ ] Week 5 — Testing (Vitest unit tests, integration tests, coverage, CI test gate)
+  - [x] Vitest setup and unit tests for pure logic
+  - [ ] Test database + Supertest integration tests
+  - [ ] Coverage target and CI gate
 
 ## Known Limitations
 1. **In-memory rate limits:** Reset on restart and don't share between multiple server instances. Week 6 moves them to Redis.
@@ -413,7 +443,4 @@ Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CO
 18. **Only two roles (owner, member):** No read-only "viewer" role yet.
 19. **Legacy tasks and projects with no owner are invisible:** Only the CLI can see/modify them.
 20. **`listComments` still loads every comment before filtering:** It uses `findAll()` instead of a `WHERE taskId = ?` query. Week 5 fixes this.
-```
-
-### What Changed:
-Only the **ER Diagram** was updated to match the guide's version (snake_case, `created_by_id`, `author_id`, all relations).
+21. **Unit tests don't cover HTTP or SQL:** Controllers, repositories, and routes show 0% unit coverage by design. Integration tests (Week 5, Days 30–32) cover them.
