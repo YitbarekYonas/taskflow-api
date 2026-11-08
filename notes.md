@@ -123,6 +123,25 @@
 - **Mutation testing:** Deliberately breaking the code to prove the tests catch it. If a test doesn't fail, the test is useless.
 - **Coverage:** 15.5% coverage is correct after Day 29. It's 100% on pure logic (pagination, slugs, auth helpers, schemas) and 0% on plumbing (controllers, repositories). Integration tests will cover the plumbing.
 
+### Week 5 (Integration Testing & Test Database)
+- **Integration tests run the real code with real dependencies:** your HTTP layer, your validation, your Prisma queries, and a real PostgreSQL. They catch bugs unit tests can't: wrong column names, missing migrations, constraint surprises, middleware order.
+- **Don't mock the database to test your data layer.** A mocked Prisma returns whatever you tell it to, so the test proves nothing about your SQL. Mock things you don't own (external APIs); run things you can run (PostgreSQL).
+- **Supertest calls the app directly.** `request(app).get("/health")` starts a throwaway server on a random port for that one request. No `npm run dev`, no port clashes. This works because `createApp()` has been separate from `server.ts` since Day 8.
+- **Isolation strategy #1: truncate all tables before every test.** Simple, obviously correct, a few milliseconds. Faster strategies (transaction rollback, per-worker DBs, Testcontainers) exist and are noted as challenges.
+- **A shared test database means files must not run in parallel.** `fileParallelism: false` in the integration config; two files truncating the same tables would wipe each other's data mid-test.
+- **Two layers of protection against wiping the wrong database:**
+  1. `globalSetup.ts` refuses any database name not matching `/^[a-z0-9_]+_test$/`.
+  2. `truncateAll()` runs `SELECT current_database()` and refuses if the result doesn't end in `_test`.
+  Layer 1 trusts the URL string. Layer 2 trusts the actual connection. A bug in dotenv loading, or a mid-flight env change, could make the two disagree — only layer 2 notices.
+- **Migrate the test database from migration files.** `prisma migrate deploy` before the suite means the tests also prove your migrations work from scratch. This is the same guarantee `npm run db:check-migrations` was giving you, now a side effect of any integration run.
+- **Assert the contract, not the noise.** Status code, body shape, headers. Use `expect.any(Number)` for auto-incremented IDs, `expect.any(String)` for ISO timestamps. Never assert a specific clock value.
+- **Assert side effects where they happen.** A registration test should also look in the database: one row, the hash is Argon2, the password is not stored. A response that says "created" proves little by itself.
+- **Factories beat repeated setup.** `createUser()` inserts a user directly with a pre-hashed password (cached once). A login test then doesn't pay for a registration, and can't fail because registration broke.
+- **Some properties are poor automated tests.** "A wrong email and a wrong password take the same time" depends on the machine; a test for it would be flaky. Measure with `npm run bench:login`, keep it out of the suite. Choosing *not* to test something is part of testing well.
+- **Test the test infrastructure.** `tests/integration/safety.test.ts` proves: the DB name ends in `_test` (both layers), all migrations applied (`_prisma_migrations` count > 0), `beforeEach` truncates between tests, `RESTART IDENTITY` gives predictable IDs (`createUser().id === 1`).
+- **`verify.sh` runs every script against one long-lived server, so scripts share in-memory rate-limit budget.** `test:ratelimit` assumes a fresh server; it must run *first* in the `for step in` loop, before any other script drains the register/refresh/login counters. This was a pre-existing latent flakiness made visible once more scripts accumulated.
+- **The green suite proves three things:** the migration history is reproducible from empty, the test DB is isolated from dev, and the two safety layers fire before any destructive operation.
+
 ## Checkpoint answers (Days 2–6)
 
 *(Skipped or filled in as you go)*
@@ -217,7 +236,7 @@
 
 ## Day 17 Checkpoint Answers
 1. Why is "check that it exists, then insert" unsafe, while a foreign key is safe?
-   > `check, then insert` has a gap between the two steps where another request can slip in (race condition). A foreign key is checked *inside* the write operation by the database, so there is no gap and no code path can bypass it.
+   > `check, then insert` has a gap between the two steps where another request can slip in (race condition). A foreign key is checked *inside the write operation* by the database, so there is no gap and no code path can bypass it.
 2. The same `P2003` code becomes a `400` on insert and a `409` on delete. Why?
    > On insert, a bad reference means the client sent a bad `projectId` (their fault: 400). On delete, a `P2003` means the resource is still in use by other rows (a state conflict: 409). The repository maps these to `InvalidReferenceError` and `InUseError` so the service can add the human message.
 3. Which checks did you deliberately keep in the services, and why can't the database do them?
@@ -287,7 +306,7 @@
 
 ## Day 23 Checkpoint Answers
 1. **A JWT payload is readable by anyone. Then why can't an attacker change `sub` to `1`?**
-   > Because the   > Because the signature is computed over the header and payload. Changing `sub` invalidates the signature, and `jwtVerify` rejects the token.
+   > Because the signature is computed over the header and payload. Changing `sub` invalidates the signature, and `jwtVerify` rejects the token.
 2. **What attack does `algorithms: ["HS256"]` prevent, and what would trusting the token's own `alg` header allow?**
    > It prevents the `alg: none` attack (where an attacker crafts a token with no signature) and algorithm confusion (switching between HS256 and RS256). Trusting the `alg` header would allow an attacker to pick an algorithm that bypasses the signature check.
 3. **Why does the token contain only the user id and not the user's role or project memberships?**
@@ -385,6 +404,80 @@
 7. **Why is it correct that controllers and repositories show 0% coverage after today?**
    > Their logic depends on a database. Unit tests can't verify Prisma queries meaningfully (mocking Prisma proves nothing). Their real bugs only appear when the real database runs the query — that's what Day 30's integration tests are for.
 
+## Day 30 Checkpoint Answers
+1. **Why don't we mock Prisma in integration tests, and which kinds of bugs does a real database catch that a mock never would?**
+   > A mocked Prisma returns whatever you tell it to, so the test proves nothing about your SQL. A real database catches: a wrong column name, a missing migration, a foreign key that doesn't behave as assumed, a unique constraint that rejects the wrong input, and middleware in the wrong order (e.g., `validate` before `authenticate`). These are exactly the bugs that reach production.
+2. **Why does the suite run with `fileParallelism: false`? What did you observe when it was `true`?**
+   > Because all files share one test database. If two files truncate the same tables in parallel, one wipes the other's data mid-test, producing intermittent failures (`expected 1 to be 0` or a user that vanished). Not deterministic — the intermittency *is* the problem. Set it back to `false` and re-run; the failures disappear.
+3. **What are the two layers of protection against wiping the wrong database, and why is the second one needed after the first?**
+   > Layer 1 (`globalSetup.ts`): refuses any URL whose database name doesn't match `/^[a-z0-9_]+_test$/`. Catches "I pointed `TEST_DATABASE_URL` at the wrong thing" *before* anything runs. Layer 2 (`truncateAll()`): runs `SELECT current_database()` and refuses if the result doesn't end in `_test`. Catches "the URL says `_test` but the client is actually connected elsewhere" — a URL-vs-reality mismatch that layer 1 can't see (e.g., a `dotenv` loading order bug, or an env change mid-flight). Only layer 2 notices.
+4. **Why does the global setup run `prisma migrate deploy` instead of `prisma db push`, or reusing whatever state the database is in?**
+   > `migrate deploy` applies every migration in order, so the tests also prove the migration history works from an empty database. `db push` skips the migration files entirely (it derives the schema from `schema.prisma`), so it wouldn't prove migrations are reproducible. Reusing the DB's existing state can leave a half-applied migration that looks green — exactly the failure mode the whole migration ledger was designed to prevent.
+5. **Why do the register tests also read the database, and not only the response?**
+   > The response says "created" — that proves little by itself. Reading the database proves the row exists, has the right hash (`/^\$argon2id\$/`), doesn't contain the plaintext password, and that the unique constraint actually prevented a second row. A response-only test would pass even if the write silently failed.
+6. **Why does `createUser` insert directly instead of calling `/auth/register`?**
+   > Argon2 is deliberately slow (~100 ms per hash). Registration through the API pays that cost on every test. `createUser` caches the hash once and reuses it, and it also means a login test can't fail because the *registration* endpoint broke — the two are decoupled.
+7. **Which property of the login endpoint did your suite deliberately *not* test, why, and where is it checked instead?**
+   > The timing-equal property ("wrong email and wrong password take the same time"). A test for it would be flaky on a busy machine — the assertion depends on the machine's speed and load. It's checked by `npm run bench:login`, outside the suite. Choosing *not* to test it is the correct call; a flaky test is worse than no test.
+8. **How does Supertest call the app without a port, and what Day 8 decision made that possible?**
+   > `request(app).get(...)` starts a throwaway server on a random port for that one request, then tears it down. No `npm run dev`, no port clashes. This works because since Day 8, `createApp()` has been separate from `server.ts`: the app is a function that returns an Express instance, and the server is a separate file that calls `app.listen()`. Integration tests import `createApp()`, not the server.
+
+## Day 30 Observations
+
+### Dev database is safe
+- After running `npm run test:integration`, `SELECT count(*) FROM users;` on `taskflow` still returned **19** (seed data, untouched).
+- Test DB (`taskflow_test`) was created and migrated from scratch: **9 migrations applied in order** (`init` → `task_list_indexes` → `rename_comment_body` → `add_project_slug` → `require_password_hash` → `add_created_by` → `add_refresh_tokens` → `add_comment_author_id` → `backfill_owner_memberships`).
+- Safety tests all green: `_test` name check (URL + `SELECT current_database()`), `_prisma_migrations` has 9 rows, truncation between tests works, `RESTART IDENTITY` gives `id=1` after truncation.
+- Second run is fast (no CREATE DATABASE, no migrations) — confirms the warm-cache path.
+
+### Two layers of protection (confirmed empirically)
+1. **URL name check** (`globalSetup.ts`): refuses to create/migrate unless the URL's database name matches `/^[a-z0-9_]+_test$/`.
+2. **Live DB identity check** (`truncateAll`): runs `SELECT current_database()` and refuses if it doesn't end in `_test`.
+
+Both fired green on every run. The 19 dev users are the proof.
+
+### Predictions vs. reality (Experiment section)
+| # | Prediction | What really happened |
+|---|---|---|
+| 1 | Two files truncating in parallel would cause failures | Set `fileParallelism: true`, ran 4–5 times, saw intermittent `expected 1 to be 0` / vanished users. Not deterministic — the intermittency *is* the failure mode. Restored to `false`, three green runs in a row. |
+| 2 | Missing migration → confusing failure without `migrate deploy` | The `globalSetup` runs `prisma migrate deploy` before any test. A pending migration is applied automatically, not hit mid-test. The confusion is avoided entirely. |
+| 3 | Test relying on previous test's user breaks a property | **Independence.** Commented out `truncateAll()`, ran, saw the second test's "empty tables" fail. Restored. `--sequence.shuffle` twice confirmed no hidden dependencies. |
+
+### Mutation table (Part D) — proving the tests catch bugs
+
+Each row: make the change, run `npm run test:integration`, note which test failed, `git restore` before the next.
+
+| # | Break | Test that failed |
+|---|---|---|
+| 1 | `register` stores `input.password` instead of `passwordHash` | `stores an Argon2id hash and never the password` |
+| 2 | `user.repository.create` rethrows `P2002` unchanged | `answers 409 for a duplicate email` + `creates exactly one account when the same registration arrives eight times at once` |
+| 3 | `login` throws `"No such user"` when `record` is missing | `gives an identical 401 for an unknown email and a wrong password` |
+| 4 | `authenticate` skips `users.findById` | `answers 401 for a perfectly valid token whose user no longer exists` |
+| 5 | `Cache-Control: no-store` middleware removed | `sends security-relevant headers` (both register and login) |
+| 6 | `.strict()` removed from `registerSchema` | `rejects an unknown field (mass assignment)` |
+| 7 | `issueSession` stores the raw token instead of its hash | `stores only a hash of the refresh token, with the configured lifetime` |
+| 8 | Dummy-hash line removed for unknown emails | **Nothing failed — deliberate.** The suite cannot see a timing leak, and shouldn't try to. Property is measured by `npm run bench:login`. |
+
+Row 8 is the lesson: **choosing not to test something is part of testing well.** A flaky timing assertion would be worse than no assertion.
+
+### Double-coverage table (Part E) — what Day 32 can retire
+
+| Script | Checks now also covered by the suite | Still only covered by the script |
+|---|---|---|
+| `smoke.ts` (register/login/`/auth/me` parts) | registration (14 tests), login (13 tests), `/auth/me` (7 tests) | everything about tasks, projects, comments, transactions |
+| `test-tokens` | token forgery matrix (unit `tokens.test.ts`, 16 cases), `/auth/me` wiring (integration) | — (fully duplicated after today) |
+| `refresh-flow` | — | rotation, replay detection, logout, `logout-all`, 6-parallel-refresh race, expired tokens, purge |
+| `access-attacks` | — | full stranger/member/owner matrix (~70 assertions, incl. the 15-round two-owners race) |
+| `security-checks` | headers, CORS, NUL characters, out-of-range integers (via unit schemas tests) | hostile input beyond what schemas reject, oversized bodies, `__proto__` in a body |
+
+**Do not delete the scripts yet.** They test the *compiled* server over real HTTP (`verify.sh` needs them), and they cover things the suite doesn't (refresh, access, security, tasks/projects). Day 32 decides what to retire.
+
+### The `verify.sh` order bug
+- `test:ratelimit` fails its 3 "fresh budget" assertions (`another user has their own budget`, `exactly the remaining 2 registrations succeed`, `first 60 reach the handler`) because `test:refresh` and `test:access` in the same `verify` run drain the in-memory register/refresh/login budget for `ip=::1`.
+- Every failed assertion shows `blocked true` — the limiter is *working*, the test setup just needs headroom.
+- **Fix:** move `test:ratelimit` to the *front* of the `for step in` loop in `verify.sh`, before any other script. This was a pre-existing latent flakiness made visible once more scripts accumulated; not caused by Day 30.
+- **Day 31 fix:** port `test:ratelimit` into the integration suite, where `beforeEach` resets the in-memory store.
+
 ## OWASP API Top 10 (Day 27 Review)
 
 | Risk | In TaskFlow | Where | Gap? |
@@ -420,23 +513,24 @@
 
 1. **Search Wildcards:** Searching for `%` or `_` returns all tasks because SQL `LIKE` interprets them as wildcards. To fix, escape these characters in the service layer before querying.
 2. **No Retries on `P2034`:** We haven't implemented automatic retries for deadlocks yet. If two merges clash, the user must retry manually.
-3. **No Automated Tests:** We currently rely on a manual `npm run smoke` test. Proper unit and integration tests will be added in **Week 5**.
-4. **No CI:** We don't have a GitHub Actions pipeline yet. This will be added in **Week 7**.
-5. **Offset pagination is slow on deep pages:** `OFFSET 49980` still walks past 49,980 rows. This will be fixed in **Week 5** with keyset pagination.
-6. **`ILIKE` search lacks a trigram index:** The search is slow on large tables because it does a full scan. This will be fixed in **Week 5**.
-7. **CSV export loads all rows:** The export uses `findAll()`, which loads the entire table into memory. This will be fixed in **Week 5** with a streaming query.
-8. **`/health` doesn't check the database:** It returns `ok` even if Postgres is down. This will be fixed in **Week 7** with a proper readiness check.
-9. **Rate limits are in-memory:** They reset on restart and don't share between instances. Week 6 moves them to Redis.
-10. **Per-account throttle can be abused to lock a victim out:** An attacker can flood `/auth/login` with wrong passwords until the account is throttled. Rate limiting makes it slow, but not impossible.
-11. **No CAPTCHA or MFA:** A determined attacker with a botnet can still try many passwords.
-12. **No email verification:** Accounts can be created with fake emails.
-13. **Access tokens cannot be revoked:** A stolen access token stays valid for up to 15 minutes after logout.
-14. **Member invites reveal email existence:** Adding a member by email returns `404` if the user doesn't exist. Rate limiting makes probing slow, but not impossible.
-15. **No automated alerting:** Repeated `auth 401` events are logged but not flagged.
-16. **Only two roles (owner, member):** No read-only "viewer" role yet.
-17. **Legacy tasks and projects with no owner are invisible:** Only the CLI can see/modify them.
-18. **Moving a task out of a project can orphan it from a creator who left.**
-19. **`listComments` still loads every comment before filtering:** It uses `findAll()` instead of a `WHERE taskId = ?` query.
+3. **No CI:** We don't have a GitHub Actions pipeline yet. This will be added in **Week 7**.
+4. **Offset pagination is slow on deep pages:** `OFFSET 49980` still walks past 49,980 rows. This will be fixed in **Week 5** with keyset pagination.
+5. **`ILIKE` search lacks a trigram index:** The search is slow on large tables because it does a full scan. This will be fixed in **Week 5**.
+6. **CSV export loads all rows:** The export uses `findAll()`, which loads the entire table into memory. This will be fixed in **Week 5** with a streaming query.
+7. **`/health` doesn't check the database:** It returns `ok` even if Postgres is down. This will be fixed in **Week 7** with a proper readiness check.
+8. **Rate limits are in-memory:** They reset on restart and don't share between instances. Week 6 moves them to Redis.
+9. **Per-account throttle can be abused to lock a victim out:** An attacker can flood `/auth/login` with wrong passwords until the account is throttled. Rate limiting makes it slow, but not impossible.
+10. **No CAPTCHA or MFA:** A determined attacker with a botnet can still try many passwords.
+11. **No email verification:** Accounts can be created with fake emails.
+12. **Access tokens cannot be revoked:** A stolen access token stays valid for up to 15 minutes after logout.
+13. **Member invites reveal email existence:** Adding a member by email returns `404` if the user doesn't exist. Rate limiting makes probing slow, but not impossible.
+14. **No automated alerting:** Repeated `auth 401` events are logged but not flagged.
+15. **Only two roles (owner, member):** No read-only "viewer" role yet.
+16. **Legacy tasks and projects with no owner are invisible:** Only the CLI can see/modify them.
+17. **Moving a task out of a project can orphan it from a creator who left.**
+18. **`listComments` still loads every comment before filtering:** It uses `findAll()` instead of a `WHERE taskId = ?` query.
+19. **`test:ratelimit` is sensitive to run order in `verify.sh`:** It assumes a fresh rate-limit budget. If any other script drains the register/refresh/login budget first, its "fresh budget" assertions fail. Fixed by running it first in the loop. The limiter itself is correct; the test setup just needs headroom. Day 31's integration suite will `beforeEach` reset the in-memory store, retiring this script into the suite.
+20. **Integration tests wipe the test database on every `beforeEach`:** This is correct for the current suite (simple, obviously correct, a few ms per wipe), but it means test files must run serially (`fileParallelism: false`). Per-worker databases (Day 30 challenge) would allow parallelism at the cost of setup complexity.
 
 ## Week 1 summary
 Three things I can do now that I couldn't on Day 1:
@@ -502,9 +596,16 @@ Three things I can do now that I couldn't on Day 28:
 - Mock external dependencies (like `randomBytes` or `Date`) to make tests deterministic.
 - Use a fake implementation of an interface to test complex logic without a database.
 
+Three more things I can do now that I couldn't on Day 29:
+- Write integration tests against a real, isolated test database using Supertest.
+- Migrate the test database from migration files, proving the migration history is reproducible from empty.
+- Prove the test infrastructure itself works (name checks, truncation between tests, `RESTART IDENTITY`) before trusting it with real tests.
+
 Things that confused me:
 - The difference between a fake, a stub, and a spy.
 - Why faking *all* timers broke the token tests.
+- Why `fileParallelism: false` is required when files share one database.
 
 What I'd do differently:
 - Write the test *before* the code. The `slugify` test found a bug instantly that would have shipped otherwise.
+- Put `test:ratelimit` first in `verify.sh` from the moment I added a second script, not after it failed.
