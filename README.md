@@ -8,7 +8,7 @@ A team task-management API built with Node.js, Express, TypeScript, and Prisma.
 - **Auth & Access Control:** User registration, login (JWT), refresh tokens (rotation + reuse detection), logout, role-based access control, and **rate limiting**.
 - **Core:** Repository pattern, Unit of Work for transactions, Zod validation, strict TypeScript, and centralized error handling.
 - **Database:** PostgreSQL with Prisma ORM, enforcing referential integrity, cascading deletes, and composite indexes for fast queries.
-- **Testing:** Vitest unit tests for pure logic, plus smoke, token, auth-coverage, refresh, access, rate-limit, and security scripts.
+- **Testing:** Vitest unit tests for pure logic, and integration tests against a real, isolated test database via Supertest. Also smoke, token, auth-coverage, refresh, access, rate-limit, and security scripts.
 - **Production Middleware:** Security headers (Helmet), CORS, Request IDs, body size limits, and **rate limits**.
 
 ## Setup
@@ -83,7 +83,29 @@ Unit tests cover pure logic that needs no I/O:
 - Error-to-status mapping (with order locked in)
 - Zod schemas (ids, NUL characters, mass-assignment, query params)
 
-The tests are named after behavior, and the tables in `it.each` make gaps obvious. Coverage is used as a map of untested logic, not a score — controllers, repositories, and routes are covered by integration tests (Week 5, Days 30–32), not unit tests.
+The tests are named after behavior, and the tables in `it.each` make gaps obvious. Coverage is used as a map of untested logic, not a score — controllers, repositories, and routes are covered by integration tests, not unit tests.
+
+### Integration Tests (real PostgreSQL, no server)
+```bash
+npm run test:integration   # API tests against a real, isolated test database
+npm test                   # unit tests, then integration tests
+```
+
+Integration tests run the real HTTP stack — validation, controllers, services, Prisma, and PostgreSQL — against a **separate** database (`taskflow_test` by default). They use **Supertest**, which calls `createApp()` directly; no `npm run dev`, no port conflicts.
+
+- **Prerequisites:** PostgreSQL must be running (`npm run db:up`).
+- **The test database is created and migrated automatically** on the first run (`prisma migrate deploy`).
+- **Wiped before every test** (`TRUNCATE ... RESTART IDENTITY CASCADE`), so tests are independent and IDs are predictable.
+- **Two layers of protection** against wiping the wrong database:
+  1. `globalSetup.ts` refuses any URL whose database name doesn't match `/^[a-z0-9_]+_test$/`.
+  2. `truncateAll()` runs `SELECT current_database()` and refuses if the name doesn't end in `_test`.
+- **Files run one at a time** (`fileParallelism: false`) because they share one database.
+
+What integration tests prove:
+- Registration: 201 with public fields, Argon2id hash stored, no password in body, security headers, duplicate email 409 (case-insensitive), mass-assignment rejected, malformed JSON/array/`null`/`text/plain` rejected, **8 parallel registrations produce exactly one account**.
+- Login: access + refresh tokens issued, refresh hash stored (not the token), two families per user, identical 401 for unknown email vs. wrong password, unusable hash → 401, no session created on failure, validation errors on missing/extra fields.
+- `/auth/me`: valid token returns the user, no/garbage/wrong-scheme/empty token 401, valid token for a deleted user 401.
+- Test infrastructure: DB name ends in `_test`, all migrations applied, tables empty between tests, `RESTART IDENTITY` gives `id=1`.
 
 ### Test Scripts
 | Script | What it proves |
@@ -91,6 +113,8 @@ The tests are named after behavior, and the tables in `it.each` make gaps obviou
 | `npm run test:unit` | Pure functions (pagination, slugs, access rules, tokens, config, schemas) |
 | `npm run test:watch` | Re-runs affected tests on save |
 | `npm run test:coverage` | Coverage report for `src/` in `coverage/` |
+| `npm run test:integration` | API tests against a real, isolated test database (`taskflow_test`) |
+| `npm test` | Unit tests, then integration tests |
 | `npm run smoke` | Every endpoint, happy path and failures |
 | `npm run test:tokens` | Forged, expired and tampered tokens are rejected |
 | `npm run test:auth-coverage` | Every documented route returns 401 without a token |
@@ -301,6 +325,7 @@ Moving list queries from JavaScript to SQL drastically reduced response times, e
 | `PORT` | The port the Express server listens on | `3000` |
 | `NODE_ENV` | Environment mode | `development` |
 | `DATABASE_URL` | PostgreSQL connection string | (required) |
+| `TEST_DATABASE_URL` | PostgreSQL connection string for integration tests (must end in `_test`) | `postgresql://postgres:postgres@localhost:5432/taskflow_test` |
 | `CORS_ORIGIN` | Allowed origins for browser requests | `http://localhost:5173` |
 | `LOG_LEVEL` | Logging verbosity (`info` or `debug`) | `info` |
 | `JWT_SECRET` | Secret used to sign access tokens (min 32 chars) | (required) |
@@ -385,7 +410,9 @@ prisma/
 └── migrations/           # SQL migration history
 
 tests/
-└── unit/                 # Vitest unit tests (mirrors src/)
+├── unit/                 # Vitest unit tests (mirrors src/)
+├── integration/          # Supertest tests against a real test database
+└── support/              # Shared helpers: env, app, factories, truncate, globalSetup
 
 src/
 ├── app.ts, server.ts, cli.ts
@@ -404,7 +431,7 @@ src/
 ```
 
 ## Tech Stack
-Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CORS, Swagger UI, Argon2, jose, express-rate-limit, Vitest.
+Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CORS, Swagger UI, Argon2, jose, express-rate-limit, Vitest, Supertest.
 
 ## Roadmap
 - [x] Week 1 — CLI core
@@ -419,7 +446,8 @@ Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CO
 - [x] Week 4 wrap-up and v0.4.0
 - [ ] Week 5 — Testing (Vitest unit tests, integration tests, coverage, CI test gate)
   - [x] Vitest setup and unit tests for pure logic
-  - [ ] Test database + Supertest integration tests
+  - [x] Test database + Supertest integration tests for auth
+  - [ ] Integration tests for tasks, projects, comments
   - [ ] Coverage target and CI gate
 
 ## Known Limitations
@@ -444,3 +472,6 @@ Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CO
 19. **Legacy tasks and projects with no owner are invisible:** Only the CLI can see/modify them.
 20. **`listComments` still loads every comment before filtering:** It uses `findAll()` instead of a `WHERE taskId = ?` query. Week 5 fixes this.
 21. **Unit tests don't cover HTTP or SQL:** Controllers, repositories, and routes show 0% unit coverage by design. Integration tests (Week 5, Days 30–32) cover them.
+22. **Integration tests run serially:** The test database is shared across files, so `fileParallelism: false` is required. Per-worker databases would allow parallelism at the cost of setup complexity.
+23. **Test database is wiped on every `beforeEach`:** Correct for the current suite (a few ms per wipe), but slower than transaction rollback isolation. Documented as a challenge for later.
+24. **`test:ratelimit` is order-sensitive in `verify.sh`:** It assumes a fresh rate-limit budget, so it must run *first* in the `for step in` loop. Any other script that drains register/refresh/login counters before it will cause false failures. The limiter itself is correct; the test setup just needs headroom. Week 5's integration suite will `beforeEach` reset the in-memory store, retiring this script into the suite.
