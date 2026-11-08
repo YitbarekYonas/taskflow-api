@@ -1,6 +1,7 @@
 import type { Request, RequestHandler, Response } from "express";
 import { ipKeyGenerator, rateLimit } from "express-rate-limit";
 import { config } from "../config.js";
+import { logger } from "../logger.js";
 
 type Spec = {
   windowMs: number;
@@ -27,7 +28,9 @@ export function makeLimiter(spec: Spec): RequestHandler {
     skip: spec.skip ? (req) => spec.skip!(req) : undefined,
     keyGenerator: (req, res) => (spec.key ?? ipKey)(req, res),
     // Same error shape as the rest of the API
-    handler: (_req, res) => {
+    handler: (req, res) => {
+      logger.info(`[${res.locals.requestId}] rate limited ${req.method} ${req.originalUrl} ip=${req.ip}`);
+      
       const retryAfter = Number(res.getHeader("Retry-After")) || Math.ceil(spec.windowMs / 1000);
       res.status(429).json({ error: { message: spec.message, retryAfterSeconds: retryAfter } });
     },
