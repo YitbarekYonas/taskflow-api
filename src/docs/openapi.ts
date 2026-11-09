@@ -137,6 +137,7 @@ export const baseSpec = {
       post: {
         tags: ["Tasks"],
         summary: "Create a task",
+        description: "A due date in the past is rejected with 400 (UTC date). Updates may set past dates.",
         requestBody: { required: true, content: json(schemaOf(createTaskSchema)) },
         responses: { 201: created("Task"), 400: errorRef("BadRequest") },
       },

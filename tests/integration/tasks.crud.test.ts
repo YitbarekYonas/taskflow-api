@@ -258,3 +258,32 @@ describe("DELETE /tasks/:id", () => {
     expect(await prisma.comment.count()).toBe(0);
   });
 });
+describe("due dates on creation", () => {
+  // Computed relative to now, so the tests never go stale
+  const daysFromNow = (days: number) => new Date(Date.now() + days * 86_400_000).toISOString().slice(0, 10);
+
+  it("rejects a due date in the past with 400 and a clear message", async () => {
+    const { member } = await team();
+    const res = await (await asUser(member)).post("/tasks", { title: "x", dueDate: daysFromNow(-3) });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.message).toBe("Due date cannot be in the past.");
+    expect(await prisma.task.count()).toBe(0);
+  });
+
+  it("accepts a future due date", async () => {
+    const { member } = await team();
+    const res = await (await asUser(member)).post("/tasks", { title: "x", dueDate: daysFromNow(3) });
+
+    expect(res.status).toBe(201);
+  });
+
+  it("still lets an update move the date into the past (documented decision)", async () => {
+    const { member } = await team();
+    const task = await createTask({ createdBy: member, dueDate: daysFromNow(10) });
+
+    const res = await (await asUser(member)).patch(`/tasks/${task.id}`, { dueDate: daysFromNow(-3) });
+
+    expect(res.status).toBe(200);
+  });
+});
