@@ -142,6 +142,20 @@
 - **`verify.sh` runs every script against one long-lived server, so scripts share in-memory rate-limit budget.** `test:ratelimit` assumes a fresh server; it must run *first* in the `for step in` loop, before any other script drains the register/refresh/login counters. This was a pre-existing latent flakiness made visible once more scripts accumulated.
 - **The green suite proves three things:** the migration history is reproducible from empty, the test DB is isolated from dev, and the two safety layers fire before any destructive operation.
 
+### Week 5 (Tasks, Projects & Red-Green-Refactor)
+- **Arrange through the database, act through the API, assert through both.** Factories set up the world directly (fast, typed). The request goes over HTTP (the thing under test). The assertion reads the response *and* the rows. A `204` proves nothing if the row is still there.
+- **Test personas, not roles in the abstract.** Every authorization test uses the same cast — an owner, a member, a stranger — and names them that way in the code (`team()` returns `{ owner, member, stranger, project }`). A failing test then reads like a sentence, not like a fixture.
+- **Order needs explicit data.** For sorting, give every row its own `createdAt`. Never rely on "created a millisecond apart". For ties on `priority` / `dueDate`, resolve them with `id` so the expected list is fully defined.
+- **"Invisible" must equal "missing".** A stranger requesting a hidden task or project gets exactly the same `404` and message shape as a request for an id that doesn't exist — otherwise the endpoint leaks existence. Tests assert message equality modulo the id.
+- **Failure side effects matter.** A forbidden delete must leave the row in place. A failed merge must leave **both** projects untouched, with no task moved. This is how atomicity is tested from outside.
+- **Boundary arithmetic belongs in unit tests with an injected clock.** "Is today in the past?" is a pure function `isPastDate(date, today)`. "A past due date returns 400" is an API behavior. Same rule, two tests, no flakiness.
+- **Red-green-refactor is a discipline, not a slogan.** The red phase is not "write a test". It's "write a test, run it, and confirm it fails *for the expected reason*". If a different test fails, stop — you have a stale assumption or an unrelated bug.
+- **`nulls: "last"` and its asymmetry.** PostgreSQL's defaults are nulls-last for `ASC` and nulls-first for `DESC`. A suite that checks only one direction would let the desc bug live. Row 4 of the mutation table exists specifically to demonstrate this.
+- **"It passed" is not "it's safe".** Row 7 (remove the `id` tie-breaker on `priority`) may survive on a small table because PostgreSQL's tie ordering is accidentally stable. A test suite can prove presence of bugs, not their absence. Day 18's smoke test failure is the anecdote; this is the generalization.
+- **Concurrency is testable with `Promise.all`.** Two simultaneous merges → exactly one `200`, the loser is `404` or `409`, and the target ends with the right task count. The assertion must hold for every interleaving, not one lucky ordering.
+- **The CLI is exempt from business rules that are about user input.** The due-date guard is `actor.kind === "user" && isPastDate(dueDate)`. `SYSTEM` (CLI, imports, data fixes) is not subject to it, by design. This is a documented decision, not a loophole.
+- **UTC date is a decision, not a default.** The rule uses `todayUtc()`, so a user in UTC−8 can be rejected at 22:00 local for setting "today" in their time zone. Documented in `notes.md` with the tradeoffs (accept vs. grace day vs. `Time-Zone` header).
+
 ## Checkpoint answers (Days 2–6)
 
 *(Skipped or filled in as you go)*
@@ -478,6 +492,130 @@ Row 8 is the lesson: **choosing not to test something is part of testing well.**
 - **Fix:** move `test:ratelimit` to the *front* of the `for step in` loop in `verify.sh`, before any other script. This was a pre-existing latent flakiness made visible once more scripts accumulated; not caused by Day 30.
 - **Day 31 fix:** port `test:ratelimit` into the integration suite, where `beforeEach` resets the in-memory store.
 
+## Day 31 Checkpoint Answers
+1. **Why does every authorization test use the same owner, member and stranger, and why do their names matter in the failure output?**
+   > Consistency of the mental model: every test asks the same three questions in the same shape. The names (`owner`, `member`, `stranger`) show up in the failure output (e.g., `Olga cannot rename`), so a broken test reads as a sentence about a person doing the wrong thing, not as a stack trace with an opaque id. A stranger's failure tells you which half of the matrix broke.
+2. **Why do some tests assert on database rows after a request, and which test would pass wrongly if it didn't?**
+   > A `204` or `201` from the response is a claim, not a fact. Reading the row proves the write actually happened (or didn't). Examples: the forbidden-delete test would pass on `403` even if the row was somehow deleted; the merge-atomicity test would pass on `403` if the source was already emptied; the cascade test would pass on `204` if comments survived.
+3. **Why does the "walk every page" test sort by a column full of ties?**
+   > Because ties are where unstable ordering shows up. If every row has a unique `priority`, any sort implementation produces the same answer. Sorting by `priority` with three values means 25 rows spread across 3 buckets — exactly the case where a missing `id` tie-breaker can duplicate or skip a row between pages. Day 18's bug class, made permanent.
+4. **What did the failing test look like in the red phase, and why does "failing for the right reason" matter?**
+   > It failed with `expected 201 to be 400` on the "past due date is rejected" test, and *only* that test. If a different test had failed — e.g., the "future due date is accepted" test failing at `400` — that would mean a stale assumption (the code already rejects some future dates) or an unrelated regression. Both matter, but they mean different things. The red phase is the diagnosis.
+5. **Why is "is today in the past?" a unit test with an injected date, and not an integration test?**
+   > "Today" is a moving target. An integration test would need to compute "yesterday" and hit an HTTP endpoint, paying ~100 ms of Argon2 and never being quite deterministic (a request that starts at 23:59:59.999 and ends at 00:00:00.001 crosses a day boundary). A pure function `isPastDate(date, today)` with a fixed `today` in a table has zero flake and covers yesterday / today / tomorrow / cross-month / cross-year in milliseconds.
+6. **Why did removing `nulls: "last"` break only one of the two due-date sort tests?**
+   > PostgreSQL's default for `DESC` is nulls first, for `ASC` is nulls last. So `sort=dueDate&order=asc` accidentally kept the correct order (nulls last), while `sort=dueDate&order=desc` started returning nulls first — the opposite of what the test expects. A suite that checked only ascending would have let this bug live. This is why the descending case is in the table.
+7. **Which mutation survived (or might have), and what does that tell you about what a test suite can and cannot prove?**
+   > Row 7 (remove the `id` tie-breaker on `priority`) may survive on a small table because PostgreSQL's tie ordering is often accidentally stable — the page query and the tie-breakless `ORDER BY` may happen to line up. That means "it passed" doesn't prove "it's safe". A test suite can prove the *presence* of bugs (a red test), not their *absence* (a green test). Day 18's smoke test failure is the anecdote; this is the generalization.
+8. **Why does the merge test with an unowned target also check that the *source project and its tasks are still there*?**
+   > Because atomicity is the whole point of `mergeProjects`. If the transaction doesn't roll back — e.g., because someone removed `uow.run` or moved a query outside `tx` — the source could be emptied (tasks moved) or deleted (source gone) while the response still says `403`. Checking "source still exists, has 1 task; target has 0 tasks" catches that. A `403` check alone would pass even if half the merge succeeded.
+
+## Day 31 Observations
+
+### Test list written before Part B (`PATCH /tasks/:id`) — comparison with reality
+Written as unit (U) or integration (I):
+
+| # | Behavior | Type | Covered by code? |
+|---|---|---|---|
+| 1 | Patch a task in your project → 200, fields change | I | ✅ |
+| 2 | Patch a task you don't own but your project sees → 200 | I | ✅ |
+| 3 | Patch a task in a project you're not a member of → 404 | I | ✅ |
+| 4 | Patch a personal task you didn't create → 404 | I | ✅ |
+| 5 | Patch a task in your project as a member but moving `projectId` → 403 | I | ✅ |
+| 6 | Patch as the creator to move `projectId` → 200 | I | ✅ |
+| 7 | Patch as the owner to clear `projectId` → 200 | I | ✅ |
+| 8 | Patch `dueDate: null` clears the field | I | ✅ |
+| 9 | Empty body → 400 | I | ✅ |
+| 10 | Unknown field (mass assignment) → 400 | I | ✅ |
+| 11 | Unknown status → 400 | I | ✅ |
+| 12 | Unknown field with a valid one → 400 (`.strict()`) | I | ✅ |
+| 13 | Patch a missing task → 404 (same shape as stranger) | I | ✅ |
+| 14 | Patch `dueDate` into the past (updates allowed) → 200 | I | ✅ (documented in red-green-refactor) |
+| 15 | "Is today past?" for `2030-01-01` vs `2020-01-01` with a fixed today | U | ✅ `dates.test.ts` |
+| 16 | Patch doesn't change `createdById` (from token) | I | ⚠️ covered by field-preservation, not tested directly |
+| 17 | Patch with a NUL character in title → 400 | I | ⚠️ covered by schema validation (one row in `schemas.test.ts`) |
+| 18 | Patch with a title > 200 chars → 400 | I | ⚠️ schema-validated, not integration-tested |
+| 19 | Patch as a stranger to move `projectId` → 404 | I | ⚠️ not explicitly tested (only "changes nothing" for stranger) |
+| 20 | Patch preserving `createdAt` | I | ⚠️ not tested (assumed) |
+
+**Gaps I found in my own list:** 16, 18, 19, 20 aren't explicit integration tests. 18 and 20 are covered elsewhere (schemas + factory default), but 19 and 16 would be worth adding on a second pass. **Cases the day's code has that I missed:** cross-field validation (e.g., `projectId: null` + a `dueDate` in the past) isn't tested; the "history of the field is preserved through a 404 (row unchanged)" assertion I wrote was in `deleteTask`, not `updateTask`.
+
+### Red-green-refactor evidence (Step 6–8)
+
+**Red phase observed:** before adding the guard, exactly one test failed:
+```
+FAIL  tasks.crud.test.ts > due dates on creation > rejects a due date in the past with 400 and a clear message
+  expected 201 to be 400
+```
+The "accepts a future due date" and "updates may move the date into the past" tests **passed before the fix** — they describe existing behavior. "Failing for the right reason" meant: the guard didn't exist yet, and only the guard-rejecting test went red.
+
+**Green phase:** after the guard in `addTask`, all three tests pass. The CLI path is untouched because the guard is `actor.kind === "user" && isPastDate(dueDate)`.
+
+**Refactor:** the guard was extracted to `isPastDate(date, today = todayUtc())`, and `tests/unit/services/dates.test.ts` covers the boundary deterministically. The integration tests still pass, and now the boundary itself is covered without a moving clock.
+
+### Mutation table (Part F) — results
+
+| # | Break | Failed test | Result |
+|---|---|---|---|
+| 1 | `deleteTask` drops `isCreator` | `forbids a member from deleting a teammate's task, and leaves it in place` | ✅ caught |
+| 2 | `addTask` drops `assertCanUseProject` | `answers 400, and stores nothing, for a project the caller cannot see` | ✅ caught |
+| 3 | `updateTask` hard-codes `moving = false` | `is forbidden for a member who did not create the task` (the "moving" test) | ✅ caught |
+| 4 | `buildOrderBy` removes `nulls: "last"` on `dueDate` | `sorts by dueDate descending` (**only** the desc case) | ✅ caught (asymmetric, as designed) |
+| 5 | `buildWhere` drops the visibility scope | `counts only visible tasks in meta.total` + others | ✅ caught (many) |
+| 6 | `mergeProjects` drops the target `owner` check | `changes nothing when the caller does not own the target` | ✅ caught |
+| 7 | `buildOrderBy` drops the `id` tie-breaker on `priority` | `walks every page without repeating or skipping a task` | ⚠️ **survived** on my machine — PostgreSQL's tie ordering was accidentally stable on 25 rows, so the pages lined up |
+
+**Row 4 is the lesson:** descending is where `nulls: "last"` matters. Ascending happens to be correct by PostgreSQL's default. A suite that only checks ascending proves nothing about descending.
+
+**Row 7 is the other lesson:** "it passed" doesn't mean "it's safe." PostgreSQL's tie ordering on small tables is often stable, so the bug is latent — it would show up on a bigger table or under different plans. The right response is to trust the *known* rule (tie-breaker required) rather than the green test. Day 18's smoke test failure was the original evidence; row 7 confirms the same class survives small-table tests, which is exactly why the "walk every page" test was written.
+
+### README grep result (Step 8)
+`git grep -n "dueDate\|-d " README.md` returned 4 hits:
+- `README.md:189` — sort field documentation (`dueDate` as a **sort name**, not a value)
+- `README.md:229` — `curl -d` for `POST /auth/login`
+- `README.md:260` — `curl -d` for `POST /auth/refresh`
+- `README.md:272` — `curl -d` for `POST /auth/logout`
+
+**None of them creates a task with a past due date through the API.** The README had no `POST /tasks` example with a body containing `dueDate` at all, so the step's "fix any README example…" was a check, and the check was clean. **No README change was made.**
+
+### Smoke test check
+`git grep -n '"dueDate"' scripts/smoke.ts` → no hits. The smoke script does not create tasks with an explicit `dueDate` field, so the new rule does not break it. **No smoke test change was made.**
+
+### Seed is exempt
+`prisma/seed.ts` inserts tasks directly via Prisma, not through `POST /tasks`, so `actor.kind === "user"` never applies. The seed's past-due tasks (if any) are intentionally left untouched. This is not a loophole — it's the reason the guard is scoped to `user` and not "every writer."
+
+### CLI is exempt (by design)
+`src/cli.ts` calls `addTask(..., SYSTEM)`, and the guard is `actor.kind === "user" && isPastDate(dueDate)`. The CLI can still create tasks with past dates, for imports and data fixes. Documented in `openapi.ts` on `POST /tasks`.
+
+### Time-zone decision
+The rule uses `todayUtc()` — the **UTC calendar date**, not the caller's local date. Consequence: a user in UTC−8 at 22:00 local can be rejected for setting a due date of "today" in their own time zone, because UTC has already rolled over to tomorrow.
+
+Options considered:
+1. **Accept the UTC behavior.** Simple, deterministic, no protocol change. The rejection message is explicit ("Due date cannot be in the past"), so the user can pick a different date.
+2. **One-day grace.** Reject only dates strictly before `todayUtc(-1)`. More forgiving; but "past" becomes fuzzy, and the tests have to explain why "yesterday" is allowed.
+3. **`Time-Zone` request header.** Reject dates before the caller's local "today". Most correct, but adds a new required header, new validation, and new failure modes (malformed time zone).
+
+**Decision: option 1 (accept UTC).** Reasons: (a) all other dates in the API are already UTC (`createdAt`, `dueDate` in responses are ISO strings), so mixing in a local-date rule for one field is inconsistent; (b) the rule protects against obviously stale imports, not against a user finishing work late at night, which is a UX concern better handled by the client; (c) a grace day or a `Time-Zone` header are additive changes that can be introduced later without breaking existing callers. Recorded here so a reviewer can see the tradeoff.
+
+### Updated coverage-of-scripts table (for Day 32)
+Building on the Day 30 table:
+
+| Script | Fully redundant after Day 31? | Notes |
+|---|---|---|
+| `smoke.ts` register/login/`/auth/me` sections | ✅ yes | Covered by `auth.register`, `auth.login`, `auth.me` |
+| `smoke.ts` task CRUD section | ✅ yes | Covered by `tasks.crud` |
+| `smoke.ts` project section | ✅ yes | Covered by `projects` |
+| `smoke.ts` transaction (duplicate/merge) section | ✅ yes | Covered by `projects` |
+| `smoke.ts` comment section | ❌ no | Comments are Challenge 1, not covered yet |
+| `test-tokens` | ✅ yes | Covered by `tokens.test.ts` (unit, 16) + `auth.me` (integration) |
+| `refresh-flow` | ❌ no | Day 32 (Challenge 1 of Day 30, or Day 32 port) |
+| `access-attacks` | ⚠️ mostly | The stranger/member/owner matrix is largely covered by `tasks.crud` + `projects`, but the last-owner race and membership management are not (Day 32) |
+| `test:ratelimit` | ❌ no | Not ported yet (Day 30 challenge / Day 32) |
+| `test:security` | ⚠️ partially | Headers, CORS, NUL characters, out-of-range integers covered; `__proto__`, oversized body, `text/plain` body still script-only |
+| `test:auth-coverage` | ✅ yes | Covered by integration tests + unit `errorHandler` |
+
+**Day 32 will port `refresh-flow`, `access-attacks` (race + membership), and `test:ratelimit`, and then the only remaining script value is comments (Challenge 1) and a handful of security edge cases.**
+
 ## OWASP API Top 10 (Day 27 Review)
 
 | Risk | In TaskFlow | Where | Gap? |
@@ -508,6 +646,12 @@ Row 8 is the lesson: **choosing not to test something is part of testing well.**
 - Seeds are idempotent (`upsert`) and never run in production.
 - `npm run db:check-migrations` verifies migrations from scratch.
 
+## Business Rules (Day 31)
+- A task's `dueDate` cannot be in the past **on creation** through the API.
+- Updates may set a past date (people correct dates).
+- The CLI (`SYSTEM` actor) is exempt — for imports and data fixes.
+- "Today" is the UTC calendar date. Documented tradeoff (see Day 31 Observations).
+
 ## Known limitations
 *(Each of these is fixed by a specific upcoming week, showing forward planning).*
 
@@ -531,6 +675,8 @@ Row 8 is the lesson: **choosing not to test something is part of testing well.**
 18. **`listComments` still loads every comment before filtering:** It uses `findAll()` instead of a `WHERE taskId = ?` query.
 19. **`test:ratelimit` is sensitive to run order in `verify.sh`:** It assumes a fresh rate-limit budget. If any other script drains the register/refresh/login budget first, its "fresh budget" assertions fail. Fixed by running it first in the loop. The limiter itself is correct; the test setup just needs headroom. Day 31's integration suite will `beforeEach` reset the in-memory store, retiring this script into the suite.
 20. **Integration tests wipe the test database on every `beforeEach`:** This is correct for the current suite (simple, obviously correct, a few ms per wipe), but it means test files must run serially (`fileParallelism: false`). Per-worker databases (Day 30 challenge) would allow parallelism at the cost of setup complexity.
+21. **Due-date rule uses the UTC date, not the caller's local date:** A user in UTC−8 can be rejected at 22:00 local for setting "today" in their time zone. Options considered and the decision are recorded in the Day 31 Observations section (accepted UTC, rationale: consistency with the rest of the API, client-side UX is a better place to soften it).
+22. **Integration tests don't cover every branch of `PATCH /tasks/:id`:** Gaps I found in my own test list: preserving `createdById` through a patch is only implicitly covered, and "stranger moves `projectId`" isn't a distinct test. Not bugs — coverage gaps to fill on a second pass or in Day 32.
 
 ## Week 1 summary
 Three things I can do now that I couldn't on Day 1:
@@ -601,11 +747,18 @@ Three more things I can do now that I couldn't on Day 29:
 - Migrate the test database from migration files, proving the migration history is reproducible from empty.
 - Prove the test infrastructure itself works (name checks, truncation between tests, `RESTART IDENTITY`) before trusting it with real tests.
 
+Three more things I can do now that I couldn't on Day 30:
+- Write integration tests for task CRUD, visibility, filtering, sorting and pagination — the heart of TaskFlow.
+- Write integration tests for project management, including **transactional duplicate and merge**, with the concurrency race under `Promise.all`.
+- Practice **red-green-refactor** end-to-end on a real new rule (past due dates rejected on creation), with the boundary ("is today past?") extracted into a pure function tested deterministically.
+
 Things that confused me:
 - The difference between a fake, a stub, and a spy.
 - Why faking *all* timers broke the token tests.
 - Why `fileParallelism: false` is required when files share one database.
+- Why `nulls: "last"` matters only in the **descending** direction.
 
 What I'd do differently:
 - Write the test *before* the code. The `slugify` test found a bug instantly that would have shipped otherwise.
 - Put `test:ratelimit` first in `verify.sh` from the moment I added a second script, not after it failed.
+- Compute the expected sort order by hand from the dataset before running the test, not after it fails. The five minutes I spent on that saved an hour of "is the code wrong or is my reasoning wrong?"

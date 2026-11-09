@@ -81,6 +81,7 @@ Unit tests cover pure logic that needs no I/O:
 - Access tokens (sign/verify, expiry, and forged/tampered/`alg:none` rejection)
 - Config validation (including production guards)
 - Error-to-status mapping (with order locked in)
+- Date helpers (`isPastDate`, `todayUtc` with an injected clock)
 - Zod schemas (ids, NUL characters, mass-assignment, query params)
 
 The tests are named after behavior, and the tables in `it.each` make gaps obvious. Coverage is used as a map of untested logic, not a score — controllers, repositories, and routes are covered by integration tests, not unit tests.
@@ -101,16 +102,36 @@ Integration tests run the real HTTP stack — validation, controllers, services,
   2. `truncateAll()` runs `SELECT current_database()` and refuses if the name doesn't end in `_test`.
 - **Files run one at a time** (`fileParallelism: false`) because they share one database.
 
-What integration tests prove:
+Integration tests cover three areas:
+
+**Auth**
 - Registration: 201 with public fields, Argon2id hash stored, no password in body, security headers, duplicate email 409 (case-insensitive), mass-assignment rejected, malformed JSON/array/`null`/`text/plain` rejected, **8 parallel registrations produce exactly one account**.
 - Login: access + refresh tokens issued, refresh hash stored (not the token), two families per user, identical 401 for unknown email vs. wrong password, unusable hash → 401, no session created on failure, validation errors on missing/extra fields.
 - `/auth/me`: valid token returns the user, no/garbage/wrong-scheme/empty token 401, valid token for a deleted user 401.
-- Test infrastructure: DB name ends in `_test`, all migrations applied, tables empty between tests, `RESTART IDENTITY` gives `id=1`.
+
+**Tasks**
+- CRUD: create personal or project tasks with defaults and `createdById` from the token, `Location` header, all validation errors returning 400 and storing nothing.
+- Visibility: project members see shared tasks, strangers see `404` identical to missing tasks, personal tasks visible only to their creator, `meta.total` counts only visible tasks.
+- PATCH: any member can edit any field of a teammate's task, strangers get `404` and the row is unchanged, moving `projectId` requires being the creator or the project owner, target project must be visible.
+- Delete: creator or project owner only, comments cascade with the task.
+- Filtering: `status`, `priority`, `search` (case-insensitive), and combinations.
+- Sorting: `createdAt`, `title`, `priority`, `dueDate`, with `id` as tie-breaker, and `nulls: "last"` honored in both `asc` and `desc`.
+- Pagination: page/limit table with correct `meta`, and **"walk every page"** — 25 tasks with heavy `priority` ties split across 3 pages, all 25 distinct, rank order never goes back up (Day 18's bug class, made permanent).
+- Due dates: a past date on creation returns `400 "Due date cannot be in the past."`; updates may still set past dates; the CLI (`SYSTEM` actor) is exempt.
+
+**Projects**
+- Create: `201` with slug, `Location`, creator's `owner` membership created; validation table (empty name, client-chosen slug/`createdById`, NUL) → 400.
+- List/get: only your projects, `taskCount` accurate, stranger `404` == missing `404`.
+- Update/delete: owner renames/deletes; member `403`, stranger `404`; delete blocked with `409` while tasks exist.
+- Duplicate: copies project + tasks as `todo` tasks with `createdById: caller`, `Location` header, original untouched, custom name accepted.
+- Merge: tasks move, source disappears, memberships cascade, **all-or-nothing** on unowned target (source and target both unchanged), self-merge 400, member on source 403, stranger 404, and **two simultaneous merges → exactly one `200`, the loser is `404` or `409`, no task lost or duplicated**.
+
+- Test infrastructure: DB name ends in `_test` (both safety layers), all migrations applied, tables empty between tests, `RESTART IDENTITY` gives `id=1`.
 
 ### Test Scripts
 | Script | What it proves |
 |---|---|
-| `npm run test:unit` | Pure functions (pagination, slugs, access rules, tokens, config, schemas) |
+| `npm run test:unit` | Pure functions (pagination, slugs, access rules, tokens, config, schemas, dates) |
 | `npm run test:watch` | Re-runs affected tests on save |
 | `npm run test:coverage` | Coverage report for `src/` in `coverage/` |
 | `npm run test:integration` | API tests against a real, isolated test database (`taskflow_test`) |
@@ -122,6 +143,12 @@ What integration tests prove:
 | `npm run test:access` | Role matrix (stranger, member, owner) |
 | `npm run test:ratelimit` | Rate limits and `Retry-After` headers |
 | `npm run test:security` | Hostile input, NUL characters, out-of-range IDs |
+
+## Business Rules
+
+- A task's `dueDate` cannot be in the past **on creation** through the API. The rule uses the **UTC calendar date**.
+- Updates may still set a past date (people correct dates after the fact).
+- The CLI (`SYSTEM` actor) is exempt — imports and data fixes are unaffected.
 
 ## Security
 
@@ -146,7 +173,7 @@ See [docs/THREAT_MODEL.md](./docs/THREAT_MODEL.md) for the threat model and what
 |--------|------|-------------|---------|
 | GET | `/tasks` | List tasks you can see (see params below) | 200 |
 | GET | `/tasks/:id` | Get one task (requires membership) | 200 |
-| POST | `/tasks` | Create a task | 201 |
+| POST | `/tasks` | Create a task (past `dueDate` rejected with 400) | 201 |
 | PATCH | `/tasks/:id` | Update fields (creator, owner, or member) | 200 |
 | DELETE | `/tasks/:id` | Delete a task (creator or project owner only) | 204 |
 
@@ -412,7 +439,7 @@ prisma/
 tests/
 ├── unit/                 # Vitest unit tests (mirrors src/)
 ├── integration/          # Supertest tests against a real test database
-└── support/              # Shared helpers: env, app, factories, truncate, globalSetup
+└── support/              # Shared helpers: env, app, auth, factories, truncate, globalSetup
 
 src/
 ├── app.ts, server.ts, cli.ts
@@ -423,8 +450,7 @@ src/
 ├── docs/                 # OpenAPI spec
 ├── generated/prisma/     # Auto-generated Prisma Client (gitignored)
 ├── schemas/              # Zod validation
-├── repositories/         # Data storage: interface, Prisma impl, UnitOfWork
-├── services/             # Business logic: tasks, projects, comments, auth
+├── services/             # Business logic: tasks, projects, comments, auth, dates
 ├── middleware/           # Logger, validation, error handling, request IDs, authenticate, rate limiters
 ├── controllers/          # HTTP logic
 └── routes/               # Express routes
@@ -447,7 +473,9 @@ Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CO
 - [ ] Week 5 — Testing (Vitest unit tests, integration tests, coverage, CI test gate)
   - [x] Vitest setup and unit tests for pure logic
   - [x] Test database + Supertest integration tests for auth
-  - [ ] Integration tests for tasks, projects, comments
+  - [x] Integration tests for tasks and projects (incl. filtering, sorting, pagination, duplicate, merge)
+  - [x] Due-date business rule (past dates rejected on creation, CLI exempt) with unit-tested boundary
+  - [ ] Integration tests for comments and membership (Day 32)
   - [ ] Coverage target and CI gate
 
 ## Known Limitations
@@ -475,3 +503,5 @@ Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CO
 22. **Integration tests run serially:** The test database is shared across files, so `fileParallelism: false` is required. Per-worker databases would allow parallelism at the cost of setup complexity.
 23. **Test database is wiped on every `beforeEach`:** Correct for the current suite (a few ms per wipe), but slower than transaction rollback isolation. Documented as a challenge for later.
 24. **`test:ratelimit` is order-sensitive in `verify.sh`:** It assumes a fresh rate-limit budget, so it must run *first* in the `for step in` loop. Any other script that drains register/refresh/login counters before it will cause false failures. The limiter itself is correct; the test setup just needs headroom. Week 5's integration suite will `beforeEach` reset the in-memory store, retiring this script into the suite.
+25. **Due-date rule uses the UTC calendar date, not the caller's local date:** A user far west of UTC can be rejected for setting "today" in their time zone late in their evening. Options (accept vs. one-day grace vs. `Time-Zone` header) are documented in `notes.md`; the current choice is to accept UTC for consistency with the rest of the API.
+26. **Integration tests don't cover every branch of `PATCH /tasks/:id`:** Coverage gaps identified in my own test list: preserving `createdById` through a patch is only implicitly covered, and "stranger moves `projectId`" isn't a distinct test. Not bugs — candidates for a second pass or Day 32.
