@@ -10,6 +10,7 @@ import type { TaskRepository } from "../repositories/repository.js";
 import type { TaskPatch, TaskQuery } from "../schemas/task.schemas.js";
 import type { NewTask, Role, Status, Task } from "../types.js";
 import { buildMeta } from "./pagination.js";
+import { isPastDate } from "./dates.js";
 
 function validateDate(value: string): string {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || Number.isNaN(Date.parse(value))) {
@@ -65,13 +66,17 @@ export function createTaskService({ tasks, members }: Deps) {
     const title = input.title.trim();
     if (!title) throw new UserError("Task title cannot be empty.");
     if (input.projectId !== undefined) await assertCanUseProject(actor, input.projectId);
+    const dueDate = input.dueDate ? validateDate(input.dueDate) : undefined;
+    if (dueDate && actor.kind === "user" && isPastDate(dueDate)) {
+      throw new UserError("Due date cannot be in the past.");
+    }
 
     return withProjectCheck(input.projectId, () =>
       tasks.insert({
         title,
         status: "todo",
         priority: input.priority ?? "medium",
-        dueDate: input.dueDate ? validateDate(input.dueDate) : undefined,
+        dueDate: dueDate,
         createdAt: new Date().toISOString(),
         projectId: input.projectId,
         createdById: creatorOf(actor),
