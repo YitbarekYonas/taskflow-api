@@ -40,9 +40,9 @@
     "verify": "bash scripts/verify.sh",
     "test:unit": "vitest run",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage",
     "test:integration": "vitest run --config vitest.integration.config.ts",
-    "test": "npm run test:unit && npm run test:integration"
+    "test": "npm run test:unit && npm run test:integration",
+    "test:coverage": "vitest run --config vitest.coverage.config.ts --coverage"
   },
   "keywords": [
     "taskflow",

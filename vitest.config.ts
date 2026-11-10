@@ -9,11 +9,6 @@ export default defineConfig({
     env:TEST_ENV,
     restoreMocks: true, // spies are restored before every test
     unstubEnvs: true,   // vi.stubEnv changes are undone after every test
-    coverage: {
-      provider: "v8",
-      include: ["src/**/*.ts"],
-      exclude: ["src/generated/**", "src/cli.ts", "src/server.ts"],
-      reporter: ["text-summary", "html"],
-    },
+    
   },
 });
