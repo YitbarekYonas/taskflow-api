@@ -3,14 +3,7 @@ import { prisma } from "../../src/db.js";
 import { api } from "../support/app.js";
 import { asUser } from "../support/auth.js";
 import { createProject, createTask, createUser } from "../support/factories.js";
-
-async function team() {
-  const owner = await createUser({ name: "Olga" });
-  const member = await createUser({ name: "Max" });
-  const stranger = await createUser({ name: "Sid" });
-  const project = await createProject({ owner, members: [{ user: member }], name: "Alpha" });
-  return { owner, member, stranger, project };
-}
+import { team } from "../support/scenarios.js";
 
 describe("projects require authentication", () => {
   it.each([

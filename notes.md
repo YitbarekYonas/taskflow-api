@@ -156,6 +156,21 @@
 - **The CLI is exempt from business rules that are about user input.** The due-date guard is `actor.kind === "user" && isPastDate(dueDate)`. `SYSTEM` (CLI, imports, data fixes) is not subject to it, by design. This is a documented decision, not a loophole.
 - **UTC date is a decision, not a default.** The rule uses `todayUtc()`, so a user in UTC−8 can be rejected at 22:00 local for setting "today" in their time zone. Documented in `notes.md` with the tradeoffs (accept vs. grace day vs. `Time-Zone` header).
 
+### Week 5 (Access Matrix, Sessions, Coverage & Retirement)
+- **A persona-by-action table is the best test for authorization.** Every cell is one test (24 actions × 3 personas = 72 tests). A missing cell is visible; a wrong cell is a failing test with a readable name (`stranger → 404`, `member → 403`, `owner → 200`).
+- **A denied request must change nothing.** The matrix takes a **fingerprint** of every table before and after each denied request and requires them identical. A `403` *after* an update would pass a status-only test but fail a fingerprint. This is how authorization is tested from outside.
+- **Characterization tests record today's behavior, including known limitations.** "An access token still works after logout" isn't a feature — it's a documented limitation of stateless tokens. A test that says so stops it being forgotten or silently changed.
+- **Race tests need repetition.** A race that happens one time in ten won't show in one run. Loop the scenario 5 or 10 times, and assert something that must hold for *every* interleaving: exactly one 200, never zero owners. The parallel refresh test (`exactly one of 6 succeeds`, 5 rounds) and the last-owner race (10 rounds, 0 violations) both follow this.
+- **Don't assert what is genuinely non-deterministic.** In the parallel-refresh test, exactly one 200 wins, but *which* one, and whether the winner's new token survives the losers' family revocation, depends on timing. Assert the first, never the second.
+- **Coverage answers "what did no test ever run?", not "what is well tested?".** A line can run without a single assertion about it. Use coverage to find *gaps*, and mutation checks to judge *quality*.
+- **Branch coverage matters more than line coverage.** `if (a) x(); else y();` is one line and two outcomes. The Day 32 report shows branches (75.12%) well below statements (88.07%) — that's where the honest gaps are.
+- **Thresholds are a ratchet.** Set them just below today's numbers so coverage can't drop unnoticed, and raise them when it rises. Never lower one to make a build pass. A threshold of 100% invites tests written for the number, not for behavior.
+- **Excluding files from coverage is a decision, not a hiding place.** Generated code (`src/generated/**`) and process entry points (`src/cli.ts`, `src/server.ts`) are excluded. Hard-to-test code is *not* excluded for that reason — it's documented as a gap.
+- **Retire a test only after proving its replacement catches the same bugs.** Delete first and you can't know what you lost. For each script, re-introduce a bug it once caught and confirm the suite fails.
+- **The rate-limiter test exposed a double-mount bug.** Mounting `registerLimiter`, `loginIpLimiter`, and `refreshLimiter` twice (once in `app.ts` by path, once in `auth.routes.ts` on the routes) halved the effective limit of every IP-keyed limiter (5→2, 60→30, 30→15). Diagnosed with a 10-line probe (`scripts/limiter-probe.ts`) that read the `RateLimit` response headers. Fixed by keeping only `globalLimiter` in `app.ts`.
+- **Keep one smoke test.** The suite runs your source through Vitest. Only `smoke.ts` runs the **compiled** `dist/` server over real HTTP — the thing that actually ships. It stays small (~12 checks) and runs after every deploy in Week 7.
+- **`verify.sh` restarts the server between `smoke` and `test:ratelimit`.** The limiter's in-memory counters reset on restart, so `test:ratelimit` gets a fresh budget even though it runs after `test:integration` and `smoke`. Combined with the double-mount fix, this makes `verify.sh` green end-to-end.
+
 ## Checkpoint answers (Days 2–6)
 
 *(Skipped or filled in as you go)*
@@ -616,6 +631,165 @@ Building on the Day 30 table:
 
 **Day 32 will port `refresh-flow`, `access-attacks` (race + membership), and `test:ratelimit`, and then the only remaining script value is comments (Challenge 1) and a handful of security edge cases.**
 
+## Day 32 Checkpoint Answers
+1. **Why does the matrix compare a before-and-after fingerprint for every denied request, and what bug does that catch that a status code can't?**
+   > A handler could return `403` *after* performing the state change (or part of it). A status-only test would pass, but the row would be different. The fingerprint — a JSON dump of every table ordered by id — makes the assertion "the database is byte-for-byte identical before and after the request". It catches write-before-check bugs, partial writes inside a transaction that didn't roll back, and any side effect a denied request should not have (session rows, audit rows, etc.).
+2. **Why does the parallel-refresh test assert "exactly one 200" but not "the winner's new token works"?**
+   > The winner is whichever request reached the atomic `UPDATE ... WHERE used_at IS NULL` first. The other five fail and, in the process, revoke the whole family (that's the reuse-detection rule). Whether the winner's just-issued token survives that family revocation depends on timing: if a loser's revoke runs after the winner's insert, the new token is dead too; if it runs before, the new token lives. Both are legal. Asserting on the winner's token would make the test flaky on a busy machine. The invariant that must hold for *every* interleaving is "exactly one succeeded", so that's what we assert.
+3. **What does the "access token survives logout" test document, and why write a test for a limitation?**
+   > A JWT is stateless. Logout revokes the refresh token's family but cannot recall an access token already in flight — it stays valid until its `exp` (15 min). That's a design limit, not a bug, and the test locks it in so a future change either fixes it deliberately (and the test changes) or doesn't silently try to make logout synchronous without adding a denylist. The test's comment names the limitation and points to the README's known-limitations section. Documenting a limit in a test is how you keep a team from "fixing" it with a subtle regression.
+4. **Why do the race tests loop several times, and what does a failure of such a test look like?**
+   > A race that happens one time in ten won't show in a single run. Ten rounds of the two-owners-demote-each-other test = 20 requests to the same project row; if the `FOR UPDATE` lock were removed, at least one round would show "both demotions succeeded" (count > 0). A failing race test shows one of: `never leaves a project without an owner` failing with `expected 0 to be 0` (the count is wrong), or `never both demotions succeed` failing with a positive count, or a specific round's statuses showing two `200`s. The assertion is designed to fail loudly on the first observed bad interleaving, and the loop gives it enough chances to see one.
+5. **What does coverage tell you, and what does it never tell you? Give one example from your own report.**
+   > Coverage tells you *which lines ran*. It never tells you *whether any assertion checked them*. Example from the report: `src/middleware/rateLimit.ts` showed 33% coverage but the file is effectively **0% tested** — the limiter was disabled (`RATE_LIMIT_ENABLED=false`) during most of the suite, so the 33% came from a few branches that ran during `test:ratelimit` and the module-load path, with no assertions about whether the 429 body was correct. Conversely, `src/errors.ts` showed 0% but the error classes were exercised indirectly through `throw new NotFoundError(...)` in integration tests — the constructor bodies just weren't attributed to any assertion. Coverage is a map of *executed* code, not a map of *tested behavior*.
+6. **Why do thresholds only go up, and why is 100% a poor target?**
+   > Thresholds are a ratchet: their job is to catch a *drop* since last time, not to be the highest possible number. Lowering a threshold to make a build pass is the same as deleting the test that just got harder. Raising it when coverage rises keeps pressure on the next change. A 100% threshold is a poor target because the *cheapest* way to reach it is tests that execute lines without asserting behavior — the "green checkmark" trap. Behavior-driven tests should target branch outcomes and error paths; the number follows. A threshold of 88% (matching what today's tests genuinely cover) is honest and leaves room for the ~12% that requires porting `test:ratelimit` into the suite (Challenge 1).
+7. **Which mutation survived (row 5), and why is the right response not to write a test for it?**
+   > Row 5 (removing the **second** `requireProjectRole` call in `changeRole`) survived. The second call guards a race between "the caller demoted themselves while waiting for the lock" and "someone else demoted them". Both orderings are legal outcomes: either the demotion goes through (they were still an owner when the lock was taken) or it fails (they were demoted). There's no deterministic interleaving that produces a bad state to assert against. The right response is a **code comment** explaining why the second check exists, not a flaky test that depends on scheduler luck. The invariant that *does* matter ("never zero owners") is guarded by the lock itself and tested by the 10-round race, which is deterministic enough to catch the bug if the lock is removed.
+8. **Why keep a small smoke test after moving everything else into the suite?**
+   > Because the suite runs your **source** through Vitest, and Vitest imports `src/app.ts` directly. It never touches the **compiled** `dist/` output. The smoke test runs `node dist/server.js` and hits it over real HTTP — that's the only test that proves the *built artifact* works: no missing file in `dist/`, no broken import path after compilation, no missing runtime dependency. The compiled output is what actually ships, so a small post-build check is the difference between "tests pass" and "the thing that goes to production works". It stays small (12 checks) because detailed behavior is `npm test`'s job.
+
+## Day 32 Observations
+
+### Coverage prediction vs. reality (Experiment)
+Prediction (before running `npm run test:coverage`):
+- Statements: ~72%
+- Branches: ~62%
+- Functions: ~75%
+- Lines: ~73%
+- Five lowest files I expected: `rateLimit.ts`, `limiters.ts`, the repository P2003 paths, `cli.ts` (I forgot it's excluded), `server.ts` (also excluded)
+
+Reality:
+- **Statements: 88.07%**
+- **Branches: 75.12%**
+- **Functions: 90.17%**
+- **Lines: 90.18%**
+
+I was **too pessimistic** overall (guessed 72%, got 88) and **wrong about which files** — I forgot `cli.ts` and `server.ts` are excluded, and I underestimated how much the matrix covers in `errorHandler.ts`.
+
+### The five lowest real-gap files
+
+Excluding type-only / interface files (`src/repositories/*.ts` with no runtime code, `src/errors.ts`, `src/utils.ts`), the actual gaps are:
+
+| File | % Stmts | Why it's low | Real gap? |
+|---|---|---|---|
+| `src/middleware/rateLimit.ts` | 33.33 | `RATE_LIMIT_ENABLED=false` in the suite; only `test:ratelimit` and the module-load path run it | **Yes** — scheduled for Challenge 1 (port to integration suite) |
+| `src/middleware/limiters.ts` | 66.66 | Same cause: the limiter *factories* run at module load, but the handlers are passthroughs | **Yes** — same fix |
+| `src/repositories/prisma/user.repository.ts` | 54.54 | Lines 26–38: the `P2002` catch's `else` branch (non-P2002 rethrow) is never hit | **Yes** — a genuine safety net for "P2002 but not the email constraint", worth a repo-level test |
+| `src/middleware/errorHandler.ts` | 82.50 | Lines 13–29: the Zod-error-from-service path (we don't have a service that throws Zod today) | Marginal — defensive code for a case that doesn't exist; accept + document |
+| `src/repositories/prisma/comment.repository.ts` | 78.78 | Lines 52, 60–61, 69–70: the `P2003` / `P2025` mappings masked by service-level checks (`comments.service.ts` validates before reaching the DB) | Marginal — same pattern as `task.repository.ts`'s P2003, which I did close |
+
+### Coverage as a tool — one red line closed
+
+I picked the `task.repository.ts` `P2003` mapping (lines ~144–146) because it's a case a bug *would* hit (a bad `projectId` at the repository level), even though the service-level `assertCanUseProject` normally prevents it. Wrote a repo-level test:
+
+```ts
+it("rejects a task whose projectId does not exist, at the repository level", async () => {
+  await expect(
+    container.taskRepository.create({ title: "x", projectId: 999_999_999 })
+  ).rejects.toBeInstanceOf(InvalidReferenceError);
+});
+```
+
+Re-ran `npm run test:coverage`:
+- `task.repository.ts` went from **82.6% → ~85%** (the specific P2003 branch turned green).
+- Overall statements: **88.07% → ~88.3%**.
+
+Small move, but the loop is closed: find red line → write test → watch the number move.
+
+### Thresholds (Step 12)
+
+Measured: **88.07 / 75.12 / 90.17 / 90.18**.
+
+Set in `vitest.coverage.config.ts`:
+```ts
+thresholds: { statements: 86, branches: 73, functions: 88, lines: 88 }
+```
+(rounded down, minus 2, to absorb v8's rounding noise of ±0.1–0.5% between runs.)
+
+**Ratchet rule (written in `notes.md`):** thresholds only go up. A failing threshold means **add tests**, never **lower the number**. If a failure is genuinely a false positive (a file was excluded, a refactor changed the denominator), adjust upward to the new baseline — never below it.
+
+**Proof the guard works:** set `lines: 100` temporarily, ran `npm run test:coverage`:
+```
+ERROR: Coverage for lines (90.18%) does not meet global threshold (100%)
+```
+Exit code: non-zero (what CI will check in Week 7). Restored `lines: 88`, re-ran: green. A threshold that has never failed has never proven it's wired up.
+
+### Mutation table (Part H) — results
+
+Applied one at a time, `git restore <file>` after each.
+
+| # | Break | Failed test | Result |
+|---|---|---|---|
+| 1 | `deleteTask` drops `isCreator` | `forbids a member from deleting a teammate's task, and leaves it in place` | ✅ caught |
+| 2 | `addTask` drops `assertCanUseProject` | `answers 400, and stores nothing, for a project the caller cannot see` | ✅ caught |
+| 3 | `updateTask` hard-codes `moving = false` | `is forbidden for a member who did not create the task` (the moving test) | ✅ caught |
+| 4 | `buildOrderBy` removes `nulls: "last"` on `dueDate` | **only** `sorts by dueDate descending` | ✅ caught (asymmetric) |
+| 5 | `buildWhere` drops visibility scope | `counts only visible tasks in meta.total` + others | ✅ caught (many) |
+| 6 | `mergeProjects` drops the target `owner` check | `changes nothing when the caller does not own the target` | ✅ caught |
+| 7 | `buildOrderBy` drops `id` tie-breaker on `priority` | `walks every page without repeating or skipping a task` | ⚠️ **survived** on 25 rows — PostgreSQL's tie ordering was accidentally stable, so the pages lined up. Documented: "it passed" ≠ "it's safe". The tie-breaker is required by the query's shape, not by any single test. |
+| 8 | remove `app.use(helmet())` | `sets the hardening headers and hides the framework` | ✅ caught |
+| 9 | remove `"Authorization"` from CORS `allowedHeaders` | `allows the configured origin to send the Authorization header` | ✅ caught |
+| 10 | remove `.max(MAX_DB_ID)` from `dbId` | unit schemas + `answers 400 for the id 99999999999999999999999` (tasks.crud) | ✅ caught |
+
+**Row 7 is the lesson, again.** The Day 31 mutation table already showed the same survivor with a different phrasing; Day 32's row 5 (the second `requireProjectRole` in `changeRole`) is the same idea: some safeguards defend a property you can't assert from outside, and the right response is a code comment + a review, not a flaky test. Rows 4 and 7 are the pair the lesson wants us to notice: **asymmetric defaults (row 4) and accidentally-stable tie orderings (row 7) both make a suite look greener than it is.**
+
+### The rate-limiter double-mount bug (fixed today)
+
+The three `test:ratelimit` failures that had been present since Day 30 finally had a root cause.
+
+**Symptom:** even on a freshly started server, and even though `test:ratelimit` starts its own in-process `createApp()`, the register limiter tripped on the 3rd registration (limit 5), the refresh limiter on the 31st (limit 60), and the login-IP limiter on the 16th (limit 30). **Every IP-keyed limit was exactly halved.** User-keyed and email-keyed limits were exact. The failure mode was "blocked true" everywhere — the limiter worked, it just thought it had seen twice as many requests.
+
+**What it wasn't:**
+- Not `verify.sh` ordering (the probe showed the same failure on its own `createApp()`).
+- Not the limiter config (`limit: 5` in `limiters.ts` was correct).
+- Not a shared `MemoryStore` (`makeLimiter` calls `rateLimit({ ... })` fresh each time, so each limiter has its own store).
+
+**What it was:** `src/app.ts` mounted `registerLimiter`, `loginIpLimiter`, and `refreshLimiter` **by path**:
+```ts
+app.use("/auth/register", registerLimiter);
+app.use("/auth/login", loginIpLimiter);
+app.use("/auth/refresh", refreshLimiter);
+```
+…**and** `src/routes/auth.routes.ts` mounted the same limiters on the routes:
+```ts
+authRouter.post("/register", registerLimiter, ...);
+authRouter.post("/login", loginIpLimiter, loginAccountLimiter, ...);
+authRouter.post("/refresh", refreshLimiter, ...);
+```
+Every request hit the limiter twice. The counter dropped by 2 per request, so a `limit: 5` behaved like `limit: 2`.
+
+**How it was diagnosed:** a 10-line `scripts/limiter-probe.ts` that starts its own app, POSTs to `/auth/register` three times with an invalid body (counted, no account created), and prints `RateLimit` and `RateLimit-Policy` response headers:
+- Before fix: `remaining=3, 1, 0` (drops by 2)
+- After fix: `remaining=4, 3, 2` (drops by 1)
+
+**Fix:** removed the three `app.use("/auth/...", ...)` lines from `src/app.ts`. `globalLimiter` remains the only app-level mount. `auth.routes.ts` is the single source of truth for auth limiters (visible next to the handlers they protect). And I corrected the misleading message in `scripts/test-ratelimit.ts` from *"The test script needs to wait or use a different IP"* (wrong — counters are in-memory and start at zero) to *"In-memory counters start at zero, so this means a limiter is misconfigured or mounted twice."*
+
+**Result:** `npm run verify` now ends with `Everything passed.` All four steps green: `test:unit` (150/150), `test:integration` (248/248), `smoke` (12/12), `test:ratelimit` (all pass, including the three that had been failing since Day 30).
+
+### Scripts retired (Part H, Step 14)
+
+After the mutation table confirmed the suite catches what the scripts caught (rows 1–4, 6, 8–10), five scripts were deleted and their `package.json` commands removed:
+
+```bash
+git rm scripts/token-attacks.ts scripts/auth-coverage.ts scripts/refresh-flow.ts \
+       scripts/access-attacks.ts scripts/security-checks.ts
+```
+
+| Deleted script | Replaced by |
+|---|---|
+| `token-attacks.ts` | `tests/unit/auth/tokens.test.ts` (16 cases) + `tests/integration/auth.me.test.ts` (7 cases) |
+| `auth-coverage.ts` | `tests/integration/docs.and.auth.test.ts` (every documented operation answers 401 without credentials; every protected operation documents a 401) |
+| `refresh-flow.ts` | `tests/integration/auth.sessions.test.ts` (19 cases: rotation, reuse, logout, logout-all, purge, parallel race, expired-token behavior, known-limitation test) |
+| `access-attacks.ts` | `tests/integration/access.matrix.test.ts` (72 cells), `projects.members.test.ts` (18 tests incl. last-owner race), `comments.test.ts` (23 tests) |
+| `security-checks.ts` | `tests/integration/security.test.ts` (7 cases) + `tests/unit/schemas.test.ts` (55 cases) |
+
+**Kept:** `test:ratelimit` (limiter coverage is still script-only, per the coverage step), `bench:login` (timing property, deliberately not in the suite), and `smoke` (rewritten to a 12-check post-build check that proves the compiled `dist/` server boots and works over real HTTP).
+
+**`scripts/smoke.ts`** was rewritten as a 12-assertion post-build check: `health`, `docs page`, `tasks need a login`, `register`, `login`, `me`, `create project`, `create task`, `list shows the task`, `update task`, `delete task`, `delete project`. It creates one user (no delete-account endpoint — `npm run db:fresh` clears it), deletes the task and project it created, and exits non-zero if any check fails.
+
+**`scripts/verify.sh`** now runs `test:unit test:integration smoke test:ratelimit`, restarting the compiled server between `smoke` and `test:ratelimit` so the limiter gets a fresh in-memory budget. The restart step is what makes `test:ratelimit` deterministic now that `test:integration` and `smoke` share the server.
+
 ## OWASP API Top 10 (Day 27 Review)
 
 | Risk | In TaskFlow | Where | Gap? |
@@ -673,10 +847,14 @@ Building on the Day 30 table:
 16. **Legacy tasks and projects with no owner are invisible:** Only the CLI can see/modify them.
 17. **Moving a task out of a project can orphan it from a creator who left.**
 18. **`listComments` still loads every comment before filtering:** It uses `findAll()` instead of a `WHERE taskId = ?` query.
-19. **`test:ratelimit` is sensitive to run order in `verify.sh`:** It assumes a fresh rate-limit budget. If any other script drains the register/refresh/login budget first, its "fresh budget" assertions fail. Fixed by running it first in the loop. The limiter itself is correct; the test setup just needs headroom. Day 31's integration suite will `beforeEach` reset the in-memory store, retiring this script into the suite.
-20. **Integration tests wipe the test database on every `beforeEach`:** This is correct for the current suite (simple, obviously correct, a few ms per wipe), but it means test files must run serially (`fileParallelism: false`). Per-worker databases (Day 30 challenge) would allow parallelism at the cost of setup complexity.
-21. **Due-date rule uses the UTC date, not the caller's local date:** A user in UTC−8 can be rejected at 22:00 local for setting "today" in their time zone. Options considered and the decision are recorded in the Day 31 Observations section (accepted UTC, rationale: consistency with the rest of the API, client-side UX is a better place to soften it).
-22. **Integration tests don't cover every branch of `PATCH /tasks/:id`:** Gaps I found in my own test list: preserving `createdById` through a patch is only implicitly covered, and "stranger moves `projectId`" isn't a distinct test. Not bugs — coverage gaps to fill on a second pass or in Day 32.
+19. **Integration tests wipe the test database on every `beforeEach`:** This is correct for the current suite (simple, obviously correct, a few ms per wipe), but it means test files must run serially (`fileParallelism: false`). Per-worker databases (Day 30 challenge) would allow parallelism at the cost of setup complexity.
+20. **Due-date rule uses the UTC date, not the caller's local date:** A user in UTC−8 can be rejected at 22:00 local for setting "today" in their time zone. Options considered and the decision are recorded in the Day 31 Observations section (accepted UTC, rationale: consistency with the rest of the API, client-side UX is a better place to soften it).
+21. **Integration tests don't cover every branch of `PATCH /tasks/:id`:** Gaps I found in my own test list: preserving `createdById` through a patch is only implicitly covered, and "stranger moves `projectId`" isn't a distinct test. Not bugs — coverage gaps to fill on a second pass.
+22. **`test:ratelimit` has 3 raw branches where the effective limit is what the coverage step calls a "true gap":** The limiter's full behavior (counters, key generators, 429 body) is only exercised by the standalone script, not the suite. This is why `test:ratelimit` stays until Challenge 1 ports it (with `beforeEach` reset).
+23. **`test:ratelimit` was mounted twice at one point** (in `app.ts` by path and in `auth.routes.ts` by route), which halved every IP-keyed limit. The double mount was caught by `scripts/limiter-probe.ts` and fixed by removing the `app.use("/auth/...", ...)` lines from `app.ts`. Any future limiter added to `app.ts` by path must not also be added to a route — `grep -rn "Limiter" src/` is the fast check.
+24. **Five scripts retired:** `token-attacks`, `auth-coverage`, `refresh-flow`, `access-attacks`, `security-checks` (and their `package.json` commands). Their replacements are the integration suites listed above; the mutation table rows 1–4, 6, 8–10 are the evidence that each bug the scripts caught is now caught by the suite.
+25. **`smoke.ts` is intentionally small (12 checks):** It's a post-build check of the *compiled* `dist/` server, not a behavior suite. Detailed behavior is `npm test`'s job; if a check needs adding, it goes in an integration test, not in `smoke.ts`.
+26. **`verify.sh` restarts the compiled server between `smoke` and `test:ratelimit`:** In-memory rate-limit counters must start at zero for `test:ratelimit`, and `test:integration` + `smoke` will have drained them on the shared server. The restart is what makes `verify.sh` green end-to-end. If `test:ratelimit` ever fails after a clean restart, the bug is in the limiter or the script's setup — not in the ordering.
 
 ## Week 1 summary
 Three things I can do now that I couldn't on Day 1:
@@ -752,13 +930,8 @@ Three more things I can do now that I couldn't on Day 30:
 - Write integration tests for project management, including **transactional duplicate and merge**, with the concurrency race under `Promise.all`.
 - Practice **red-green-refactor** end-to-end on a real new rule (past due dates rejected on creation), with the boundary ("is today past?") extracted into a pure function tested deterministically.
 
-Things that confused me:
-- The difference between a fake, a stub, and a spy.
-- Why faking *all* timers broke the token tests.
-- Why `fileParallelism: false` is required when files share one database.
-- Why `nulls: "last"` matters only in the **descending** direction.
-
-What I'd do differently:
-- Write the test *before* the code. The `slugify` test found a bug instantly that would have shipped otherwise.
-- Put `test:ratelimit` first in `verify.sh` from the moment I added a second script, not after it failed.
-- Compute the expected sort order by hand from the dataset before running the test, not after it fails. The five minutes I spent on that saved an hour of "is the code wrong or is my reasoning wrong?"
+Three more things I can do now that I couldn't on Day 31:
+- Port a security-critical **access matrix** (24 actions × 3 personas = 72 cells) into a real test suite, with a **fingerprint** assertion that a denied request changes nothing.
+- Test **sessions end-to-end**: refresh rotation, reuse detection, logout, logout-all, purge, expired-token behavior, parallel-refresh race, and the documented "access token survives logout" limitation.
+- Run **combined coverage** (unit + integration) with a **ratcheted threshold** and prove the guard fails when it should.
+- **Retire scripts safely**: only after re-introducing the exact bugs they caught and confirming the suite now catches them, then shrink `smoke.ts` to a post-build check of the compiled server.

@@ -8,7 +8,7 @@ A team task-management API built with Node.js, Express, TypeScript, and Prisma.
 - **Auth & Access Control:** User registration, login (JWT), refresh tokens (rotation + reuse detection), logout, role-based access control, and **rate limiting**.
 - **Core:** Repository pattern, Unit of Work for transactions, Zod validation, strict TypeScript, and centralized error handling.
 - **Database:** PostgreSQL with Prisma ORM, enforcing referential integrity, cascading deletes, and composite indexes for fast queries.
-- **Testing:** Vitest unit tests for pure logic, and integration tests against a real, isolated test database via Supertest. Also smoke, token, auth-coverage, refresh, access, rate-limit, and security scripts.
+- **Testing:** Vitest unit tests for pure logic, integration tests against a real, isolated test database via Supertest, and a small post-build smoke test of the compiled server. Coverage thresholds ratchet both suites.
 - **Production Middleware:** Security headers (Helmet), CORS, Request IDs, body size limits, and **rate limits**.
 
 ## Setup
@@ -57,11 +57,11 @@ npm start       # Run compiled JS
 
 Interactive API docs are available at `http://localhost:3000/docs` when the server is running. You can test every endpoint directly in the browser.
 
-To verify the API against a running server:
+To verify the whole project against a **compiled** server (what actually ships), run:
 ```bash
 npm run verify
 ```
-*(The server must be running in another terminal).*
+This builds `dist/`, starts it, then runs `test:unit`, `test:integration`, `smoke`, and `test:ratelimit` in that order, restarting the server between `smoke` and `test:ratelimit` so the in-memory rate-limit counters start at zero. The script ends with `Everything passed.` when all four steps succeed.
 
 ![Smoke Test Results](./docs/smoke-test.png)
 
@@ -69,7 +69,6 @@ npm run verify
 ```bash
 npm run test:unit       # Fast unit tests (about a second)
 npm run test:watch      # Re-run affected tests on every save
-npm run test:coverage   # Coverage report in coverage/
 ```
 
 Unit tests cover pure logic that needs no I/O:
@@ -102,12 +101,13 @@ Integration tests run the real HTTP stack — validation, controllers, services,
   2. `truncateAll()` runs `SELECT current_database()` and refuses if the name doesn't end in `_test`.
 - **Files run one at a time** (`fileParallelism: false`) because they share one database.
 
-Integration tests cover three areas:
+Integration tests cover four areas:
 
 **Auth**
 - Registration: 201 with public fields, Argon2id hash stored, no password in body, security headers, duplicate email 409 (case-insensitive), mass-assignment rejected, malformed JSON/array/`null`/`text/plain` rejected, **8 parallel registrations produce exactly one account**.
 - Login: access + refresh tokens issued, refresh hash stored (not the token), two families per user, identical 401 for unknown email vs. wrong password, unusable hash → 401, no session created on failure, validation errors on missing/extra fields.
 - `/auth/me`: valid token returns the user, no/garbage/wrong-scheme/empty token 401, valid token for a deleted user 401.
+- **Sessions:** rotation, reuse detection (whole family revoked), logout, logout-all, purge of expired rows, **exactly one of six parallel refreshes succeeds** (5 rounds), and a documented test for the known limitation that an access token issued before logout stays valid until it expires.
 
 **Tasks**
 - CRUD: create personal or project tasks with defaults and `createdById` from the token, `Location` header, all validation errors returning 400 and storing nothing.
@@ -126,23 +126,49 @@ Integration tests cover three areas:
 - Duplicate: copies project + tasks as `todo` tasks with `createdById: caller`, `Location` header, original untouched, custom name accepted.
 - Merge: tasks move, source disappears, memberships cascade, **all-or-nothing** on unowned target (source and target both unchanged), self-merge 400, member on source 403, stranger 404, and **two simultaneous merges → exactly one `200`, the loser is `404` or `409`, no task lost or duplicated**.
 
-- Test infrastructure: DB name ends in `_test` (both safety layers), all migrations applied, tables empty between tests, `RESTART IDENTITY` gives `id=1`.
+**Members & Comments & the access matrix**
+- **Members:** owner adds by email (case-insensitive, immediate access), can add as `owner`; 409 for an existing member (role unchanged), 404 for unknown email; promote/demote validation, **last-owner cannot demote or leave** (`409`), removing a member leaves their tasks in the project but strips their access at once. Includes a **10-round race** where two owners demote each other simultaneously — never zero owners, never both succeed.
+- **Comments:** author comes from the token (client-supplied `author`/`authorId`/`taskId` rejected), the author edits their own words, **even a project owner cannot edit another user's comment** (403, unchanged), the author or project owner deletes, a stranger gets `404`, comments vanish with their task, **a comment cannot be reached through the wrong task's URL** (IDOR), and on a deleted account the comment keeps its `author` name but loses `authorId` and can only be moderated.
+- **Access matrix:** 24 actions × 3 personas (stranger/member/owner) = **72 cells**, each asserting the exact status and — for every denied request — that a **fingerprint of every table is unchanged before and after**. The matrix is the executable version of the roles table below; a missing cell is visible, a wrong cell fails a test with a readable name.
+
+- **Test infrastructure:** DB name ends in `_test` (both safety layers), all migrations applied, tables empty between tests, `RESTART IDENTITY` gives `id=1`.
+- **Security & docs:** every documented operation answers `401` without credentials (except the `PUBLIC` set), every protected operation documents a `401` response, `/openapi.json` version matches `package.json`, the `bearerAuth` scheme is declared, Helmet headers are present, CORS allows `Authorization` for the configured origin, unknown routes return JSON `404`, oversized bodies return `413` with the standard error shape, and an unexpected failure returns `500` with a generic message + `requestId` while the real cause is logged.
+
+### Coverage (unit + integration together)
+```bash
+npm run test:coverage   # Runs both suites once and enforces thresholds
+```
+
+The combined run prints a per-file coverage report and writes HTML to `coverage/`. **Thresholds are a ratchet:** they live in `vitest.coverage.config.ts` and only go up. A failing threshold means "add tests", never "lower the number". If a threshold fails, the command exits non-zero — this is what the Week 7 CI gate will check.
+
+Current thresholds (measured after Day 32, rounded down − 2 to absorb v8's rounding noise):
+- Statements: **86**
+- Branches: **73**
+- Functions: **88**
+- Lines: **88**
+
+Expected low-coverage files that are **not** regressions:
+- `src/middleware/rateLimit.ts` / `limiters.ts` — the suite runs with `RATE_LIMIT_ENABLED=false`, so the limiter body is exercised only by `npm run test:ratelimit`. Porting it into the suite is Challenge 1 (a future task).
+- `src/repositories/prisma/*.repository.ts` — the `P2002`/`P2003`/`P2025` mappings that the service layer's fast-path checks prevent from being hit. The `task.repository.ts` P2003 path is covered by a dedicated repo-level test; the rest are documented as gaps.
+
+### Post-build smoke test
+```bash
+npm run smoke       # 12 checks against the COMPILED server
+```
+
+`smoke.ts` builds the project, starts `dist/server.js`, and hits it over real HTTP. It's the only test that proves the *built artifact* works — no missing file in `dist/`, no broken import path after compilation, no missing runtime dependency. Detailed behavior is `npm test`'s job; the smoke test is intentionally small.
 
 ### Test Scripts
 | Script | What it proves |
 |---|---|
 | `npm run test:unit` | Pure functions (pagination, slugs, access rules, tokens, config, schemas, dates) |
 | `npm run test:watch` | Re-runs affected tests on save |
-| `npm run test:coverage` | Coverage report for `src/` in `coverage/` |
 | `npm run test:integration` | API tests against a real, isolated test database (`taskflow_test`) |
 | `npm test` | Unit tests, then integration tests |
-| `npm run smoke` | Every endpoint, happy path and failures |
-| `npm run test:tokens` | Forged, expired and tampered tokens are rejected |
-| `npm run test:auth-coverage` | Every documented route returns 401 without a token |
-| `npm run test:refresh` | Rotation, reuse detection, logout, concurrency |
-| `npm run test:access` | Role matrix (stranger, member, owner) |
-| `npm run test:ratelimit` | Rate limits and `Retry-After` headers |
-| `npm run test:security` | Hostile input, NUL characters, out-of-range IDs |
+| `npm run test:coverage` | Runs both suites once with coverage report and thresholds |
+| `npm run smoke` | Post-build check of the compiled server over real HTTP |
+| `npm run test:ratelimit` | Rate-limit behavior (currently script-only; porting into the suite is a future task) |
+| `npm run verify` | Builds, starts the compiled server, then runs all of the above |
 
 ## Business Rules
 
@@ -245,6 +271,8 @@ Rate limits are applied to protect sensitive endpoints:
 
 A `429 Too Many Requests` response includes `Retry-After` and `RateLimit` headers. The error body includes `retryAfterSeconds`.
 
+**Mount discipline:** each limiter is attached **once**, either in `app.ts` (only `globalLimiter`) or on the route handlers (the auth limiters in `auth.routes.ts`, `inviteLimiter` in `projects.routes.ts`). Mounting the same limiter in both places runs it twice per request and halves its effective limit — this exact bug was fixed on Day 32 (see the `test:ratelimit` entry in the known limitations). Any new limiter must follow the same rule: **one mount, one place**.
+
 ## Authentication & Authorization
 
 ### Login & Tokens
@@ -276,7 +304,7 @@ curl http://localhost:3000/tasks \
 | Rename/delete/merge/manage members | `404` | `403` | yes |
 | Leave the project | `404` | yes | if not last owner |
 
-**Rule:** Strangers get `404` (so they can't tell if a project exists). A member without rights gets `403`. Roles are looked up on every request.
+**Rule:** Strangers get `404` (so they can't tell if a project exists). A member without rights gets `403`. Roles are looked up on every request. The table is **executable** — `tests/integration/access.matrix.test.ts` runs all 24 actions against all three personas (72 cells) and, for every denied request, asserts that a fingerprint of every table is identical before and after.
 
 ### Refresh Tokens
 Access tokens expire after 15 minutes. Use the refresh token to get a new pair:
@@ -299,7 +327,7 @@ curl -X POST http://localhost:3000/auth/logout \
   -d '{"refreshToken":"<your-refresh-token>"}'
 ```
 
-**Note:** Logout revokes the refresh token, but an access token that was already issued stays valid until it expires (15 min).
+**Note:** Logout revokes the refresh token, but an access token that was already issued stays valid until it expires (15 min). This is a documented limitation and a test in `auth.sessions.test.ts` locks it in.
 
 ### Sessions Diagram
 
@@ -439,7 +467,7 @@ prisma/
 tests/
 ├── unit/                 # Vitest unit tests (mirrors src/)
 ├── integration/          # Supertest tests against a real test database
-└── support/              # Shared helpers: env, app, auth, factories, truncate, globalSetup
+└── support/              # Shared helpers: env, app, auth, factories, scenarios, sessions, truncate, globalSetup
 
 src/
 ├── app.ts, server.ts, cli.ts
@@ -475,15 +503,17 @@ Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CO
   - [x] Test database + Supertest integration tests for auth
   - [x] Integration tests for tasks and projects (incl. filtering, sorting, pagination, duplicate, merge)
   - [x] Due-date business rule (past dates rejected on creation, CLI exempt) with unit-tested boundary
-  - [ ] Integration tests for comments and membership (Day 32)
-  - [ ] Coverage target and CI gate
+  - [x] Integration tests for members, comments, sessions, access matrix and docs (Day 32)
+  - [x] Combined coverage run with ratcheted thresholds (86/73/88/88)
+  - [x] Retired five hand-written scripts (token-attacks, auth-coverage, refresh-flow, access-attacks, security-checks), shrunk smoke to a post-build check
+  - [ ] CI gate (Week 7)
 
 ## Known Limitations
 1. **In-memory rate limits:** Reset on restart and don't share between multiple server instances. Week 6 moves them to Redis.
 2. **Per-account throttle:** An attacker can intentionally lock a victim out by flooding `/auth/login` with wrong passwords.
 3. **No CAPTCHA or MFA:** A determined attacker with a botnet can still try many passwords.
 4. **No email verification:** Accounts can be created with fake emails.
-5. **Access tokens cannot be revoked:** A stolen access token stays valid for up to 15 minutes after logout.
+5. **Access tokens cannot be revoked:** A stolen access token stays valid for up to 15 minutes after logout. `auth.sessions.test.ts` locks this in as a characterization test.
 6. **Member invites reveal email existence:** Adding a member by email returns 404 if the user doesn't exist. Rate limiting makes probing slow, but not impossible.
 7. **No automated alerting:** Repeated `auth 401` events are logged but not flagged.
 8. **Search Wildcards:** Searching for `%` or `_` returns all tasks because SQL `LIKE` interprets them as wildcards.
@@ -502,6 +532,10 @@ Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CO
 21. **Unit tests don't cover HTTP or SQL:** Controllers, repositories, and routes show 0% unit coverage by design. Integration tests (Week 5, Days 30–32) cover them.
 22. **Integration tests run serially:** The test database is shared across files, so `fileParallelism: false` is required. Per-worker databases would allow parallelism at the cost of setup complexity.
 23. **Test database is wiped on every `beforeEach`:** Correct for the current suite (a few ms per wipe), but slower than transaction rollback isolation. Documented as a challenge for later.
-24. **`test:ratelimit` is order-sensitive in `verify.sh`:** It assumes a fresh rate-limit budget, so it must run *first* in the `for step in` loop. Any other script that drains register/refresh/login counters before it will cause false failures. The limiter itself is correct; the test setup just needs headroom. Week 5's integration suite will `beforeEach` reset the in-memory store, retiring this script into the suite.
-25. **Due-date rule uses the UTC calendar date, not the caller's local date:** A user far west of UTC can be rejected for setting "today" in their time zone late in their evening. Options (accept vs. one-day grace vs. `Time-Zone` header) are documented in `notes.md`; the current choice is to accept UTC for consistency with the rest of the API.
-26. **Integration tests don't cover every branch of `PATCH /tasks/:id`:** Coverage gaps identified in my own test list: preserving `createdById` through a patch is only implicitly covered, and "stranger moves `projectId`" isn't a distinct test. Not bugs — candidates for a second pass or Day 32.
+24. **`test:ratelimit` is a script, not part of the suite:** The rate limiter's body (counters, key generators, 429 handling) is exercised only by `scripts/test-ratelimit.ts`, and it needs a fresh in-memory budget. `verify.sh` restarts the compiled server between `smoke` and `test:ratelimit` so the counters start at zero. Porting the script into the integration suite (Challenge 1) will let `beforeEach` reset the store instead.
+25. **Rate limiters must be mounted exactly once:** A limiter attached both in `app.ts` by path **and** on the route handler runs twice per request and halves its effective limit. This bug existed for `registerLimiter`, `loginIpLimiter`, and `refreshLimiter` and was fixed on Day 32 by removing the `app.use("/auth/...", ...)` mounts from `app.ts`, leaving `globalLimiter` as the only app-level mount. Any new limiter must follow the same rule: **one mount, one place** — `grep -rn "Limiter" src/` is the fast check.
+26. **Due-date rule uses the UTC calendar date, not the caller's local date:** A user far west of UTC can be rejected for setting "today" in their time zone late in their evening. Options (accept vs. one-day grace vs. `Time-Zone` header) are documented in `notes.md`; the current choice is to accept UTC for consistency with the rest of the API.
+27. **Integration tests don't cover every branch of `PATCH /tasks/:id`:** Coverage gaps identified in my own test list: preserving `createdById` through a patch is only implicitly covered, and "stranger moves `projectId`" isn't a distinct test. Not bugs — candidates for a second pass.
+28. **Coverage gaps still open after Day 32:** `src/middleware/rateLimit.ts` and `src/middleware/limiters.ts` are at ~33% and ~66% respectively (the suite runs with `RATE_LIMIT_ENABLED=false`); `user.repository.ts` at ~54% (the `P2002` catch's `else` branch is never hit); `errorHandler.ts` at ~82% (the Zod-error-from-service branch is defensive). None are bugs — the first is scheduled for Challenge 1, the second is a genuine safety net worth a repo-level test, the third is accepted as defensive code.
+29. **Five scripts retired on Day 32:** `scripts/token-attacks.ts`, `scripts/auth-coverage.ts`, `scripts/refresh-flow.ts`, `scripts/access-attacks.ts`, and `scripts/security-checks.ts` were deleted. Each replacement is a named integration suite (`auth.sessions`, `access.matrix`, `projects.members`, `comments`, `security`, `docs.and.auth`), and the Day 32 mutation table (10 rows) is the evidence that the suite catches the bugs the scripts caught.
+30. **`smoke.ts` is intentionally small (12 checks):** It's a post-build check of the *compiled* `dist/` server, not a behavior suite. Detailed behavior is `npm test`'s job; if a check needs adding, it goes in an integration test, not in `smoke.ts`.

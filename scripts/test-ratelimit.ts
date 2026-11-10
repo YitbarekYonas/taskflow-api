@@ -39,8 +39,8 @@ async function newUser(label: string) {
   const email = `rl+${stamp}-${label}-${accountCounter++}@example.com`;
   const reg = await api("POST", "/auth/register", { email, name: label, password: PASSWORD });
   if (reg.status === 429) {
-  console.warn(`⚠️  Hit register rate limit while setting up ${label}. The test script needs to wait or use a different IP.`);
-  return { email, token: "dummy-token" }; // Return a dummy so the script doesn't crash
+  console.warn(`⚠️  Unexpected: register limit tripped while setting up ${label}. In-memory counters start at zero, so this means a limiter is misconfigured or mounted twice.`);
+  return { email, token: "dummy-token" };
 }
 if (reg.status !== 201) throw new Error(`could not register ${label}: ${reg.status}`);
   const login = await api("POST", "/auth/login", { email, password: PASSWORD });
