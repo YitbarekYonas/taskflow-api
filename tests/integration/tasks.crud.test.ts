@@ -3,15 +3,9 @@ import { prisma } from "../../src/db.js";
 import { api } from "../support/app.js";
 import { asUser } from "../support/auth.js";
 import { createProject, createTask, createUser } from "../support/factories.js";
-
+import { team } from "../support/scenarios.js";
 // The same cast in every test: an owner, a plain member and a stranger
-async function team() {
-  const owner = await createUser({ name: "Olga" });
-  const member = await createUser({ name: "Max" });
-  const stranger = await createUser({ name: "Sid" });
-  const project = await createProject({ owner, members: [{ user: member }] });
-  return { owner, member, stranger, project };
-}
+
 
 describe("tasks require authentication", () => {
   it.each([
