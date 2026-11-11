@@ -1,5 +1,4 @@
 import "dotenv/config";
-import path from "node:path";
 import { z } from "zod";
 
 const bool = (fallback: "true" | "false") =>

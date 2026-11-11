@@ -105,7 +105,7 @@ describe("POST /auth/refresh", () => {
   it.each([
     ["no body", {}],
     ["a token that is too short", { refreshToken: "abc" }],
-    ["a token that is not a string", { refreshToken: 12345678901234567890 }],
+    ["a token that is not a string", { refreshToken: 12345}],
     ["an extra field", { refreshToken: "x".repeat(43), admin: true }],
   ])("rejects %s with 400", async (_name, body) => {
     expect((await api().post("/auth/refresh").send(body)).status).toBe(400);

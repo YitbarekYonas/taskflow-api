@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment -- Express and express-rate-limit throw plain objects, not Error instances; fields are checked at runtime below */
 import type { ErrorRequestHandler, RequestHandler } from "express";
 import { ZodError } from "zod";
 import {

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { prisma } from "../../src/db.js";
 import { api } from "../support/app.js";
 import { asUser } from "../support/auth.js";
-import { createProject, createTask, createUser } from "../support/factories.js";
+import { createProject, createTask} from "../support/factories.js";
 import { team } from "../support/scenarios.js";
 // The same cast in every test: an owner, a plain member and a stranger
 

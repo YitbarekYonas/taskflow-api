@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { makeSlug, slugify } from "../../../src/services/slug.js";
+import type * as NodeCrypto from "node:crypto";
 
 vi.mock("node:crypto", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:crypto")>();
+  const actual = await importOriginal<typeof NodeCrypto>();
   return { ...actual, randomBytes: () => Buffer.from([0xab, 0xcd, 0xef]) };
 });
 

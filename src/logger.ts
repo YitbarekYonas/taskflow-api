@@ -3,7 +3,7 @@ const levels = { debug: 0, info: 1, error: 2 } as const;
 type Level = keyof typeof levels;
 function log(level: Level, ...args: unknown[]) {
   if (levels[level] >= levels[config.logLevel]) {
-    console.log(`[${level}]`, ...args);
+    console.error(`[${level}]`, ...args);
   }
 }
 export const logger = {

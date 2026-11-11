@@ -1,7 +1,6 @@
 import type { Prisma, PrismaClient, Task as TaskRow } from "../../generated/prisma/client.js";
 import type { Db } from "./db.js";
 import type { Priority, Status, Task } from "../../types.js";
-import type { Repository } from "../repository.js";
 import { isPrismaError, mapWriteError } from "./errors.js";
 import type { TaskQuery } from "../../schemas/task.schemas.js";
 import type { TaskRepository } from "../repository.js";

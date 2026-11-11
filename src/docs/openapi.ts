@@ -26,7 +26,7 @@ const { version } = JSON.parse(
   readFileSync(new URL("../../package.json", import.meta.url), "utf-8"),
 ) as { version: string };
 function schemaOf(schema: z.ZodType, io: "input" | "output" = "input") {
-  const { $schema, ...rest } = z.toJSONSchema(schema, { io }) as Record<string, unknown>;
+  const {  $schema: _schema, ...rest } = z.toJSONSchema(schema, { io }) as Record<string, unknown>;
   return rest;
 }
 
