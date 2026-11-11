@@ -43,6 +43,13 @@
     "lint": "eslint . --max-warnings 0",
     "lint:fix": "eslint . --fix"
   },
+  "lint-staged": {
+    "*.ts": [
+      "eslint --fix --max-warnings 0",
+      "prettier --write"
+    ],
+    "*.{json,yml,yaml,mjs}": "prettier --write"
+  },
   "keywords": [
     "taskflow",
     "task-manager",
