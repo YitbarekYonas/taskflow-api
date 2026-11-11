@@ -80,7 +80,7 @@ export function createProjectService({ projects, tasks, members, uow }: Deps) {
 
   async function listProjectTasks(id: number, q: Omit<TaskQuery, "projectId">, actor: Actor) {
     await getProject(id, actor); // membership implies visibility of every task inside
-    const { items, total } = await tasks.query({ ...q, projectId: id } as TaskQuery);
+    const { items, total } = await tasks.query({ ...q, projectId: id });
     return { items, meta: buildMeta(total, q.page, q.limit) };
   }
 

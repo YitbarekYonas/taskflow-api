@@ -6,7 +6,13 @@ import tseslint from "typescript-eslint";
 
 export default defineConfig(
   {
-    ignores: ["dist/**", "coverage/**", "src/generated/**", "node_modules/**", "prisma/migrations/**"],
+    ignores: [
+      "dist/**",
+      "coverage/**",
+      "src/generated/**",
+      "node_modules/**",
+      "prisma/migrations/**",
+    ],
   },
   // A stale "eslint-disable" comment is itself a mistake
   { linterOptions: { reportUnusedDisableDirectives: "error" } },
