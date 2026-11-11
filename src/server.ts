@@ -20,7 +20,7 @@ const purgeTimer = setInterval(
       .then((n) => n > 0 && logger.info(`Purged ${n} expired refresh tokens`))
       .catch((err) => logger.error("Token purge failed:", err));
   },
-  60 * 60 * 1000
+  60 * 60 * 1000,
 );
 purgeTimer.unref(); // never keep the process alive just for this timer
 function shutdown(signal: string) {

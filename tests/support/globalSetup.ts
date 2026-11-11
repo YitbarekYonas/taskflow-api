@@ -18,7 +18,9 @@ export default async function setup() {
   try {
     await client.connect();
   } catch (error) {
-    throw new Error(`Cannot reach PostgreSQL (${(error as Error).message}). Is it running? Try: npm run db:up`);
+    throw new Error(
+      `Cannot reach PostgreSQL (${(error as Error).message}). Is it running? Try: npm run db:up`,
+    );
   }
   try {
     const exists = await client.query("SELECT 1 FROM pg_database WHERE datname = $1", [dbName]);

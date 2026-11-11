@@ -6,9 +6,8 @@ export default defineConfig({
     environment: "node",
     include: ["tests/unit/**/*.test.ts"],
     // Every variable src/config.ts reads is set here, so no test can depend on your local .env
-    env:TEST_ENV,
+    env: TEST_ENV,
     restoreMocks: true, // spies are restored before every test
-    unstubEnvs: true,   // vi.stubEnv changes are undone after every test
-    
+    unstubEnvs: true, // vi.stubEnv changes are undone after every test
   },
 });

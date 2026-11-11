@@ -17,7 +17,8 @@ const BASELINE: Record<string, string> = {
 // Loads a fresh copy of the config module under a complete, controlled environment
 async function loadConfig(overrides: Record<string, string> = {}) {
   vi.resetModules();
-  for (const [name, value] of Object.entries({ ...BASELINE, ...overrides })) vi.stubEnv(name, value);
+  for (const [name, value] of Object.entries({ ...BASELINE, ...overrides }))
+    vi.stubEnv(name, value);
   return (await import("../../src/config.js")).config;
 }
 
@@ -32,7 +33,10 @@ function trapExit() {
 
 describe("config", () => {
   it("parses and converts valid values", async () => {
-    const config = await loadConfig({ PORT: "8080", CORS_ORIGIN: "http://a.example, http://b.example" });
+    const config = await loadConfig({
+      PORT: "8080",
+      CORS_ORIGIN: "http://a.example, http://b.example",
+    });
     expect(config.port).toBe(8080);
     expect(config.corsOrigins).toEqual(["http://a.example", "http://b.example"]);
     expect(config.accessTokenTtl).toBe(900);
@@ -62,13 +66,18 @@ describe("config", () => {
     it("refuses the public placeholder secret", async () => {
       trapExit();
       await expect(
-        loadConfig({ NODE_ENV: "production", JWT_SECRET: "replace-me-with-a-long-random-string-at-least-32-chars" })
+        loadConfig({
+          NODE_ENV: "production",
+          JWT_SECRET: "replace-me-with-a-long-random-string-at-least-32-chars",
+        }),
       ).rejects.toThrow("exit 1");
     });
 
     it("refuses to run without rate limiting", async () => {
       trapExit();
-      await expect(loadConfig({ NODE_ENV: "production", RATE_LIMIT_ENABLED: "false" })).rejects.toThrow("exit 1");
+      await expect(
+        loadConfig({ NODE_ENV: "production", RATE_LIMIT_ENABLED: "false" }),
+      ).rejects.toThrow("exit 1");
     });
 
     it("accepts a properly configured production environment", async () => {

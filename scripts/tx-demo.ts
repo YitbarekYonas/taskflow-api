@@ -12,7 +12,10 @@ async function seedSource() {
 }
 
 async function copyWithoutTransaction(sourceId: number) {
-  const tasks = await prisma.task.findMany({ where: { projectId: sourceId }, orderBy: { id: "asc" } });
+  const tasks = await prisma.task.findMany({
+    where: { projectId: sourceId },
+    orderBy: { id: "asc" },
+  });
   const copy = await prisma.project.create({ data: { name: `${PREFIX} copy (no transaction)` } });
   for (const [i, t] of tasks.entries()) {
     if (i === 1) throw new Error("simulated crash while copying");
@@ -22,7 +25,10 @@ async function copyWithoutTransaction(sourceId: number) {
 
 async function copyWithTransaction(sourceId: number) {
   await prisma.$transaction(async (tx) => {
-    const tasks = await tx.task.findMany({ where: { projectId: sourceId }, orderBy: { id: "asc" } });
+    const tasks = await tx.task.findMany({
+      where: { projectId: sourceId },
+      orderBy: { id: "asc" },
+    });
     const copy = await tx.project.create({ data: { name: `${PREFIX} copy (transaction)` } });
     for (const [i, t] of tasks.entries()) {
       if (i === 1) throw new Error("simulated crash while copying");

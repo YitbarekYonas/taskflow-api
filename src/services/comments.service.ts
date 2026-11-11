@@ -1,7 +1,10 @@
 import { createAccess } from "../auth/access.js";
 import type { Actor } from "../auth/policy.js";
 import {
-  ForbiddenError, InvalidReferenceError, NotFoundError, UnauthorizedError,
+  ForbiddenError,
+  InvalidReferenceError,
+  NotFoundError,
+  UnauthorizedError,
 } from "../errors.js";
 import type { MemberRepository } from "../repositories/memberRepository.js";
 import type { Repository } from "../repositories/repository.js";
@@ -65,13 +68,17 @@ export function createCommentService({ comments, tasks, members, users }: Deps) 
         createdAt: new Date().toISOString(),
       });
     } catch (err) {
-      if (err instanceof InvalidReferenceError) throw new NotFoundError(`No task with id ${taskId}.`);
+      if (err instanceof InvalidReferenceError)
+        throw new NotFoundError(`No task with id ${taskId}.`);
       throw err;
     }
   }
 
   async function updateComment(
-    taskId: number, commentId: number, patch: CommentPatch, actor: Actor
+    taskId: number,
+    commentId: number,
+    patch: CommentPatch,
+    actor: Actor,
   ): Promise<Comment> {
     const { comment } = await loadComment(taskId, commentId, actor);
     if (!isAuthor(comment, actor)) throw new ForbiddenError("Only the author can edit a comment.");

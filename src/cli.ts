@@ -94,13 +94,13 @@ async function run(cmd: Command): Promise<void> {
           priority: cmd.priority,
           dueDate: cmd.dueDate,
         },
-        SYSTEM
+        SYSTEM,
       );
       console.log(`Added #${task.id}: ${task.title}`);
       break;
     }
     case "list": {
-      const tasks = await listTasks({ status: cmd.status },SYSTEM);
+      const tasks = await listTasks({ status: cmd.status }, SYSTEM);
       if (tasks.length === 0) console.log("No tasks found.");
       tasks.forEach((t) => console.log(formatTask(t)));
       break;
@@ -121,7 +121,7 @@ async function run(cmd: Command): Promise<void> {
       break;
     }
     case "export": {
-      console.log(`Exported to ${await exportCsv(cmd.file,SYSTEM)}`);
+      console.log(`Exported to ${await exportCsv(cmd.file, SYSTEM)}`);
       break;
     }
     case "help": {
@@ -130,7 +130,7 @@ async function run(cmd: Command): Promise<void> {
           "  add <title> [-p low|medium|high] [-d YYYY-MM-DD]\n" +
           "  list [-s todo|in_progress|done]\n" +
           "  start <id> | done <id> | delete <id>\n" +
-          "  export [file.csv]   (CSV format)"
+          "  export [file.csv]   (CSV format)",
       );
       break;
     }

@@ -9,7 +9,7 @@ import { PrismaUnitOfWork } from "./repositories/prisma/unitOfWork.js";
 import { PrismaUserRepository } from "./repositories/prisma/user.repository.js";
 import { createAuthService } from "./services/auth.service.js";
 import { PrismaRefreshTokenRepository } from "./repositories/prisma/refreshToken.repository.js";
-import {PrismaMemberRepository} from "./repositories/prisma/member.repository.js";
+import { PrismaMemberRepository } from "./repositories/prisma/member.repository.js";
 
 const tasks = new PrismaTaskRepository(prisma);
 const projects = new PrismaProjectRepository(prisma);

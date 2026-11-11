@@ -1,7 +1,7 @@
 import type { Request, Response } from "express";
 import { authService } from "../container.js";
 import { currentUser } from "../middleware/authenticate.js";
-import type { LoginInput, RegisterInput,RefreshInput } from "../schemas/auth.schemas.js";
+import type { LoginInput, RegisterInput, RefreshInput } from "../schemas/auth.schemas.js";
 
 export async function login(_req: Request, res: Response) {
   res.json({ data: await authService.login(res.locals.body as LoginInput) });

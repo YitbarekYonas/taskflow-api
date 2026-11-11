@@ -32,7 +32,6 @@ export const createTaskSchema = z
   })
   .strict();
 
-
 export const updateTaskSchema = z
   .object({
     title: z.string().trim().min(1).max(200).refine(noNul, NO_NUL_MESSAGE),

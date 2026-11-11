@@ -10,7 +10,8 @@ import { rowFor, startSession } from "../support/sessions.js";
 
 const refresh = (token: string) => api().post("/auth/refresh").send({ refreshToken: token });
 const logout = (token: string) => api().post("/auth/logout").send({ refreshToken: token });
-const me = (accessToken: string) => api().get("/auth/me").set("Authorization", `Bearer ${accessToken}`);
+const me = (accessToken: string) =>
+  api().get("/auth/me").set("Authorization", `Bearer ${accessToken}`);
 const INVALID = "Invalid or expired refresh token.";
 
 describe("POST /auth/refresh", () => {
@@ -187,7 +188,9 @@ describe("POST /auth/logout-all", () => {
     const laptop = await startSession(user);
     const strangers = await startSession(other);
 
-    const res = await api().post("/auth/logout-all").set("Authorization", `Bearer ${await signAccessToken(user.id)}`);
+    const res = await api()
+      .post("/auth/logout-all")
+      .set("Authorization", `Bearer ${await signAccessToken(user.id)}`);
 
     expect(res.status).toBe(204);
     expect((await refresh(phone.token)).status).toBe(401);
@@ -200,17 +203,19 @@ describe("purging expired tokens", () => {
   it("removes only rows that are already expired, and keeps used and revoked rows that could still matter", async () => {
     const user = await createUser();
     await startSession(user, { expiresAt: new Date(Date.now() - 60_000) }); // expired: goes
-    const valid = await startSession(user);                                  // valid: stays
+    const valid = await startSession(user); // valid: stays
     const used = await startSession(user);
-    await refresh(used.token);                                               // used: stays (replay detection needs it)
+    await refresh(used.token); // used: stays (replay detection needs it)
     const revoked = await startSession(user);
-    await logout(revoked.token);                                             // revoked: stays
+    await logout(revoked.token); // revoked: stays
 
     const removed = await authService.purgeExpired();
 
     expect(removed).toBe(1);
     for (const t of [valid.token, used.token, revoked.token]) {
-      expect(await prisma.refreshToken.count({ where: { tokenHash: hashRefreshToken(t) } })).toBe(1);
+      expect(await prisma.refreshToken.count({ where: { tokenHash: hashRefreshToken(t) } })).toBe(
+        1,
+      );
     }
   });
 });

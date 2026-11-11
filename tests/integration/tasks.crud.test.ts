@@ -6,7 +6,6 @@ import { createProject, createTask, createUser } from "../support/factories.js";
 import { team } from "../support/scenarios.js";
 // The same cast in every test: an owner, a plain member and a stranger
 
-
 describe("tasks require authentication", () => {
   it.each([
     ["get", "/tasks"],
@@ -42,12 +41,21 @@ describe("POST /tasks", () => {
 
   it("creates a task inside a project the caller belongs to", async () => {
     const { member, project } = await team();
-    const res = await (await asUser(member)).post("/tasks", {
-      title: "Shared work", priority: "high", dueDate: "2030-01-31", projectId: project.id,
+    const res = await (
+      await asUser(member)
+    ).post("/tasks", {
+      title: "Shared work",
+      priority: "high",
+      dueDate: "2030-01-31",
+      projectId: project.id,
     });
 
     expect(res.status).toBe(201);
-    expect(res.body.data).toMatchObject({ projectId: project.id, priority: "high", dueDate: "2030-01-31" });
+    expect(res.body.data).toMatchObject({
+      projectId: project.id,
+      priority: "high",
+      dueDate: "2030-01-31",
+    });
   });
 
   it("answers 400, and stores nothing, for a project the caller cannot see", async () => {
@@ -107,26 +115,43 @@ describe("GET /tasks/:id", () => {
 
     for (const res of responses) {
       expect(res.status).toBe(404);
-      expect(res.body).toEqual({ error: { message: expect.stringMatching(/^No task with id \d+\.$/) } });
+      expect(res.body).toEqual({
+        error: { message: expect.stringMatching(/^No task with id \d+\.$/) },
+      });
     }
   });
 
-  it.each(["abc", "0", "-1", "99999999999999999999999"])("answers 400 for the id %j", async (id) => {
-    const { member } = await team();
-    expect((await (await asUser(member)).get(`/tasks/${id}`)).status).toBe(400);
-  });
+  it.each(["abc", "0", "-1", "99999999999999999999999"])(
+    "answers 400 for the id %j",
+    async (id) => {
+      const { member } = await team();
+      expect((await (await asUser(member)).get(`/tasks/${id}`)).status).toBe(400);
+    },
+  );
 });
 
 describe("PATCH /tasks/:id", () => {
   it("lets any member edit a teammate's task, changing only the sent fields", async () => {
     const { owner, member, project } = await team();
-    const task = await createTask({ project, createdBy: owner, title: "Original", priority: "high" });
+    const task = await createTask({
+      project,
+      createdBy: owner,
+      title: "Original",
+      priority: "high",
+    });
 
     const res = await (await asUser(member)).patch(`/tasks/${task.id}`, { status: "in_progress" });
 
     expect(res.status).toBe(200);
-    expect(res.body.data).toMatchObject({ id: task.id, status: "in_progress", title: "Original", priority: "high" });
-    expect((await prisma.task.findUniqueOrThrow({ where: { id: task.id } })).status).toBe("in_progress");
+    expect(res.body.data).toMatchObject({
+      id: task.id,
+      status: "in_progress",
+      title: "Original",
+      priority: "high",
+    });
+    expect((await prisma.task.findUniqueOrThrow({ where: { id: task.id } })).status).toBe(
+      "in_progress",
+    );
   });
 
   it("clears a due date when null is sent", async () => {
@@ -168,7 +193,9 @@ describe("PATCH /tasks/:id", () => {
       const res = await (await asUser(member)).patch(`/tasks/${task.id}`, { projectId: null });
 
       expect(res.status).toBe(403);
-      expect((await prisma.task.findUniqueOrThrow({ where: { id: task.id } })).projectId).toBe(project.id);
+      expect((await prisma.task.findUniqueOrThrow({ where: { id: task.id } })).projectId).toBe(
+        project.id,
+      );
     });
 
     it("is allowed for the task's creator, into another project they belong to", async () => {
@@ -197,7 +224,9 @@ describe("PATCH /tasks/:id", () => {
       const elsewhere = await createProject({ owner: stranger });
       const task = await createTask({ project, createdBy: member });
 
-      const res = await (await asUser(member)).patch(`/tasks/${task.id}`, { projectId: elsewhere.id });
+      const res = await (
+        await asUser(member)
+      ).patch(`/tasks/${task.id}`, { projectId: elsewhere.id });
 
       expect(res.status).toBe(400);
       expect(res.body.error.message).toBe(`Project ${elsewhere.id} does not exist.`);
@@ -245,7 +274,9 @@ describe("DELETE /tasks/:id", () => {
   it("deletes the task's comments with it (cascade)", async () => {
     const { owner, project } = await team();
     const task = await createTask({ project, createdBy: owner });
-    await prisma.comment.create({ data: { taskId: task.id, author: "Olga", authorId: owner.id, body: "hello" } });
+    await prisma.comment.create({
+      data: { taskId: task.id, author: "Olga", authorId: owner.id, body: "hello" },
+    });
 
     await (await asUser(owner)).delete(`/tasks/${task.id}`);
 
@@ -254,11 +285,14 @@ describe("DELETE /tasks/:id", () => {
 });
 describe("due dates on creation", () => {
   // Computed relative to now, so the tests never go stale
-  const daysFromNow = (days: number) => new Date(Date.now() + days * 86_400_000).toISOString().slice(0, 10);
+  const daysFromNow = (days: number) =>
+    new Date(Date.now() + days * 86_400_000).toISOString().slice(0, 10);
 
   it("rejects a due date in the past with 400 and a clear message", async () => {
     const { member } = await team();
-    const res = await (await asUser(member)).post("/tasks", { title: "x", dueDate: daysFromNow(-3) });
+    const res = await (
+      await asUser(member)
+    ).post("/tasks", { title: "x", dueDate: daysFromNow(-3) });
 
     expect(res.status).toBe(400);
     expect(res.body.error.message).toBe("Due date cannot be in the past.");
@@ -267,7 +301,9 @@ describe("due dates on creation", () => {
 
   it("accepts a future due date", async () => {
     const { member } = await team();
-    const res = await (await asUser(member)).post("/tasks", { title: "x", dueDate: daysFromNow(3) });
+    const res = await (
+      await asUser(member)
+    ).post("/tasks", { title: "x", dueDate: daysFromNow(3) });
 
     expect(res.status).toBe(201);
   });
@@ -276,7 +312,9 @@ describe("due dates on creation", () => {
     const { member } = await team();
     const task = await createTask({ createdBy: member, dueDate: daysFromNow(10) });
 
-    const res = await (await asUser(member)).patch(`/tasks/${task.id}`, { dueDate: daysFromNow(-3) });
+    const res = await (
+      await asUser(member)
+    ).patch(`/tasks/${task.id}`, { dueDate: daysFromNow(-3) });
 
     expect(res.status).toBe(200);
   });

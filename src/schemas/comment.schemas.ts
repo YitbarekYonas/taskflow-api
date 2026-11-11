@@ -9,7 +9,6 @@ export const createCommentSchema = z
   })
   .strict();
 
-
 export const updateCommentSchema = z.object({ body }).strict();
 
 export type NewComment = z.infer<typeof createCommentSchema>;

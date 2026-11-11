@@ -13,7 +13,7 @@ let counter = 0;
 type Person = { id: number };
 
 export async function createUser(
-  overrides: { email?: string; name?: string; passwordHash?: string } = {}
+  overrides: { email?: string; name?: string; passwordHash?: string } = {},
 ) {
   const n = ++counter;
   return prisma.user.create({
@@ -56,7 +56,7 @@ export async function createTask(
     createdAt?: string;
     project?: Person;
     createdBy?: Person;
-  } = {}
+  } = {},
 ) {
   const n = ++counter;
   return prisma.task.create({

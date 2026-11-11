@@ -33,14 +33,19 @@ export class PrismaMemberRepository implements MemberRepository {
     try {
       await this.prisma.projectMember.create({ data: { projectId, userId, role } });
     } catch (err) {
-      if (isPrismaError(err, "P2002")) throw new DuplicateError("This user is already a member of the project.");
-      if (isPrismaError(err, "P2003")) throw new InvalidReferenceError("The project or user does not exist.");
+      if (isPrismaError(err, "P2002"))
+        throw new DuplicateError("This user is already a member of the project.");
+      if (isPrismaError(err, "P2003"))
+        throw new InvalidReferenceError("The project or user does not exist.");
       throw err;
     }
   }
 
   async setRole(projectId: number, userId: number, role: Role) {
-    const result = await this.prisma.projectMember.updateMany({ where: { projectId, userId }, data: { role } });
+    const result = await this.prisma.projectMember.updateMany({
+      where: { projectId, userId },
+      data: { role },
+    });
     return result.count === 1;
   }
 

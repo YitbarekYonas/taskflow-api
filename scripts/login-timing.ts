@@ -21,4 +21,6 @@ async function median(email: string) {
 }
 
 console.log(`existing email, wrong password: ${(await median("sam@example.com")).toFixed(1)} ms`);
-console.log(`unknown email:                  ${(await median("nobody@example.com")).toFixed(1)} ms`);
+console.log(
+  `unknown email:                  ${(await median("nobody@example.com")).toFixed(1)} ms`,
+);

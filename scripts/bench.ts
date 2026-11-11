@@ -16,7 +16,8 @@ const loginRes = await fetch(`${base}/auth/login`, {
     password: process.env.BENCH_PASSWORD ?? "dev-password-123",
   }),
 });
-if (!loginRes.ok) throw new Error(`login failed with ${loginRes.status}; run npm run db:fresh first`);
+if (!loginRes.ok)
+  throw new Error(`login failed with ${loginRes.status}; run npm run db:fresh first`);
 const authHeaders = { Authorization: `Bearer ${(await loginRes.json()).data.accessToken}` };
 
 async function time(path: string): Promise<number> {

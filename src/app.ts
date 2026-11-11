@@ -11,7 +11,7 @@ import { projectsRouter } from "./routes/projects.routes.js";
 import { tasksRouter } from "./routes/tasks.routes.js";
 import { authRouter } from "./routes/auth.routes.js";
 import { authenticate } from "./middleware/authenticate.js";
-import { globalLimiter} from "./middleware/limiters.js";
+import { globalLimiter } from "./middleware/limiters.js";
 
 export function createApp() {
   const app = express();
@@ -27,7 +27,7 @@ export function createApp() {
     app.use(
       "/docs",
       swaggerUi.serve,
-      swaggerUi.setup(openApiSpec, { customSiteTitle: "TaskFlow API docs" })
+      swaggerUi.setup(openApiSpec, { customSiteTitle: "TaskFlow API docs" }),
     );
   }
 
@@ -39,7 +39,7 @@ export function createApp() {
       allowedHeaders: ["Content-Type", "X-Request-Id", "Authorization"],
       exposedHeaders: ["X-Request-Id", "Location"],
       maxAge: 600,
-    })
+    }),
   );
   app.use(requestId);
   app.use(requestLogger);
@@ -49,7 +49,6 @@ export function createApp() {
   app.get("/health", (_req, res) => {
     res.json({ status: "ok", uptime: process.uptime() });
   });
-
 
   app.use("/tasks", authenticate, tasksRouter);
   app.use("/projects", authenticate, projectsRouter);

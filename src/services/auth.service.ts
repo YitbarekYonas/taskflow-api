@@ -1,9 +1,5 @@
 import { hashPassword, verifyPassword } from "../auth/password.js";
-import {
-  generateRefreshToken,
-  hashRefreshToken,
-  newFamilyId,
-} from "../auth/refreshTokens.js";
+import { generateRefreshToken, hashRefreshToken, newFamilyId } from "../auth/refreshTokens.js";
 import { signAccessToken, verifyAccessToken } from "../auth/tokens.js";
 import { config } from "../config.js";
 import { UnauthorizedError } from "../errors.js";
@@ -72,7 +68,9 @@ export function createAuthService({ users, refreshTokens }: Deps) {
     // Kill the whole family so neither the thief nor the original holder keeps access.
     if (record.usedAt) {
       await refreshTokens.revokeFamily(record.familyId);
-      logger.error(`Refresh token reuse detected: user ${record.userId}, family ${record.familyId}`);
+      logger.error(
+        `Refresh token reuse detected: user ${record.userId}, family ${record.familyId}`,
+      );
       throw invalidRefresh();
     }
 

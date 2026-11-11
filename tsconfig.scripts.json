@@ -1,5 +1,13 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": { "rootDir": ".", "noEmit": true },
-  "include": ["src", "scripts", "prisma/seed.ts", "tests", "vitest.config.ts","vitest.integration.config.ts","vitest.coverage.config.ts"]
+  "include": [
+    "src",
+    "scripts",
+    "prisma/seed.ts",
+    "tests",
+    "vitest.config.ts",
+    "vitest.integration.config.ts",
+    "vitest.coverage.config.ts"
+  ]
 }
