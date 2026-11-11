@@ -7,7 +7,6 @@ const dateString = z
   .regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD")
   .refine((v) => !Number.isNaN(Date.parse(v)), "Not a real date");
 
-
 export const SORT_FIELDS = ["createdAt", "dueDate", "priority", "title"] as const;
 
 export const listTasksQuerySchema = z.object({

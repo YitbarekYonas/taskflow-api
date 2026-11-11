@@ -26,15 +26,15 @@ purgeTimer.unref(); // never keep the process alive just for this timer
 function shutdown(signal: string) {
   clearInterval(purgeTimer);
   logger.info(`${signal} received, shutting down`);
-server.close(() => {
-  prisma.$disconnect().then(
-    () => process.exit(0),
-    (error: unknown) => {
-      logger.error("Disconnect failed during shutdown:", error);
-      process.exit(1);
-    },
-  );
-});
+  server.close(() => {
+    prisma.$disconnect().then(
+      () => process.exit(0),
+      (error: unknown) => {
+        logger.error("Disconnect failed during shutdown:", error);
+        process.exit(1);
+      },
+    );
+  });
 }
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));

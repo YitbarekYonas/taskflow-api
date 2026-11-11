@@ -1,7 +1,7 @@
 import type { Project as ProjectRow } from "../../generated/prisma/client.js";
 import type { Db } from "./db.js";
 import type { Project } from "../../types.js";
-import type { ProjectRepository} from "../repository.js";
+import type { ProjectRepository } from "../repository.js";
 import { isPrismaError, mapDeleteError } from "./errors.js";
 
 type ProjectData = Omit<Project, "id">;
