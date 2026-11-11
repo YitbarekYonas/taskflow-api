@@ -171,6 +171,22 @@
 - **Keep one smoke test.** The suite runs your source through Vitest. Only `smoke.ts` runs the **compiled** `dist/` server over real HTTP — the thing that actually ships. It stays small (~12 checks) and runs after every deploy in Week 7.
 - **`verify.sh` restarts the server between `smoke` and `test:ratelimit`.** The limiter's in-memory counters reset on restart, so `test:ratelimit` gets a fresh budget even though it runs after `test:integration` and `smoke`. Combined with the double-mount fix, this makes `verify.sh` green end-to-end.
 
+### Week 5 (Linting, Formatting & Git Hooks)
+- **Three tools, three jobs.** The **compiler** checks types. The **linter** (ESLint) finds code that type-checks but is probably wrong. The **formatter** (Prettier) decides how code looks. They overlap very little; they are not interchangeable.
+- **Don't make the linter do formatting.** Prettier formats. ESLint finds bugs. `eslint-config-prettier` switches off ESLint's style rules so the two never fight, and it goes **last** in the config.
+- **Type-aware rules are the valuable ones.** `no-floating-promises` catches a promise nobody awaited (a silently failing DB write). `no-misused-promises` catches an `async` function passed where a plain callback is expected, so its rejections vanish. These need type information, which makes linting slower (seconds, not ms).
+- **Flat config.** Modern ESLint uses one `eslint.config.mjs` (no `.eslintrc`, no `.eslintignore`). Ignores are a config block with only `ignores`. Order matters: later blocks override earlier ones.
+- **Errors, not warnings.** A warning nobody fixes is noise, and a codebase with 300 warnings has stopped reading them. Use `error` + `--max-warnings 0`.
+- **Choose rules deliberately.** A rule is worth having if it prevents a *real* bug class. A rule that fires on correct code teaches people to ignore the linter. Turned `require-await` off on purpose and wrote why.
+- **Disabling a rule is a decision, so explain it.** `// eslint-disable-next-line rule -- reason`. `reportUnusedDisableDirectives` makes a stale disable an error.
+- **A big reformat is its own commit.** Mixing "format everything" with a logic change makes the diff unreadable. Do it alone, then list that commit in `.git-blame-ignore-revs` so `git blame` skips it.
+- **Hooks are for speed, CI is for truth.** A pre-commit hook should take ~2s, so it only checks **staged files** (`lint-staged`). Slower checks go in `pre-push` or CI. Hooks live on each dev's machine and can be skipped (`git commit --no-verify`); only CI is a real gate (Week 7).
+- **Linters can enforce architecture.** `no-restricted-imports` per folder turns "controllers must not talk to the database" from a convention into a failing check (an *architecture fitness function*). Day 11's composition-root decision became executable.
+- **`prepare: "husky || true"`.** Husky installs via an npm `prepare` script. A production `npm ci --omit=dev` doesn't install Husky, so `"prepare": "husky"` would crash the install. The `|| true` is the Week 7 safeguard.
+- **The parser version pins ESLint's choice of TypeScript.** `typescript-eslint` needs a TypeScript API. The project's `typescript` was 7.x (native Go compiler, API removed), so `npm i -D eslint typescript-eslint ...` failed with `ERESOLVE`. Fixed with the official side-by-side alias: `@typescript/native@npm:typescript@^7.0.2` + `typescript@npm:@typescript/typescript6@^6.0.2`. `npx tsc` → 7.0.2, `npx tsc6` → 6.0.3, both work.
+- **24 findings on the first run is normal.** `recommendedTypeChecked` is aggressive. Read the *top five rules*, not every line. Triage by category (delete dead code, fix the real bug, narrow types, one disable-with-reason), not by file.
+- **Disable a rule once, at the top of a file, with a reason.** The `errorHandler.ts` case (`no-unsafe-member-access` × 10 on Express's untyped error objects) is the textbook example. A full `errorShape()` guard is a Day 34+ job; one disable comment is the honest answer this week.
+
 ## Checkpoint answers (Days 2–6)
 
 *(Skipped or filled in as you go)*
@@ -790,6 +806,198 @@ git rm scripts/token-attacks.ts scripts/auth-coverage.ts scripts/refresh-flow.ts
 
 **`scripts/verify.sh`** now runs `test:unit test:integration smoke test:ratelimit`, restarting the compiled server between `smoke` and `test:ratelimit` so the limiter gets a fresh in-memory budget. The restart step is what makes `test:ratelimit` deterministic now that `test:integration` and `smoke` share the server.
 
+## Day 33 Checkpoint Answers
+1. **What does each of the compiler, ESLint, and Prettier catch that the other two don't?**
+   > The compiler checks **types**. ESLint checks **type-safe code that's probably wrong** (floating promises, misused promises, unused vars, `==`, `any` leaking into typed code). Prettier checks **formatting only**. They barely overlap: the compiler never mentions a forgotten `await`, ESLint never mentions a formatting preference, Prettier never mentions a bug.
+2. **Why does `eslint-config-prettier` go last in the config?**
+   > It switches off every ESLint rule that would fight the formatter. If it went anywhere but last, later blocks could re-enable a style rule and cause a conflict (e.g., ESLint says "wrap this line" and Prettier says "don't"). Last position guarantees no rule fights Prettier.
+3. **What does `no-floating-promises` protect you from, and why can a passing test suite still hide that bug?**
+   > A forgotten `await` on an async call: the promise rejects silently, the error disappears. A test only catches it if it happens to check the exact side effect that got lost — e.g., it asserts "the row exists" and the insert was awaited, so the test passes; but if it asserts "the user was notified" and the email send was floating, the test can't know. The linter catches the missing `await` regardless of what the test asserts.
+4. **Why is `require-await` switched off, and how do you decide whether to disable a rule?**
+   > It fires on correct code: `async function f(): Promise<void> { return db.create(...) }` returns a promise without `await`ing it, which is fine, and thrown errors still become rejections. A rule that fires on correct code teaches people to ignore the linter. Disable only when (a) the rule fires on correct code, and (b) you write down why — either a comment for one line, or a documented reason in the config.
+5. **Why was the formatting commit made on its own, and what does `.git-blame-ignore-revs` do?**
+   > A 100-file formatting diff mixed with a logic change is unreadable — you can't review it and `git bisect` becomes useless. `.git-blame-ignore-revs` records the formatting commit's hash so `git blame` skips it: the blame on a line still points at the commit that introduced the logic, not the one that reformatted it.
+6. **Why does pre-commit lint only staged files, while pre-push and CI check everything?**
+   > Pre-commit must be fast (~2s), so `lint-staged` only runs on files in the upcoming commit. Pre-push is slower by design (~10s) because it protects the shared branch: typecheck + unit tests on the whole project catch a broken `import` that staged-files-only would miss. CI is the full gate (~1min), plus integration tests, plus the compiled server.
+7. **Why can a Git hook never be the only gate, and what is?**
+   > Hooks live on each developer's machine and can be skipped with `git commit --no-verify` / `git push --no-verify`. Anyone can bypass them. Only **CI** — running `npm run ci` on a fresh checkout of the actual commit — is a real gate, because no developer can bypass it.
+8. **What would go wrong in a production Docker build if the `prepare` script were just `"husky"`?**
+   > `npm ci --omit=dev` doesn't install `devDependencies`, so Husky isn't present, and `"prepare": "husky"` would fail the install. `"husky || true"` makes the install continue: if Husky is present, install the hooks; if not, don't fail the build.
+
+## Day 33 Observations
+
+### Step 1 — Prettier
+
+- **`format:check` before reformatting:** first run reported **114 files** (before fixing `.prettierignore`). After fixing the Markdown exclusion: **108 files** needed reformatting — all source, tests, scripts, and root configs that had never been through a formatter. Expected for a project this size.
+- The 6 files that dropped out were all `.md` (README, CHANGELOG, SECURITY, notes.md, docs/THREAT_MODEL.md, .github/pull_request_template.md). The `*.md` line in `.prettierignore` wasn't being applied on the first run; after confirming the file lived in the project root and the pattern was `*.md`, the count dropped to 108.
+- **Three commits, in order:**
+  1. `chore: add prettier and editorconfig` — config only.
+  2. `style: format the codebase with prettier (no behavior change)` — the giant reformat. Verified with `typecheck:all && npm test` before committing.
+  3. `chore: ignore the formatting commit in git blame` — wrote the format commit's hash (parent of this commit) to `.git-blame-ignore-revs`, ran `git config blame.ignoreRevsFile .git-blame-ignore-revs`. Confirmed `git blame src/services/slug.ts` still shows the original author.
+
+### Step 3–5 — ESLint install and first run
+
+**Dependency conflict:** `typescript-eslint@8.72.2` declares `typescript >=4.8.4 <6.1.0`. The project had `typescript@^7.0.2` (native Go compiler, JS API removed). `npm i -D eslint typescript-eslint ...` failed with `ERESOLVE`.
+
+**Fix (official side-by-side pattern):**
+1. `npm uninstall typescript`
+2. `npm i -D @typescript/native@npm:typescript@^7.0.2 typescript@npm:@typescript/typescript6@^6.0.2`
+3. `rm -rf node_modules package-lock.json && npm install`
+4. `npm i -D eslint @eslint/js typescript-eslint eslint-config-prettier globals`
+
+**Verify split:**
+- `npx tsc --version` → **7.0.2**
+- `npx tsc6 --version` → **6.0.3**
+
+ESLint installed clean without `--force` or `--legacy-peer-deps`. `npm audit --omit=dev` → 0 vulnerabilities (the 10 moderate advisories were dev-only, in ESLint's transitive deps; not fixed to avoid a breaking downgrade).
+
+**First run (`time npm run lint`):** **24 errors, 0 warnings, ~9.8s**. Top-five rules by count:
+| Rule | Count | Where |
+|---|---|---|
+| `@typescript-eslint/no-unsafe-*` (assignment / member-access) | 10 | `src/middleware/errorHandler.ts` |
+| `@typescript-eslint/no-unused-vars` | 7 | config.ts, openapi.ts, project.repository.ts ×2, task.repository.ts, task.schemas.ts, tasks.crud.test.ts |
+| `@typescript-eslint/consistent-type-imports` | 3 | task.repository.ts, slug.test.ts |
+| `no-console` | 1 | logger.ts |
+| `no-misused-promises` | 1 | server.ts |
+
+Plus one-offs: `no-unnecessary-type-assertion`, `no-loss-of-precision`, `preserve-caught-error`.
+
+`lint:fix` auto-fixed 2 (both `consistent-type-imports`), leaving **22** for manual triage.
+
+### Step 7 — 12 fixes
+
+Every finding was "fix the code", except #2 (intentionally unused via `_` prefix) and #12 (disable a rule with a written reason). After all 12:
+
+- `npm run lint` → **0 problems**
+- `npm run typecheck:all` → green
+- `npm test` → **150 unit + 248 integration**, green
+
+Committed as `fix: resolve lint findings (shutdown promise handling, unused code and unsafe any)`.
+
+| # | File | Fix |
+|---|---|---|
+| 1 | `src/config.ts` | deleted unused `path` import |
+| 2 | `src/docs/openapi.ts` | renamed `$schema` → `_schema` (intentionally discarded) |
+| 3 | `src/logger.ts` | `console.log` → `console.error` (logs to stderr; Day 34 replaces this file) |
+| 4 | `project.repository.ts` | removed unused `Repository`, `mapWriteError` imports |
+| 5 | `task.repository.ts` | removed unused `Repository` import |
+| 6 | `task.schemas.ts` | `title` constant now used by `createTaskSchema`/`updateTaskSchema` (or removed if equivalent) |
+| 7 | `src/server.ts` | `async` callback → explicit `.then(ok, err)` chain (**real bug** — shutdown would hang on disconnect failure) |
+| 8 | `auth.sessions.test.ts` | oversized number → 12345 (still a number, still rejected) |
+| 9 | `tasks.crud.test.ts` | removed unused `createUser` import |
+| 10 | `globalSetup.ts` | added `{ cause: error }` (original DB error preserved) |
+| 11 | `slug.test.ts` | inline `import()` type → `import type * as NodeCrypto` + `typeof NodeCrypto` |
+| 12 | `errorHandler.ts` | one `eslint-disable` at top with written reason (10 `no-unsafe-*` errors on Express's untyped error objects) |
+
+**Why #12 is the disable path, not a type guard:** The file reads Express and express-rate-limit errors that are plain objects, not Error instances. A full `errorShape()` guard across every branch is a Day 34+ job. One `eslint-disable` at the top with a written reason is the correct "change the rule" answer this week, per the lesson's "disabling a rule is a decision" guidance. (An attempted `errorShape()` guard broke TypeScript syntax during the edit; restored from git and took the disable path.)
+
+### Step 8 — proving the linter catches what tests can't
+
+Created `src/scratch.ts` with the five planted bugs. **`npm run typecheck:all` passed on this file** — every bug was type-safe TypeScript. `npx eslint src/scratch.ts` produced **8 errors**:
+
+| Experiment item | Rule |
+|---|---|
+| `save("a")` (floating promise) | `@typescript-eslint/no-floating-promises` |
+| `setInterval(async () => …)` (misused promise) | `@typescript-eslint/no-misused-promises` |
+| `const unused = 5` (dead var) | `@typescript-eslint/no-unused-vars` |
+| `input == null` (`==` vs `===`) | `eqeqeq` |
+| `console.log(input)` | `no-console` |
+| `const x: any = input` | `@typescript-eslint/no-explicit-any` |
+| `x.foo.bar` | `@typescript-eslint/no-unsafe-return` + `no-unsafe-member-access` |
+
+Deleted the file after the run.
+
+### Step 9 — the architecture rule fires where it should
+
+**Test 1 — controller:** Added `import { prisma } from "../db.js"; void prisma;` at the top of `src/controllers/tasks.controller.ts` → `npx eslint` reported:
+
+```
+1:1  error  '../db.js' import is restricted from being used by a pattern.
+     This layer must not use Prisma or the database directly. Go through a repository
+     interface (see src/container.ts).
+     no-restricted-imports
+```
+
+Rule works.
+
+**Test 2 — server:** Same import in `src/server.ts` → no `no-restricted-imports` error. Allowed (the server owns the shutdown; it needs Prisma to disconnect).
+
+**Test 3 — cli:** Same import in `src/cli.ts` → no `no-restricted-imports` error. Allowed (the CLI is a composition root).
+
+Reverted all three with `git restore src`.
+
+**Which Day 11 decision does this enforce?** The **composition root**. On Day 11 I decided `src/container.ts` is the only place allowed to construct concrete repository implementations (`new PrismaTaskRepository(prisma)`). Controllers call services, services call repository interfaces, and only the composition root wires the concrete implementations together. The `no-restricted-imports` rule makes that architectural boundary a **failing check** instead of a convention.
+
+**What would happen to a new dev who "just needs one quick query" in a controller?**
+
+1. **The pre-commit hook blocks the commit** — they can't push it without addressing the error.
+2. **`npm run lint` / `npm run ci` fails in CI** — the branch doesn't merge.
+3. **The error message tells them where to go** — "Go through a repository interface (see src/container.ts)" — so the fix is discoverable.
+4. **If they insist**, they can add `// eslint-disable-next-line no-restricted-imports -- reason`, but the reason must be written, which forces a review conversation with whoever merges the PR. The rule doesn't make the wrong path *impossible*, but it makes it *visible*.
+
+### Step 10–11 — Git hooks
+
+**Install:**
+```bash
+npm i -D husky lint-staged
+npx husky init
+```
+
+`package.json` `prepare` changed from `"husky"` (set by `husky init`) to `"husky || true"` (Week 7 production-install safeguard). `lint-staged` config added at the top level of `package.json` (a sibling of `"scripts"`, not inside it):
+
+```json
+"lint-staged": {
+  "*.ts": ["eslint --fix --max-warnings 0", "prettier --write"],
+  "*.{json,yml,yaml,mjs}": "prettier --write"
+}
+```
+
+`.husky/pre-commit` → `npx lint-staged`; `.husky/pre-push` → `npm run typecheck:all` + `npm run test:unit`; `chmod +x` on both.
+
+**Commit landed as `3b9d902 chore: add husky hooks and lint-staged` (both files `100755`, executable).**
+
+**The 5 hook behavior tests:**
+
+1. **Lint blocks commit:** `export const x: any = 1;` → `git commit` failed with `@typescript-eslint/no-explicit-any` from `lint-staged`. `git log --oneline -1` showed the prior commit — nothing landed. File remained on disk.
+2. **Format auto-fixes:** `export const y   =    1` → commit succeeded (`58b0604 test: format autofix`); `git show HEAD:src/hooktest.ts` showed `export const y = 1;` (Prettier reformatted and re-staged).
+3. **Speed:** `time git commit --allow-empty` → `real 0.852s`. `lint-staged` reported "no staged files" — hook still ran, no-ops, commit landed empty.
+4. **`--no-verify` bypass:** same lint error, `git commit --no-verify` → landed as `099eba2 test: bypass`. Undone. **Lesson:** hooks are local conveniences, not gates. CI is the gate.
+5. **Pre-push blocks broken test:** broke `toHaveLength(50)` → `99` in `slug.test.ts`, `git push` → **stopped** with `husky - pre-push script failed (code 1)` and `error: failed to push some refs`. Restored with `git restore`. Push then succeeded.
+
+All throwaway files reverted. Nothing kept.
+
+**One syntax-error incident during Step 7's `errorHandler.ts` edit:** a mid-edit `errorShape()` guard broke the parser (`'e' is assigned a value but never used` on line 28 + `Parsing error: ':' expected` on line 48). Recovered by `git restore src/middleware/errorHandler.ts` and taking the disable-with-reason path.
+
+### Step 12 — precheck and ci scripts
+
+`precheck`: `typecheck:all && lint && format:check && test:unit && build` (~30s)
+`ci`: `precheck && test:integration` (~1min — the whole pipeline, what Week 7 will run)
+
+**Caught real drift:** after the 12 manual lint fixes, 7 files were formatted differently from Prettier's output (`src/docs/openapi.ts`, `project.repository.ts`, `task.schemas.ts`, `server.ts`, `auth.sessions.test.ts`, `tasks.crud.test.ts`, `globalSetup.ts`). `npm run format` reformatted them; committed as `style: format files edited during lint fixes`; `npm run ci` green end-to-end after.
+
+### Step 13 — editor settings
+
+`.vscode/extensions.json` recommends ESLint + Prettier + EditorConfig.
+`.vscode/settings.json` enables format-on-save and ESLint autofix-on-save.
+Committed with the precheck/ci scripts as `chore: add precheck and ci scripts, editor settings`.
+
+### The workflow, as documented in README
+
+| Layer | Runs | Takes | Catches |
+|---|---|---|---|
+| Editor | as you type | instant | typos, formatting |
+| pre-commit | staged files | ~2s | lint errors, formatting |
+| pre-push | whole project | ~10s | type errors, broken unit tests |
+| `npm run ci` | everything but compiled server | ~1min | all of the above + integration tests |
+| `npm run verify` | compiled server end to end | ~1min | packaging problems |
+
+### Why the formatter still drifted twice
+
+1. First drift: after `npm run format` (Step 1's big commit) and before the 12 ESLint fixes — the fixes edited 7 files without reformatting them.
+2. Second (would-be) drift: after fixing `format:check` failure, another `npm run format` and commit.
+
+Both fixed by the same one-liner (`npm run format` + `git add -A` + commit). The lesson: `format:check` in `precheck` is the safety net. If it had been in `pre-commit` too, the drift would never have left a commit — but that would make pre-commit slow (full-repo Prettier), which defeats the point.
+
 ## OWASP API Top 10 (Day 27 Review)
 
 | Risk | In TaskFlow | Where | Gap? |
@@ -855,6 +1063,10 @@ git rm scripts/token-attacks.ts scripts/auth-coverage.ts scripts/refresh-flow.ts
 24. **Five scripts retired:** `token-attacks`, `auth-coverage`, `refresh-flow`, `access-attacks`, `security-checks` (and their `package.json` commands). Their replacements are the integration suites listed above; the mutation table rows 1–4, 6, 8–10 are the evidence that each bug the scripts caught is now caught by the suite.
 25. **`smoke.ts` is intentionally small (12 checks):** It's a post-build check of the *compiled* `dist/` server, not a behavior suite. Detailed behavior is `npm test`'s job; if a check needs adding, it goes in an integration test, not in `smoke.ts`.
 26. **`verify.sh` restarts the compiled server between `smoke` and `test:ratelimit`:** In-memory rate-limit counters must start at zero for `test:ratelimit`, and `test:integration` + `smoke` will have drained them on the shared server. The restart is what makes `verify.sh` green end-to-end. If `test:ratelimit` ever fails after a clean restart, the bug is in the limiter or the script's setup — not in the ordering.
+27. **`eslint-config-prettier` is the only rule-disabling plugin:** Every ESLint rule disabled in `eslint.config.mjs` (e.g., `require-await`) has a written reason. `errorHandler.ts` has one file-level `eslint-disable` for `no-unsafe-member-access`/`no-unsafe-assignment`, with a reason on the line. Disables are decisions, not shortcuts.
+28. **`no-restricted-imports` is the architecture fitness function:** It makes `src/container.ts` the only place that constructs concrete repositories; controllers, routes, services, auth, middleware, and schemas cannot import `../db.js` or `src/repositories/prisma/**`. Verified in Step 9: blocked in a controller, allowed in `server.ts` and `cli.ts`.
+29. **`precheck` / `ci` catch drift the individual scripts can miss:** The first `npm run ci` found 7 files that had drifted from Prettier's output after the ESLint fixes. `format:check` is the canary — it's cheap and it never lies.
+30. **Hooks are not the gate:** the pre-commit hook was bypassed with `--no-verify` in Test 4, and `pre-push` was bypassed the same way. Only `npm run ci` on a fresh checkout is a real gate. This is why Week 7's pipeline will run `npm run ci` and never `git push`.
 
 ## Week 1 summary
 Three things I can do now that I couldn't on Day 1:
@@ -935,3 +1147,28 @@ Three more things I can do now that I couldn't on Day 31:
 - Test **sessions end-to-end**: refresh rotation, reuse detection, logout, logout-all, purge, expired-token behavior, parallel-refresh race, and the documented "access token survives logout" limitation.
 - Run **combined coverage** (unit + integration) with a **ratcheted threshold** and prove the guard fails when it should.
 - **Retire scripts safely**: only after re-introducing the exact bugs they caught and confirming the suite now catches them, then shrink `smoke.ts` to a post-build check of the compiled server.
+
+Three more things I can do now that I couldn't on Day 32:
+- Set up **Prettier + EditorConfig** and land the giant reformat as an isolated commit that `git blame` skips via `.git-blame-ignore-revs`.
+- Install **ESLint flat config with type-aware rules** — including the side-by-side TypeScript 7 / TypeScript 6 alias workaround for `typescript-eslint`'s peer dependency — and triage a real `recommendedTypeChecked` findings pile down to zero.
+- Enforce **architecture** with `no-restricted-imports`: controllers/routes/services/auth/middleware/schemas can't import Prisma; only `container.ts`, `server.ts`, and `cli.ts` can.
+- Install **Husky + lint-staged** hooks that run in ~2s on staged files, plus a pre-push hook that runs typecheck + unit tests, and prove all five behaviors empirically (block, auto-fix, speed, `--no-verify` bypass, pre-push block).
+- Wire **`precheck` and `ci`** as one command that matches what Week 7's pipeline will run, and add `.vscode/` settings for team consistency.
+
+Things that confused me:
+- The difference between a fake, a stub, and a spy.
+- Why faking *all* timers broke the token tests.
+- Why `fileParallelism: false` is required when files share one database.
+- Why `nulls: "last"` matters only in the **descending** direction.
+- Why a rate-limit test can fail on a *freshly started* server — turned out to be a double-mounted limiter (each request counted twice, effective limit halved) rather than any shared budget or ordering issue.
+- Why `typescript-eslint` needs the side-by-side TypeScript 6/7 alias — the native TypeScript 7 compiler removed the JS API it depends on, and `npm i` doesn't tell you that; the `ERESOLVE` message does.
+- Why 24 lint findings is normal and not a sign the code is bad — `recommendedTypeChecked` is the strictest config; reading the top-five rules turns a wall of errors into a handful of categories.
+
+What I'd do differently:
+- Write the test *before* the code. The `slugify` test found a bug instantly that would have shipped otherwise.
+- Compute the expected sort order by hand from the dataset before running the test, not after it fails. The five minutes I spent on that saved an hour of "is the code wrong or is my reasoning wrong?"
+- When a rate-limit test fails, read the `RateLimit` response header first (`remaining`, `limit`), not the status code. The halving pattern (5→2, 60→30, 30→15) was visible in one probe and would have saved a full day of chasing the wrong hypothesis.
+- Trust the mutation table, not the coverage number. Coverage said "88%, looks fine" while `rateLimit.ts` was at 33% with **zero assertions about its behavior** — and the script covering it was silently broken by a double mount.
+- Don't try the ambitious version of a fix under time pressure. The `errorShape()` guard for `errorHandler.ts` broke the parser mid-edit; the disable-with-reason was correct all along and took 30 seconds.
+- Land the formatting commit and the ESLint fixes as separate commits, and re-run `npm run format` after any multi-file manual edit. `format:check` in `precheck` catches the drift, but only if you remember to run it before committing.
+```

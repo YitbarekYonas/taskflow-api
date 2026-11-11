@@ -9,6 +9,7 @@ A team task-management API built with Node.js, Express, TypeScript, and Prisma.
 - **Core:** Repository pattern, Unit of Work for transactions, Zod validation, strict TypeScript, and centralized error handling.
 - **Database:** PostgreSQL with Prisma ORM, enforcing referential integrity, cascading deletes, and composite indexes for fast queries.
 - **Testing:** Vitest unit tests for pure logic, integration tests against a real, isolated test database via Supertest, and a small post-build smoke test of the compiled server. Coverage thresholds ratchet both suites.
+- **Code quality:** ESLint (flat config, type-aware rules, architecture enforcement), Prettier, Husky pre-commit/pre-push hooks, and `npm run ci` for the exact pipeline CI will run.
 - **Production Middleware:** Security headers (Helmet), CORS, Request IDs, body size limits, and **rate limits**.
 
 ## Setup
@@ -25,6 +26,8 @@ cp .env.example .env
 npm install
 npm run setup
 ```
+
+`npm install` installs the Git hooks via `prepare: "husky || true"`. If you're in an environment without Git (CI runner, fresh container), set `HUSKY=0` before `npm install` to skip the hook installation.
 
 ### Verify
 ```bash
@@ -52,6 +55,35 @@ npm start       # Run compiled JS
 | Verify migrations from scratch | `npm run db:check-migrations` |
 
 **Development Seed Credentials:** `sam@example.com` / `dev-password-123` (only available in development, never in production).
+
+## Development Workflow
+
+| Command | What it does |
+|---|---|
+| `npm run precheck` | Typecheck, lint, format check, unit tests, build (~30s) |
+| `npm run ci` | `precheck` plus integration tests (~1 min) — what CI will run |
+| `npm run lint` / `npm run lint:fix` | ESLint with `--max-warnings 0`; fix mode applies autofixes |
+| `npm run format` / `npm run format:check` | Prettier write / check |
+| `npm run verify` | Build and run everything against the compiled server |
+| `npm run test:coverage` | Combined unit + integration with ratcheted thresholds |
+
+**Git hooks (installed by `npm install`):**
+- **`pre-commit`** runs `lint-staged` on staged files (`eslint --fix --max-warnings 0` + `prettier --write` for `.ts`; `prettier --write` for `.json`, `.yml`, `.yaml`, `.mjs`). Takes ~2 seconds because it only touches staged files.
+- **`pre-push`** runs `npm run typecheck:all` + `npm run test:unit`. Takes ~10 seconds. Integration tests are left to `npm run ci` because they need a database and take 25 seconds.
+
+Hooks can be skipped with `git commit --no-verify` / `git push --no-verify`, so **only CI is a real gate.** The `pre-push` hook is a courtesy for keeping broken code off the remote branch, not a security boundary.
+
+### Editor setup
+
+`.vscode/extensions.json` recommends **ESLint**, **Prettier**, and **EditorConfig**. `.vscode/settings.json` enables format-on-save (Prettier) and ESLint autofix-on-save. Every editor reads `.editorconfig` (utf-8, LF, 2 spaces, final newline). The point is team consistency — no "I use 2-space, you use 4" arguments.
+
+### Architecture enforcement
+
+`eslint.config.mjs` uses `no-restricted-imports` to make the composition-root rule **executable**:
+- `src/controllers/**`, `src/routes/**`, `src/services/**`, `src/auth/**`, `src/middleware/**`, `src/schemas/**` — **cannot** import Prisma or `src/repositories/prisma/**`.
+- `src/container.ts`, `src/server.ts`, `src/cli.ts` — allowed (composition roots and shutdown).
+
+A new developer who tries `import { prisma } from "../db.js"` in a controller gets a clear error pointing to `src/container.ts`, and the pre-commit hook blocks the commit. It's not a convention — it's a failing check.
 
 ## Documentation & Testing
 
@@ -271,7 +303,7 @@ Rate limits are applied to protect sensitive endpoints:
 
 A `429 Too Many Requests` response includes `Retry-After` and `RateLimit` headers. The error body includes `retryAfterSeconds`.
 
-**Mount discipline:** each limiter is attached **once**, either in `app.ts` (only `globalLimiter`) or on the route handlers (the auth limiters in `auth.routes.ts`, `inviteLimiter` in `projects.routes.ts`). Mounting the same limiter in both places runs it twice per request and halves its effective limit — this exact bug was fixed on Day 32 (see the `test:ratelimit` entry in the known limitations). Any new limiter must follow the same rule: **one mount, one place**.
+**Mount discipline:** each limiter is attached **once**, either in `app.ts` (only `globalLimiter`) or on the route handlers (the auth limiters in `auth.routes.ts`, `inviteLimiter` in `projects.routes.ts`). Mounting the same limiter in both places runs it twice per request and halves its effective limit — this exact bug was fixed on Day 32 (see Known Limitations #25). Any new limiter must follow the same rule: **one mount, one place** — `grep -rn "Limiter" src/` is the fast check.
 
 ## Authentication & Authorization
 
@@ -360,6 +392,8 @@ HTTP request
 ```
 
 The repository pattern decouples business logic from data storage. Services depend on a `Repository<T>` interface, not a specific implementation. Listing, filtering, sorting, and pagination are handled directly by PostgreSQL. Multi-step operations (like `duplicate` and `merge`) run through a `UnitOfWork`. Role checks happen in the service layer, using a dedicated `Access` helper. Rate limiting runs before body parsing to avoid resource exhaustion.
+
+The layering above is **enforced by ESLint**, not just documented. `no-restricted-imports` blocks `src/controllers/**`, `src/routes/**`, `src/services/**`, `src/auth/**`, `src/middleware/**`, and `src/schemas/**` from importing Prisma or `src/repositories/prisma/**`. Only `src/container.ts`, `src/server.ts`, and `src/cli.ts` may — the composition root, the shutdown hook, and the CLI.
 
 ## Performance
 
@@ -485,7 +519,7 @@ src/
 ```
 
 ## Tech Stack
-Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CORS, Swagger UI, Argon2, jose, express-rate-limit, Vitest, Supertest.
+Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CORS, Swagger UI, Argon2, jose, express-rate-limit, Vitest, Supertest, ESLint (flat config, typescript-eslint), Prettier, Husky, lint-staged.
 
 ## Roadmap
 - [x] Week 1 — CLI core
@@ -506,6 +540,7 @@ Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CO
   - [x] Integration tests for members, comments, sessions, access matrix and docs (Day 32)
   - [x] Combined coverage run with ratcheted thresholds (86/73/88/88)
   - [x] Retired five hand-written scripts (token-attacks, auth-coverage, refresh-flow, access-attacks, security-checks), shrunk smoke to a post-build check
+  - [x] ESLint (flat config, type-aware rules), Prettier, Husky pre-commit/pre-push hooks, `precheck` and `ci` scripts (Day 33)
   - [ ] CI gate (Week 7)
 
 ## Known Limitations
@@ -539,3 +574,11 @@ Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CO
 28. **Coverage gaps still open after Day 32:** `src/middleware/rateLimit.ts` and `src/middleware/limiters.ts` are at ~33% and ~66% respectively (the suite runs with `RATE_LIMIT_ENABLED=false`); `user.repository.ts` at ~54% (the `P2002` catch's `else` branch is never hit); `errorHandler.ts` at ~82% (the Zod-error-from-service branch is defensive). None are bugs — the first is scheduled for Challenge 1, the second is a genuine safety net worth a repo-level test, the third is accepted as defensive code.
 29. **Five scripts retired on Day 32:** `scripts/token-attacks.ts`, `scripts/auth-coverage.ts`, `scripts/refresh-flow.ts`, `scripts/access-attacks.ts`, and `scripts/security-checks.ts` were deleted. Each replacement is a named integration suite (`auth.sessions`, `access.matrix`, `projects.members`, `comments`, `security`, `docs.and.auth`), and the Day 32 mutation table (10 rows) is the evidence that the suite catches the bugs the scripts caught.
 30. **`smoke.ts` is intentionally small (12 checks):** It's a post-build check of the *compiled* `dist/` server, not a behavior suite. Detailed behavior is `npm test`'s job; if a check needs adding, it goes in an integration test, not in `smoke.ts`.
+31. **`typescript-eslint` needs TypeScript 6, not 7:** The project uses the native TypeScript 7 compiler (`tsc`), but `typescript-eslint` requires the TypeScript 6 JS compiler API. `package.json` uses the official side-by-side alias: `@typescript/native@npm:typescript@^7.0.2` (provides `tsc`) and `typescript@npm:@typescript/typescript6@^6.0.2` (provides the API). `npx tsc --version` → 7.x, `npx tsc6 --version` → 6.x. When `typescript-eslint` supports TS 7, the alias can be removed.
+32. **`eslint-config-prettier` is the only rule-disabling plugin:** Every ESLint rule disabled in `eslint.config.mjs` (e.g., `require-await`) has a written reason in the config. `errorHandler.ts` has one file-level `eslint-disable` for `no-unsafe-member-access`/`no-unsafe-assignment`, with a written reason. Disables are decisions, not shortcuts.
+33. **`no-restricted-imports` is the architecture fitness function:** It makes `src/container.ts` the only place that constructs concrete repositories; controllers, routes, services, auth, middleware, and schemas cannot import `../db.js` or `src/repositories/prisma/**`. Verified by a temporary Prisma import in a controller (rejected) and in `server.ts`/`cli.ts` (allowed), then reverted.
+34. **`precheck` / `ci` catch drift the individual scripts can miss:** The first `npm run ci` found 7 files that had drifted from Prettier's output after the ESLint fixes. `format:check` is the canary — cheap, and it never lies.
+35. **Hooks are not the gate:** the pre-commit hook can be bypassed with `git commit --no-verify`, and the pre-push hook with `git push --no-verify`. Only `npm run ci` on a fresh checkout is a real gate. Week 7's pipeline will run `npm run ci` and will not rely on hooks.
+36. **`prepare: "husky || true"`:** Husky's install is guarded so `npm ci --omit=dev` in a production Docker build doesn't crash when Husky (a devDependency) isn't installed. In environments without Git hooks (CI runners, fresh containers), set `HUSKY=0` before `npm install` to skip the hook install explicitly.
+```
+
