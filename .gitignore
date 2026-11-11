@@ -12,3 +12,4 @@ src/generated
 skills-lock.json
 .tmp
 coveragedata/
+coverage/
