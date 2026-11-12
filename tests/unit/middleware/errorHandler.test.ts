@@ -15,7 +15,7 @@ import { logger } from "../../../src/logger.js";
 import { errorHandler } from "../../../src/middleware/errorHandler.js";
 
 vi.mock("../../../src/logger.js", () => ({
-  logger: { debug: vi.fn(), info: vi.fn(), error: vi.fn() },
+  logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
 // Just enough of Express's req/res to see what the handler decided
@@ -76,6 +76,9 @@ describe("errorHandler", () => {
     expect(res.body.error.message).toBe("Internal server error");
     expect(res.body.error.requestId).toBe("req-123");
     expect(JSON.stringify(res.body)).not.toContain("hunter2");
-    expect(logger.error).toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error) }),
+      expect.any(String),
+    );
   });
 });

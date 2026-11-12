@@ -12,6 +12,7 @@ import { tasksRouter } from "./routes/tasks.routes.js";
 import { authRouter } from "./routes/auth.routes.js";
 import { authenticate } from "./middleware/authenticate.js";
 import { globalLimiter } from "./middleware/limiters.js";
+import { requestContext } from "./middleware/requestContext.js";
 
 export function createApp() {
   const app = express();
@@ -45,6 +46,7 @@ export function createApp() {
   app.use(requestLogger);
   app.use(globalLimiter);
   app.use(express.json({ limit: "100kb" }));
+  app.use(requestContext);
 
   app.get("/health", (_req, res) => {
     res.json({ status: "ok", uptime: process.uptime() });

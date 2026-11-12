@@ -68,8 +68,9 @@ export function createAuthService({ users, refreshTokens }: Deps) {
     // Kill the whole family so neither the thief nor the original holder keeps access.
     if (record.usedAt) {
       await refreshTokens.revokeFamily(record.familyId);
-      logger.error(
-        `Refresh token reuse detected: user ${record.userId}, family ${record.familyId}`,
+      logger.warn(
+        { event: "auth.refresh_reuse", userId: record.userId, familyId: record.familyId },
+        "refresh token reuse detected; session family revoked",
       );
       throw invalidRefresh();
     }
