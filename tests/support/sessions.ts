@@ -1,9 +1,13 @@
-import { generateRefreshToken, hashRefreshToken, newFamilyId } from "../../src/auth/refreshTokens.js";
+import {
+  generateRefreshToken,
+  hashRefreshToken,
+  newFamilyId,
+} from "../../src/auth/refreshTokens.js";
 import { prisma } from "../../src/db.js";
 
 export async function startSession(
   user: { id: number },
-  opts: { familyId?: string; expiresAt?: Date } = {}
+  opts: { familyId?: string; expiresAt?: Date } = {},
 ) {
   const token = generateRefreshToken();
   const familyId = opts.familyId ?? newFamilyId();

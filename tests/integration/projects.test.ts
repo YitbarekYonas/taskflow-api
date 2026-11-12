@@ -22,11 +22,15 @@ describe("projects require authentication", () => {
 describe("POST /projects", () => {
   it("creates the project, a slug and the creator's owner membership together", async () => {
     const olga = await createUser();
-    const res = await (await asUser(olga)).post("/projects", { name: "My Project", description: "Backend" });
+    const res = await (
+      await asUser(olga)
+    ).post("/projects", { name: "My Project", description: "Backend" });
 
     expect(res.status).toBe(201);
     expect(res.body.data).toMatchObject({
-      name: "My Project", description: "Backend", createdById: olga.id,
+      name: "My Project",
+      description: "Backend",
+      createdById: olga.id,
       slug: expect.stringMatching(/^my-project-[0-9a-f]{6}$/),
     });
     expect(res.headers.location).toBe(`/projects/${res.body.data.id}`);
@@ -61,7 +65,9 @@ describe("GET /projects and /projects/:id", () => {
     const res = await (await asUser(member)).get("/projects");
 
     expect(res.status).toBe(200);
-    expect(res.body.data).toEqual([expect.objectContaining({ id: project.id, name: "Alpha", taskCount: 2 })]);
+    expect(res.body.data).toEqual([
+      expect.objectContaining({ id: project.id, name: "Alpha", taskCount: 2 }),
+    ]);
   });
 
   it("answers 404 for a stranger, exactly as for a missing project", async () => {
@@ -73,7 +79,9 @@ describe("GET /projects and /projects/:id", () => {
 
     expect(hidden.status).toBe(404);
     expect(missing.status).toBe(404);
-    expect(hidden.body.error.message.replace(/\d+/, "N")).toBe(missing.body.error.message.replace(/\d+/, "N"));
+    expect(hidden.body.error.message.replace(/\d+/, "N")).toBe(
+      missing.body.error.message.replace(/\d+/, "N"),
+    );
   });
 });
 
@@ -89,12 +97,21 @@ describe("PATCH /projects/:id", () => {
   it("answers 403 for a member and 404 for a stranger, changing nothing", async () => {
     const { member, stranger, project } = await team();
 
-    expect((await (await asUser(member)).patch(`/projects/${project.id}`, { name: "Mine" })).status).toBe(403);
-    expect((await (await asUser(stranger)).patch(`/projects/${project.id}`, { name: "Mine" })).status).toBe(404);
-    expect((await prisma.project.findUniqueOrThrow({ where: { id: project.id } })).name).toBe("Alpha");
+    expect(
+      (await (await asUser(member)).patch(`/projects/${project.id}`, { name: "Mine" })).status,
+    ).toBe(403);
+    expect(
+      (await (await asUser(stranger)).patch(`/projects/${project.id}`, { name: "Mine" })).status,
+    ).toBe(404);
+    expect((await prisma.project.findUniqueOrThrow({ where: { id: project.id } })).name).toBe(
+      "Alpha",
+    );
   });
 
-  it.each([["an empty body", {}], ["a slug change", { slug: "hacked" }]])("rejects %s with 400", async (_n, body) => {
+  it.each([
+    ["an empty body", {}],
+    ["a slug change", { slug: "hacked" }],
+  ])("rejects %s with 400", async (_n, body) => {
     const { owner, project } = await team();
     expect((await (await asUser(owner)).patch(`/projects/${project.id}`, body)).status).toBe(400);
   });
@@ -128,7 +145,14 @@ describe("DELETE /projects/:id", () => {
 describe("POST /projects/:id/duplicate", () => {
   it("copies the project and its tasks, as fresh todo tasks owned by the caller", async () => {
     const { owner, member, project } = await team();
-    await createTask({ title: "one", status: "done", priority: "high", dueDate: "2030-05-01", project, createdBy: owner });
+    await createTask({
+      title: "one",
+      status: "done",
+      priority: "high",
+      dueDate: "2030-05-01",
+      project,
+      createdBy: owner,
+    });
     await createTask({ title: "two", status: "in_progress", project, createdBy: owner });
 
     const res = await (await asUser(member)).post(`/projects/${project.id}/duplicate`);
@@ -140,7 +164,10 @@ describe("POST /projects/:id/duplicate", () => {
     expect(copy).toMatchObject({ name: "Alpha (copy)", createdById: member.id });
     expect(copy.slug).not.toBe(project.slug);
 
-    const copied = await prisma.task.findMany({ where: { projectId: copy.id }, orderBy: { title: "asc" } });
+    const copied = await prisma.task.findMany({
+      where: { projectId: copy.id },
+      orderBy: { title: "asc" },
+    });
     expect(copied.map((t) => [t.title, t.status, t.priority, t.createdById])).toEqual([
       ["one", "todo", "high", member.id],
       ["two", "todo", "medium", member.id],
@@ -157,10 +184,14 @@ describe("POST /projects/:id/duplicate", () => {
   it("accepts a custom name, and answers 404 for a stranger", async () => {
     const { owner, stranger, project } = await team();
 
-    const named = await (await asUser(owner)).post(`/projects/${project.id}/duplicate`, { name: "Beta" });
+    const named = await (
+      await asUser(owner)
+    ).post(`/projects/${project.id}/duplicate`, { name: "Beta" });
     expect(named.body.data.project.name).toBe("Beta");
 
-    expect((await (await asUser(stranger)).post(`/projects/${project.id}/duplicate`)).status).toBe(404);
+    expect((await (await asUser(stranger)).post(`/projects/${project.id}/duplicate`)).status).toBe(
+      404,
+    );
     expect(await prisma.project.count()).toBe(2); // only the copy made by the owner
   });
 });
@@ -189,7 +220,9 @@ describe("POST /projects/:id/merge", () => {
     const target = await createProject({ owner: other, members: [{ user: owner }] }); // owner is only a member here
     await createTask({ project: source, createdBy: owner });
 
-    const res = await (await asUser(owner)).post(`/projects/${source.id}/merge`, { intoProjectId: target.id });
+    const res = await (
+      await asUser(owner)
+    ).post(`/projects/${source.id}/merge`, { intoProjectId: target.id });
 
     expect(res.status).toBe(403);
     expect(await prisma.project.count({ where: { id: source.id } })).toBe(1);
@@ -215,9 +248,27 @@ describe("POST /projects/:id/merge", () => {
     const { owner, member, stranger, project } = await team();
     const target = await createProject({ owner: member });
 
-    expect((await (await asUser(owner)).post(`/projects/${project.id}/merge`, { intoProjectId: project.id })).status).toBe(400);
-    expect((await (await asUser(member)).post(`/projects/${project.id}/merge`, { intoProjectId: target.id })).status).toBe(403);
-    expect((await (await asUser(stranger)).post(`/projects/${project.id}/merge`, { intoProjectId: target.id })).status).toBe(404);
+    expect(
+      (
+        await (
+          await asUser(owner)
+        ).post(`/projects/${project.id}/merge`, { intoProjectId: project.id })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await (
+          await asUser(member)
+        ).post(`/projects/${project.id}/merge`, { intoProjectId: target.id })
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await (
+          await asUser(stranger)
+        ).post(`/projects/${project.id}/merge`, { intoProjectId: target.id })
+      ).status,
+    ).toBe(404);
   });
 
   it("lets exactly one of two simultaneous merges win, with no task lost or duplicated", async () => {

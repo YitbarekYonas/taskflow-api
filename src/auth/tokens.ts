@@ -7,7 +7,7 @@ const ISSUER = "taskflow";
 const AUDIENCE = "taskflow-api";
 
 export function signAccessToken(userId: number): Promise<string> {
-  return new SignJWT({}) 
+  return new SignJWT({})
     .setProtectedHeader({ alg: "HS256" })
     .setSubject(String(userId))
     .setIssuer(ISSUER)

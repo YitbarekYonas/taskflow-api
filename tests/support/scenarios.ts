@@ -16,7 +16,12 @@ export async function createComment(opts: {
   body?: string;
 }) {
   return prisma.comment.create({
-    data: { taskId: opts.task.id, author: opts.by.name, authorId: opts.by.id, body: opts.body ?? "A comment" },
+    data: {
+      taskId: opts.task.id,
+      author: opts.by.name,
+      authorId: opts.by.id,
+      body: opts.body ?? "A comment",
+    },
   });
 }
 
@@ -24,11 +29,27 @@ export async function createComment(opts: {
 // and one comment from each on the owner's task
 export async function workspace() {
   const t = await team();
-  const ownersTask = await createTask({ title: "owner's task", project: t.project, createdBy: t.owner });
-  const membersTask = await createTask({ title: "member's task", project: t.project, createdBy: t.member });
+  const ownersTask = await createTask({
+    title: "owner's task",
+    project: t.project,
+    createdBy: t.owner,
+  });
+  const membersTask = await createTask({
+    title: "member's task",
+    project: t.project,
+    createdBy: t.member,
+  });
   const personalTask = await createTask({ title: "owner personal", createdBy: t.owner });
-  const ownersComment = await createComment({ task: ownersTask, by: t.owner, body: "owner comment" });
-  const membersComment = await createComment({ task: ownersTask, by: t.member, body: "member comment" });
+  const ownersComment = await createComment({
+    task: ownersTask,
+    by: t.owner,
+    body: "owner comment",
+  });
+  const membersComment = await createComment({
+    task: ownersTask,
+    by: t.member,
+    body: "member comment",
+  });
   const newcomer = await createUser({ name: "Nina" });
   return { ...t, ownersTask, membersTask, personalTask, ownersComment, membersComment, newcomer };
 }

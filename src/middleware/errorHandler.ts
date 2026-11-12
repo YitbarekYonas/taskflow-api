@@ -1,6 +1,13 @@
+/* eslint-disable @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment -- Express and express-rate-limit throw plain objects, not Error instances; fields are checked at runtime below */
 import type { ErrorRequestHandler, RequestHandler } from "express";
 import { ZodError } from "zod";
-import { NotFoundError, UserError, ConflictError, UnauthorizedError, ForbiddenError } from "../errors.js";
+import {
+  NotFoundError,
+  UserError,
+  ConflictError,
+  UnauthorizedError,
+  ForbiddenError,
+} from "../errors.js";
 import { logger } from "../logger.js";
 
 export const notFound: RequestHandler = (req, res) => {
@@ -11,7 +18,7 @@ export const errorHandler: ErrorRequestHandler = (err, req, res, _next) => {
   // 👈 Catch express-rate-limit errors
   if (err.statusCode === 429 || err.status === 429) {
     const retryAfter = err.headers?.["Retry-After"] || err.retryAfter;
-    
+
     // Set headers expected by the test
     if (retryAfter) {
       res.setHeader("Retry-After", String(retryAfter));
@@ -52,7 +59,10 @@ export const errorHandler: ErrorRequestHandler = (err, req, res, _next) => {
   }
   if (err instanceof UnauthorizedError) {
     logger.info(`[${res.locals.requestId}] auth 401 ${req.method} ${req.originalUrl} ip=${req.ip}`);
-    res.status(401).set("WWW-Authenticate", 'Bearer realm="taskflow"').json({ error: { message: err.message } });
+    res
+      .status(401)
+      .set("WWW-Authenticate", 'Bearer realm="taskflow"')
+      .json({ error: { message: err.message } });
     return;
   }
   if (err instanceof ForbiddenError) {
@@ -70,5 +80,7 @@ export const errorHandler: ErrorRequestHandler = (err, req, res, _next) => {
   }
 
   logger.error(`[${res.locals.requestId}] Unhandled error:`, err);
-  res.status(500).json({ error: { message: "Internal server error", requestId: res.locals.requestId } });
+  res
+    .status(500)
+    .json({ error: { message: "Internal server error", requestId: res.locals.requestId } });
 };

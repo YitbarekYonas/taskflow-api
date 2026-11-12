@@ -1,13 +1,21 @@
 import { createAccess } from "../auth/access.js";
 import { creatorOf, type Actor } from "../auth/policy.js";
 import {
-  ConflictError, ForbiddenError, InUseError, InvalidReferenceError, NotFoundError, UserError,
+  ConflictError,
+  ForbiddenError,
+  InUseError,
+  InvalidReferenceError,
+  NotFoundError,
+  UserError,
 } from "../errors.js";
 import type { MemberRepository } from "../repositories/memberRepository.js";
 import type { ProjectRepository, TaskRepository } from "../repositories/repository.js";
 import type { UnitOfWork } from "../repositories/unitOfWork.js";
 import type {
-  AddMember, DuplicateProject, NewProject, ProjectPatch,
+  AddMember,
+  DuplicateProject,
+  NewProject,
+  ProjectPatch,
 } from "../schemas/project.schemas.js";
 import type { TaskQuery } from "../schemas/task.schemas.js";
 import type { Project, Role } from "../types.js";
@@ -72,7 +80,7 @@ export function createProjectService({ projects, tasks, members, uow }: Deps) {
 
   async function listProjectTasks(id: number, q: Omit<TaskQuery, "projectId">, actor: Actor) {
     await getProject(id, actor); // membership implies visibility of every task inside
-    const { items, total } = await tasks.query({ ...q, projectId: id } as TaskQuery);
+    const { items, total } = await tasks.query({ ...q, projectId: id });
     return { items, meta: buildMeta(total, q.page, q.limit) };
   }
 
@@ -102,7 +110,7 @@ export function createProjectService({ projects, tasks, members, uow }: Deps) {
           createdAt: now,
           projectId: copy.id,
           createdById: creatorOf(actor),
-        }))
+        })),
       );
       return { project: copy, copiedTasks };
     });
@@ -119,7 +127,8 @@ export function createProjectService({ projects, tasks, members, uow }: Deps) {
         // An invisible target looks exactly like a missing one
         const targetRole = await txAccess.projectRole(actor, targetId);
         if (!targetRole) throw new UserError(`Project ${targetId} does not exist.`);
-        if (targetRole !== "owner") throw new ForbiddenError("You must own both projects to merge them.");
+        if (targetRole !== "owner")
+          throw new ForbiddenError("You must own both projects to merge them.");
 
         const target = await tx.projects.findById(targetId);
         if (!target) throw new UserError(`Project ${targetId} does not exist.`);
@@ -160,12 +169,17 @@ export function createProjectService({ projects, tasks, members, uow }: Deps) {
     return uow.run(async (tx) => {
       const txAccess = createAccess(tx.members);
       await txAccess.requireProjectRole(actor, projectId, "owner"); // cheap: keeps strangers from taking locks
-      await tx.members.lockProject(projectId);                       // everyone else queues up here
+      await tx.members.lockProject(projectId); // everyone else queues up here
       await txAccess.requireProjectRole(actor, projectId, "owner"); // again: we may have waited behind a demotion
 
       const current = await tx.members.roleOf(projectId, userId);
-      if (!current) throw new NotFoundError(`User ${userId} is not a member of project ${projectId}.`);
-      if (current === "owner" && role !== "owner" && (await tx.members.countOwners(projectId)) <= 1) {
+      if (!current)
+        throw new NotFoundError(`User ${userId} is not a member of project ${projectId}.`);
+      if (
+        current === "owner" &&
+        role !== "owner" &&
+        (await tx.members.countOwners(projectId)) <= 1
+      ) {
         throw new ConflictError("A project must keep at least one owner.");
       }
       await tx.members.setRole(projectId, userId, role);
@@ -185,17 +199,29 @@ export function createProjectService({ projects, tasks, members, uow }: Deps) {
       await txAccess.requireProjectRole(actor, projectId, needed);
 
       const current = await tx.members.roleOf(projectId, userId);
-      if (!current) throw new NotFoundError(`User ${userId} is not a member of project ${projectId}.`);
+      if (!current)
+        throw new NotFoundError(`User ${userId} is not a member of project ${projectId}.`);
       if (current === "owner" && (await tx.members.countOwners(projectId)) <= 1) {
-        throw new ConflictError("A project must keep at least one owner. Promote someone else first.");
+        throw new ConflictError(
+          "A project must keep at least one owner. Promote someone else first.",
+        );
       }
       await tx.members.remove(projectId, userId);
     });
   }
 
   return {
-    getProject, listProjects, createProject, updateProject, deleteProject,
-    listProjectTasks, duplicateProject, mergeProjects,
-    listMembers, addMember, changeRole, removeMember,
+    getProject,
+    listProjects,
+    createProject,
+    updateProject,
+    deleteProject,
+    listProjectTasks,
+    duplicateProject,
+    mergeProjects,
+    listMembers,
+    addMember,
+    changeRole,
+    removeMember,
   };
 }

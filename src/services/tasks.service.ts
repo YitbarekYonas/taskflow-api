@@ -80,7 +80,7 @@ export function createTaskService({ tasks, members }: Deps) {
         createdAt: new Date().toISOString(),
         projectId: input.projectId,
         createdById: creatorOf(actor),
-      })
+      }),
     );
   }
 
@@ -94,7 +94,8 @@ export function createTaskService({ tasks, members }: Deps) {
     const { task, role } = await loadTask(id, actor, "member");
 
     // Moving a task between projects is a bigger decision than editing it
-    const moving = patch.projectId !== undefined && (patch.projectId ?? undefined) !== task.projectId;
+    const moving =
+      patch.projectId !== undefined && (patch.projectId ?? undefined) !== task.projectId;
     if (moving) {
       if (role !== "owner" && !isCreator(task, actor)) {
         throw new ForbiddenError("Only the task's creator or a project owner can move it.");
@@ -112,7 +113,7 @@ export function createTaskService({ tasks, members }: Deps) {
     if (patch.projectId !== undefined) changes.projectId = patch.projectId ?? undefined;
 
     const updated = await withProjectCheck(patch.projectId ?? undefined, () =>
-      tasks.update(id, changes)
+      tasks.update(id, changes),
     );
     if (!updated) throw new NotFoundError(`No task with id ${id}.`);
     return updated;
@@ -142,7 +143,7 @@ export function createTaskService({ tasks, members }: Deps) {
 
   async function listOverdue(
     actor: Actor,
-    today: string = new Date().toISOString().slice(0, 10)
+    today: string = new Date().toISOString().slice(0, 10),
   ): Promise<Task[]> {
     assertSystem(actor);
     return tasks.findOverdue(today);
@@ -167,14 +168,22 @@ export function createTaskService({ tasks, members }: Deps) {
           yield `${t.id},${csvEscape(t.title)},${t.status},${t.priority},${t.dueDate ?? ""},${t.createdAt}\n`;
         }
       },
-      createWriteStream(target)
+      createWriteStream(target),
     );
     return target;
   }
 
   return {
-    getTask, addTask, queryTasks, updateTask, setStatus, deleteTask,
-    listTasks, listOverdue, summary, exportCsv,
+    getTask,
+    addTask,
+    queryTasks,
+    updateTask,
+    setStatus,
+    deleteTask,
+    listTasks,
+    listOverdue,
+    summary,
+    exportCsv,
   };
 }
 

@@ -1,10 +1,9 @@
 import type { Prisma, PrismaClient, Task as TaskRow } from "../../generated/prisma/client.js";
 import type { Db } from "./db.js";
 import type { Priority, Status, Task } from "../../types.js";
-import type { Repository } from "../repository.js";
-import { isPrismaError,mapWriteError } from "./errors.js";
+import { isPrismaError, mapWriteError } from "./errors.js";
 import type { TaskQuery } from "../../schemas/task.schemas.js";
-import { TaskRepository } from "../repository.js";
+import type { TaskRepository } from "../repository.js";
 
 type TaskData = Omit<Task, "id">;
 
@@ -28,7 +27,7 @@ function toTask(row: TaskRow): Task {
     dueDate: row.dueDate ? row.dueDate.toISOString().slice(0, 10) : undefined,
     createdAt: row.createdAt.toISOString(),
     projectId: row.projectId ?? undefined,
-    createdById: row.createdById ?? undefined
+    createdById: row.createdById ?? undefined,
   };
 }
 
@@ -51,10 +50,7 @@ type Scope = { userId: number };
 // A task is visible if it lives in one of my projects, or it is my own personal task
 function visibleTo(userId: number): Prisma.TaskWhereInput {
   return {
-    OR: [
-      { project: { members: { some: { userId } } } },
-      { projectId: null, createdById: userId },
-    ],
+    OR: [{ project: { members: { some: { userId } } } }, { projectId: null, createdById: userId }],
   };
 }
 
@@ -69,7 +65,10 @@ function buildWhere(q: TaskQuery, scope?: Scope): Prisma.TaskWhereInput {
 }
 
 // id is always the last tie-breaker, so pages never overlap or skip rows
-function buildOrderBy(sort: TaskQuery["sort"], dir: "asc" | "desc"): Prisma.TaskOrderByWithRelationInput[] {
+function buildOrderBy(
+  sort: TaskQuery["sort"],
+  dir: "asc" | "desc",
+): Prisma.TaskOrderByWithRelationInput[] {
   switch (sort) {
     case "dueDate":
       return [{ dueDate: { sort: dir, nulls: "last" } }, { id: "asc" }];
@@ -95,7 +94,9 @@ export class PrismaTaskRepository implements TaskRepository {
   }
   async insert(data: TaskData) {
     try {
-      const row = await this.prisma.task.create({ data: { ...toColumns(data), title: data.title } });
+      const row = await this.prisma.task.create({
+        data: { ...toColumns(data), title: data.title },
+      });
       return toTask(row);
     } catch (err) {
       throw mapWriteError(err);
@@ -120,8 +121,8 @@ export class PrismaTaskRepository implements TaskRepository {
     }
   }
 
-async query(q: TaskQuery, scope?: Scope) { 
-  const where = buildWhere(q, scope);
+  async query(q: TaskQuery, scope?: Scope) {
+    const where = buildWhere(q, scope);
     const page = {
       where,
       orderBy: buildOrderBy(q.sort, q.order),
@@ -131,7 +132,7 @@ async query(q: TaskQuery, scope?: Scope) {
 
     let rows: TaskRow[];
     let total: number;
-    
+
     if ("$transaction" in this.prisma) {
       // We have a full PrismaClient, so we can use $transaction
       [rows, total] = await this.prisma.$transaction([
@@ -162,7 +163,7 @@ async query(q: TaskQuery, scope?: Scope) {
     for (const g of groups) counts[g.status] = g._count._all;
     return counts;
   }
-    async findByProject(projectId: number) {
+  async findByProject(projectId: number) {
     const rows = await this.prisma.task.findMany({ where: { projectId }, orderBy: { id: "asc" } });
     return rows.map(toTask);
   }

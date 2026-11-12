@@ -55,7 +55,9 @@ describe("errors", () => {
   });
 
   it("answers an oversized body with 413 and the standard error shape", async () => {
-    const res = await api().post("/auth/login").send({ email: "a@example.com", password: "x".repeat(200_000) });
+    const res = await api()
+      .post("/auth/login")
+      .send({ email: "a@example.com", password: "x".repeat(200_000) });
 
     expect(res.status).toBe(413);
     expect(res.body).toEqual({ error: { message: expect.any(String) } });

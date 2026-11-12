@@ -67,7 +67,12 @@ describe("GET /tasks: filtering and sorting", () => {
       { title: "update docs", status: "done", priority: "low", dueDate: "2026-11-10" },
     ] as const;
     for (const [i, row] of rows.entries()) {
-      await createTask({ ...row, project, createdBy: owner, createdAt: `2026-10-0${i + 1}T10:00:00Z` });
+      await createTask({
+        ...row,
+        project,
+        createdBy: owner,
+        createdAt: `2026-10-0${i + 1}T10:00:00Z`,
+      });
     }
     user = await asUser(owner);
   });
@@ -88,15 +93,92 @@ describe("GET /tasks: filtering and sorting", () => {
   });
 
   it.each([
-    ["createdAt ascending (the default)", "", ["write report", "review report", "plan sprint", "fix login bug", "deploy app", "update docs"]],
-    ["title ascending", "sort=title", ["deploy app", "fix login bug", "plan sprint", "review report", "update docs", "write report"]],
-    ["title descending", "sort=title&order=desc", ["write report", "update docs", "review report", "plan sprint", "fix login bug", "deploy app"]],
+    [
+      "createdAt ascending (the default)",
+      "",
+      [
+        "write report",
+        "review report",
+        "plan sprint",
+        "fix login bug",
+        "deploy app",
+        "update docs",
+      ],
+    ],
+    [
+      "title ascending",
+      "sort=title",
+      [
+        "deploy app",
+        "fix login bug",
+        "plan sprint",
+        "review report",
+        "update docs",
+        "write report",
+      ],
+    ],
+    [
+      "title descending",
+      "sort=title&order=desc",
+      [
+        "write report",
+        "update docs",
+        "review report",
+        "plan sprint",
+        "fix login bug",
+        "deploy app",
+      ],
+    ],
     // ties on priority are broken by id, so the order is fully defined
-    ["priority descending", "sort=priority&order=desc", ["write report", "fix login bug", "review report", "deploy app", "plan sprint", "update docs"]],
-    ["priority ascending", "sort=priority&order=asc", ["plan sprint", "update docs", "review report", "deploy app", "write report", "fix login bug"]],
+    [
+      "priority descending",
+      "sort=priority&order=desc",
+      [
+        "write report",
+        "fix login bug",
+        "review report",
+        "deploy app",
+        "plan sprint",
+        "update docs",
+      ],
+    ],
+    [
+      "priority ascending",
+      "sort=priority&order=asc",
+      [
+        "plan sprint",
+        "update docs",
+        "review report",
+        "deploy app",
+        "write report",
+        "fix login bug",
+      ],
+    ],
     // tasks without a due date come last, in BOTH directions
-    ["dueDate ascending", "sort=dueDate&order=asc", ["update docs", "plan sprint", "deploy app", "write report", "review report", "fix login bug"]],
-    ["dueDate descending", "sort=dueDate&order=desc", ["write report", "deploy app", "plan sprint", "update docs", "review report", "fix login bug"]],
+    [
+      "dueDate ascending",
+      "sort=dueDate&order=asc",
+      [
+        "update docs",
+        "plan sprint",
+        "deploy app",
+        "write report",
+        "review report",
+        "fix login bug",
+      ],
+    ],
+    [
+      "dueDate descending",
+      "sort=dueDate&order=desc",
+      [
+        "write report",
+        "deploy app",
+        "plan sprint",
+        "update docs",
+        "review report",
+        "fix login bug",
+      ],
+    ],
   ])("sorts by %s", async (_name, query, expected) => {
     const res = await user.get(`/tasks?${query}`);
 
@@ -113,7 +195,12 @@ describe("GET /tasks: pagination", () => {
     const project = await createProject({ owner });
     const priorities = ["low", "medium", "high"] as const;
     for (let i = 1; i <= 25; i++) {
-      await createTask({ title: `task ${String(i).padStart(2, "0")}`, priority: priorities[i % 3], project, createdBy: owner });
+      await createTask({
+        title: `task ${String(i).padStart(2, "0")}`,
+        priority: priorities[i % 3],
+        project,
+        createdBy: owner,
+      });
     }
     user = await asUser(owner);
   });

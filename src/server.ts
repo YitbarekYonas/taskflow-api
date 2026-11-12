@@ -20,15 +20,20 @@ const purgeTimer = setInterval(
       .then((n) => n > 0 && logger.info(`Purged ${n} expired refresh tokens`))
       .catch((err) => logger.error("Token purge failed:", err));
   },
-  60 * 60 * 1000
+  60 * 60 * 1000,
 );
 purgeTimer.unref(); // never keep the process alive just for this timer
 function shutdown(signal: string) {
   clearInterval(purgeTimer);
   logger.info(`${signal} received, shutting down`);
-  server.close(async () => {
-    await prisma.$disconnect();
-    process.exit(0);
+  server.close(() => {
+    prisma.$disconnect().then(
+      () => process.exit(0),
+      (error: unknown) => {
+        logger.error("Disconnect failed during shutdown:", error);
+        process.exit(1);
+      },
+    );
   });
 }
 process.on("SIGINT", () => shutdown("SIGINT"));

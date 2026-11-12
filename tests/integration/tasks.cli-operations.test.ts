@@ -39,7 +39,12 @@ describe("operations reserved for the CLI", () => {
 
   describe("CSV export", () => {
     it("writes a header and one escaped row per task", async () => {
-      await createTask({ title: 'Say "hi", then leave', status: "in_progress", priority: "high", dueDate: "2030-05-01" });
+      await createTask({
+        title: 'Say "hi", then leave',
+        status: "in_progress",
+        priority: "high",
+        dueDate: "2030-05-01",
+      });
       const dir = await mkdtemp(path.join(tmpdir(), "taskflow-"));
       try {
         const file = path.join(dir, "out.csv");
@@ -48,7 +53,9 @@ describe("operations reserved for the CLI", () => {
 
         const lines = (await readFile(file, "utf-8")).trim().split("\n");
         expect(lines[0]).toBe("id,title,status,priority,dueDate,createdAt");
-        expect(lines[1]).toMatch(/^\d+,"Say ""hi"", then leave",in_progress,high,2030-05-01,\d{4}-/);
+        expect(lines[1]).toMatch(
+          /^\d+,"Say ""hi"", then leave",in_progress,high,2030-05-01,\d{4}-/,
+        );
         expect(lines).toHaveLength(2);
       } finally {
         await rm(dir, { recursive: true, force: true });
@@ -65,7 +72,10 @@ describe("operations reserved for the CLI", () => {
     ["listOverdue", () => taskService.listOverdue({ kind: "user", id: 1 })],
     ["summary", () => taskService.summary({ kind: "user", id: 1 })],
     ["exportCsv", () => taskService.exportCsv("x.csv", { kind: "user", id: 1 })],
-  ])("%s refuses a logged-in user, so it can never be exposed over HTTP by accident", async (_name, call) => {
-    await expect(call()).rejects.toBeInstanceOf(ForbiddenError);
-  });
+  ])(
+    "%s refuses a logged-in user, so it can never be exposed over HTTP by accident",
+    async (_name, call) => {
+      await expect(call()).rejects.toBeInstanceOf(ForbiddenError);
+    },
+  );
 });

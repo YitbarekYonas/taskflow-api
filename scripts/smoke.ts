@@ -28,7 +28,10 @@ check("health", (await call("GET", "/health")).status === 200);
 check("docs page", (await fetch(`${base}/docs/`)).status === 200);
 check("tasks need a login", (await call("GET", "/tasks")).status === 401);
 
-check("register", (await call("POST", "/auth/register", { email, name: "Smoke", password })).status === 201);
+check(
+  "register",
+  (await call("POST", "/auth/register", { email, name: "Smoke", password })).status === 201,
+);
 const login = await call("POST", "/auth/login", { email, password });
 check("login", login.status === 200, JSON.stringify(login.json));
 const token = login.json?.data?.accessToken as string;
@@ -42,9 +45,15 @@ check("create task", task.status === 201);
 const taskId = task.json?.data?.id;
 const list = await call("GET", `/tasks?projectId=${projectId}`, undefined, token);
 check("list shows the task", list.json?.meta?.total === 1);
-check("update task", (await call("PATCH", `/tasks/${taskId}`, { status: "done" }, token)).status === 200);
+check(
+  "update task",
+  (await call("PATCH", `/tasks/${taskId}`, { status: "done" }, token)).status === 200,
+);
 check("delete task", (await call("DELETE", `/tasks/${taskId}`, undefined, token)).status === 204);
-check("delete project", (await call("DELETE", `/projects/${projectId}`, undefined, token)).status === 204);
+check(
+  "delete project",
+  (await call("DELETE", `/projects/${projectId}`, undefined, token)).status === 204,
+);
 
 console.log(failures === 0 ? "\nSmoke test passed." : `\n${failures} check(s) failed.`);
 process.exit(failures === 0 ? 0 : 1);

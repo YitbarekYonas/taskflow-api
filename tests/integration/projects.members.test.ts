@@ -5,7 +5,8 @@ import { createProject, createTask, createUser } from "../support/factories.js";
 import { team } from "../support/scenarios.js";
 
 const roleOf = async (projectId: number, userId: number) =>
-  (await prisma.projectMember.findUnique({ where: { projectId_userId: { projectId, userId } } }))?.role;
+  (await prisma.projectMember.findUnique({ where: { projectId_userId: { projectId, userId } } }))
+    ?.role;
 
 describe("GET /projects/:id/members", () => {
   it("lists members with their names and roles", async () => {
@@ -26,7 +27,9 @@ describe("POST /projects/:id/members", () => {
   it("adds a user by email, ignoring case and spaces, and the new member gets access at once", async () => {
     const { owner, stranger, project } = await team();
 
-    const res = await (await asUser(owner)).post(`/projects/${project.id}/members`, {
+    const res = await (
+      await asUser(owner)
+    ).post(`/projects/${project.id}/members`, {
       email: `  ${stranger.email.toUpperCase()} `,
     });
 
@@ -39,16 +42,22 @@ describe("POST /projects/:id/members", () => {
   it("can add an owner, who can then manage the project", async () => {
     const { owner, stranger, project } = await team();
 
-    await (await asUser(owner)).post(`/projects/${project.id}/members`, { email: stranger.email, role: "owner" });
+    await (
+      await asUser(owner)
+    ).post(`/projects/${project.id}/members`, { email: stranger.email, role: "owner" });
 
     expect(await roleOf(project.id, stranger.id)).toBe("owner");
-    expect((await (await asUser(stranger)).patch(`/projects/${project.id}`, { name: "Renamed" })).status).toBe(200);
+    expect(
+      (await (await asUser(stranger)).patch(`/projects/${project.id}`, { name: "Renamed" })).status,
+    ).toBe(200);
   });
 
   it("answers 404 for an email nobody registered", async () => {
     const { owner, project } = await team();
 
-    const res = await (await asUser(owner)).post(`/projects/${project.id}/members`, { email: "nobody@example.com" });
+    const res = await (
+      await asUser(owner)
+    ).post(`/projects/${project.id}/members`, { email: "nobody@example.com" });
 
     expect(res.status).toBe(404);
     expect(res.body.error.message).toBe("No user with that email.");
@@ -57,7 +66,9 @@ describe("POST /projects/:id/members", () => {
   it("answers 409 for an existing member and does not change their role", async () => {
     const { owner, member, project } = await team();
 
-    const res = await (await asUser(owner)).post(`/projects/${project.id}/members`, { email: member.email, role: "owner" });
+    const res = await (
+      await asUser(owner)
+    ).post(`/projects/${project.id}/members`, { email: member.email, role: "owner" });
 
     expect(res.status).toBe(409);
     expect(await roleOf(project.id, member.id)).toBe("member");
@@ -70,7 +81,9 @@ describe("POST /projects/:id/members", () => {
     ["an empty body", {}],
   ])("rejects %s with 400", async (_name, body) => {
     const { owner, project } = await team();
-    expect((await (await asUser(owner)).post(`/projects/${project.id}/members`, body)).status).toBe(400);
+    expect((await (await asUser(owner)).post(`/projects/${project.id}/members`, body)).status).toBe(
+      400,
+    );
   });
 });
 
@@ -78,7 +91,9 @@ describe("PATCH /projects/:id/members/:userId", () => {
   it("lets an owner promote a member", async () => {
     const { owner, member, project } = await team();
 
-    const res = await (await asUser(owner)).patch(`/projects/${project.id}/members/${member.id}`, { role: "owner" });
+    const res = await (
+      await asUser(owner)
+    ).patch(`/projects/${project.id}/members/${member.id}`, { role: "owner" });
 
     expect(res.status).toBe(200);
     expect(res.body.data).toEqual({ userId: member.id, role: "owner" });
@@ -89,15 +104,24 @@ describe("PATCH /projects/:id/members/:userId", () => {
     const { owner, stranger, project } = await team();
     const user = await asUser(owner);
 
-    expect((await user.patch(`/projects/${project.id}/members/${stranger.id}`, { role: "owner" })).status).toBe(404);
-    expect((await user.patch(`/projects/${project.id}/members/99999999999`, { role: "owner" })).status).toBe(400);
-    expect((await user.patch(`/projects/${project.id}/members/${owner.id}`, { role: "admin" })).status).toBe(400);
+    expect(
+      (await user.patch(`/projects/${project.id}/members/${stranger.id}`, { role: "owner" }))
+        .status,
+    ).toBe(404);
+    expect(
+      (await user.patch(`/projects/${project.id}/members/99999999999`, { role: "owner" })).status,
+    ).toBe(400);
+    expect(
+      (await user.patch(`/projects/${project.id}/members/${owner.id}`, { role: "admin" })).status,
+    ).toBe(400);
   });
 
   it("refuses to demote the last owner, and the role stays", async () => {
     const { owner, project } = await team();
 
-    const res = await (await asUser(owner)).patch(`/projects/${project.id}/members/${owner.id}`, { role: "member" });
+    const res = await (
+      await asUser(owner)
+    ).patch(`/projects/${project.id}/members/${owner.id}`, { role: "member" });
 
     expect(res.status).toBe(409);
     expect(res.body.error.message).toContain("at least one owner");
@@ -106,10 +130,20 @@ describe("PATCH /projects/:id/members/:userId", () => {
 
   it("allows demoting an owner once another owner exists, and the demoted user loses owner rights", async () => {
     const { owner, member, project } = await team();
-    await (await asUser(owner)).patch(`/projects/${project.id}/members/${member.id}`, { role: "owner" });
+    await (
+      await asUser(owner)
+    ).patch(`/projects/${project.id}/members/${member.id}`, { role: "owner" });
 
-    expect((await (await asUser(owner)).patch(`/projects/${project.id}/members/${owner.id}`, { role: "member" })).status).toBe(200);
-    expect((await (await asUser(owner)).patch(`/projects/${project.id}`, { name: "Nope" })).status).toBe(403);
+    expect(
+      (
+        await (
+          await asUser(owner)
+        ).patch(`/projects/${project.id}/members/${owner.id}`, { role: "member" })
+      ).status,
+    ).toBe(200);
+    expect(
+      (await (await asUser(owner)).patch(`/projects/${project.id}`, { name: "Nope" })).status,
+    ).toBe(403);
   });
 });
 
@@ -119,7 +153,9 @@ describe("DELETE /projects/:id/members/:userId", () => {
     const task = await createTask({ project, createdBy: member });
     const removed = await asUser(member); // the token stays valid: roles are looked up on every request
 
-    expect((await (await asUser(owner)).delete(`/projects/${project.id}/members/${member.id}`)).status).toBe(204);
+    expect(
+      (await (await asUser(owner)).delete(`/projects/${project.id}/members/${member.id}`)).status,
+    ).toBe(204);
 
     expect((await removed.get(`/projects/${project.id}`)).status).toBe(404);
     expect((await removed.get(`/tasks/${task.id}`)).status).toBe(404);
@@ -129,7 +165,9 @@ describe("DELETE /projects/:id/members/:userId", () => {
   it("lets a member leave on their own", async () => {
     const { member, project } = await team();
 
-    expect((await (await asUser(member)).delete(`/projects/${project.id}/members/${member.id}`)).status).toBe(204);
+    expect(
+      (await (await asUser(member)).delete(`/projects/${project.id}/members/${member.id}`)).status,
+    ).toBe(204);
     expect(await roleOf(project.id, member.id)).toBeUndefined();
   });
 
@@ -145,7 +183,9 @@ describe("DELETE /projects/:id/members/:userId", () => {
 
   it("answers 404 for a user who is not a member", async () => {
     const { owner, stranger, project } = await team();
-    expect((await (await asUser(owner)).delete(`/projects/${project.id}/members/${stranger.id}`)).status).toBe(404);
+    expect(
+      (await (await asUser(owner)).delete(`/projects/${project.id}/members/${stranger.id}`)).status,
+    ).toBe(404);
   });
 });
 
@@ -167,7 +207,11 @@ describe("the last-owner rule under concurrency", () => {
       ]);
 
       if (first.status === 200 && second.status === 200) bothSucceeded++;
-      if ((await prisma.projectMember.count({ where: { projectId: project.id, role: "owner" } })) === 0) withoutOwner++;
+      if (
+        (await prisma.projectMember.count({ where: { projectId: project.id, role: "owner" } })) ===
+        0
+      )
+        withoutOwner++;
     }
 
     expect(withoutOwner).toBe(0);

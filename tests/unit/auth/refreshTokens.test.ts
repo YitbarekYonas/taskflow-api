@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { generateRefreshToken, hashRefreshToken, newFamilyId } from "../../../src/auth/refreshTokens.js";
+import {
+  generateRefreshToken,
+  hashRefreshToken,
+  newFamilyId,
+} from "../../../src/auth/refreshTokens.js";
 
 describe("refresh token helpers", () => {
   it("generates 256 bits as 43 URL-safe characters", () => {
@@ -13,7 +17,7 @@ describe("refresh token helpers", () => {
 
   it("hashes to SHA-256 (known answer for 'abc')", () => {
     expect(hashRefreshToken("abc")).toBe(
-      "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+      "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
     );
   });
 

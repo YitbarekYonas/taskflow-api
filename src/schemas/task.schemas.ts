@@ -7,8 +7,6 @@ const dateString = z
   .regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD")
   .refine((v) => !Number.isNaN(Date.parse(v)), "Not a real date");
 
-const title = z.string().trim().min(1, "Title cannot be empty").max(200);
-
 export const SORT_FIELDS = ["createdAt", "dueDate", "priority", "title"] as const;
 
 export const listTasksQuerySchema = z.object({
@@ -31,7 +29,6 @@ export const createTaskSchema = z
     projectId: dbIdBody.optional(),
   })
   .strict();
-
 
 export const updateTaskSchema = z
   .object({

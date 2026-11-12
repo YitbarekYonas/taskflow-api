@@ -3,7 +3,7 @@
 services:
   db:
     image: postgres:17
-    container_name: taskflow-db   # keeps scripts/check-migrations.sh working
+    container_name: taskflow-db # keeps scripts/check-migrations.sh working
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
