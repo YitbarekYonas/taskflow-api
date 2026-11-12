@@ -41,10 +41,11 @@
     "format:check": "prettier --check .",
     "lint": "eslint . --max-warnings 0",
     "lint:fix": "eslint . --fix",
-    "precheck": "npm run typecheck:all && npm run lint && npm run format:check && npm run test:unit && npm run build",
+    "precheck": "npm run typecheck:all && npm run lint && npm run format:check && npm run lint:openapi && npm run test:unit && npm run build",
     "ci": "npm run precheck && npm run test:integration",
     "dev": "tsx watch src/server.ts | pino-pretty",
-    "dev:json": "tsx watch src/server.ts"
+    "dev:json": "tsx watch src/server.ts",
+    "lint:openapi": "tsx scripts/export-openapi.ts && redocly lint .tmp/openapi.json"
   },
   "lint-staged": {
     "*.ts": [

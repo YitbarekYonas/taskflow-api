@@ -88,16 +88,19 @@ export const baseSpec = {
       "A task-management API built with Node.js, Express and TypeScript.\n\n" +
       'All errors share one shape: `{ "error": { "message": "..." } }`. ' +
       "Validation errors add a `details` array, and unexpected 500s include a `requestId`.",
-    license: { name: "MIT" },
+    license: {
+      name: "MIT",
+      url: "https://opensource.org/licenses/MIT",
+    },
   },
   security: [{ bearerAuth: [] }],
   servers: [{ url: "/" }],
   tags: [
-    { name: "System" },
-    { name: "Auth" },
-    { name: "Tasks" },
-    { name: "Projects" },
-    { name: "Comments" },
+    { name: "System", description: "Health check and API metadata" },
+    { name: "Auth", description: "Registration, login, tokens and logout" },
+    { name: "Tasks", description: "Create, read, update and delete tasks" },
+    { name: "Projects", description: "Projects, their members, and duplicate/merge" },
+    { name: "Comments", description: "Comments on tasks" },
   ],
   paths: {
     "/health": {
@@ -655,7 +658,20 @@ const FORBIDDEN_OPS = new Set([
   "DELETE /tasks/{taskId}/comments/{commentId}",
 ]);
 
-type Operation = { security?: unknown[]; responses: Record<string, unknown> };
+type Operation = { operationId?: string; security?: unknown[]; responses: Record<string, unknown> };
+
+const capitalise = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
+
+// GET /tasks/{id}/comments -> getTasksByIdComments. Unique by construction, stable across runs.
+function operationIdFor(method: string, path: string): string {
+  const parts = path
+    .split("/")
+    .filter(Boolean)
+    .map((segment) =>
+      segment.startsWith("{") ? `By${capitalise(segment.slice(1, -1))}` : capitalise(segment),
+    );
+  return `${method}${parts.join("")}`;
+}
 
 function withSecurity<T extends { paths: object }>(spec: T): T {
   for (const [path, item] of Object.entries(spec.paths)) {
@@ -663,6 +679,7 @@ function withSecurity<T extends { paths: object }>(spec: T): T {
       const op = (item as Record<string, Operation | undefined>)[method];
       if (!op) continue;
       const key = `${method.toUpperCase()} ${path}`;
+      op.operationId ??= operationIdFor(method, path);
       if (PUBLIC_OPS.has(key)) {
         op.security = []; // overrides the global requirement
         continue;
