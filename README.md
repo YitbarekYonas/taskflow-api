@@ -9,7 +9,8 @@ A team task-management API built with Node.js, Express, TypeScript, and Prisma.
 - **Core:** Repository pattern, Unit of Work for transactions, Zod validation, strict TypeScript, and centralized error handling.
 - **Database:** PostgreSQL with Prisma ORM, enforcing referential integrity, cascading deletes, and composite indexes for fast queries.
 - **Testing:** Vitest unit tests for pure logic, integration tests against a real, isolated test database via Supertest, and a small post-build smoke test of the compiled server. Coverage thresholds ratchet both suites.
-- **Code quality:** ESLint (flat config, type-aware rules, architecture enforcement), Prettier, Husky pre-commit/pre-push hooks, and `npm run ci` for the exact pipeline CI will run.
+- **Code quality:** ESLint (flat config, type-aware rules, architecture enforcement), Prettier, Husky pre-commit/pre-push hooks, Redocly OpenAPI linting, and `npm run ci` for the exact pipeline CI will run.
+- **Observability:** Structured JSON logging with pino, request-scoped correlation via `AsyncLocalStorage`, secret redaction by field name, and a Prisma-safe error serializer.
 - **Production Middleware:** Security headers (Helmet), CORS, Request IDs, body size limits, and **rate limits**.
 
 ## Setup
@@ -36,7 +37,8 @@ npm run typecheck
 
 ## Development
 ```bash
-npm run dev     # Run API with auto-restart (http://localhost:3000)
+npm run dev     # Run API with auto-restart (http://localhost:3000), pretty logs via pino-pretty
+npm run dev:json # Same, but raw JSON on stdout (no pretty pipe)
 npm run cli -- list  # Run CLI
 npm run build   # Build for production
 npm start       # Run compiled JS
@@ -60,10 +62,11 @@ npm start       # Run compiled JS
 
 | Command | What it does |
 |---|---|
-| `npm run precheck` | Typecheck, lint, format check, unit tests, build (~30s) |
+| `npm run precheck` | Typecheck, lint, format check, OpenAPI lint, unit tests, build (~30s) |
 | `npm run ci` | `precheck` plus integration tests (~1 min) — what CI will run |
 | `npm run lint` / `npm run lint:fix` | ESLint with `--max-warnings 0`; fix mode applies autofixes |
 | `npm run format` / `npm run format:check` | Prettier write / check |
+| `npm run lint:openapi` | Export the spec to `.tmp/openapi.json` and run Redocly against it |
 | `npm run verify` | Build and run everything against the compiled server |
 | `npm run test:coverage` | Combined unit + integration with ratcheted thresholds |
 
@@ -114,6 +117,7 @@ Unit tests cover pure logic that needs no I/O:
 - Error-to-status mapping (with order locked in)
 - Date helpers (`isPastDate`, `todayUtc` with an injected clock)
 - Zod schemas (ids, NUL characters, mass-assignment, query params)
+- **Logger format, level filtering, redaction (7 paths), Prisma error serialization, non-Error thrown values, request context propagation across `await`/timers/overlapping requests, `setContextUser`, explicit-field-wins-vs-mixin** (`logger.test.ts`, 21 tests)
 
 The tests are named after behavior, and the tables in `it.each` make gaps obvious. Coverage is used as a map of untested logic, not a score — controllers, repositories, and routes are covered by integration tests, not unit tests.
 
@@ -133,7 +137,7 @@ Integration tests run the real HTTP stack — validation, controllers, services,
   2. `truncateAll()` runs `SELECT current_database()` and refuses if the name doesn't end in `_test`.
 - **Files run one at a time** (`fileParallelism: false`) because they share one database.
 
-Integration tests cover four areas:
+Integration tests cover five areas:
 
 **Auth**
 - Registration: 201 with public fields, Argon2id hash stored, no password in body, security headers, duplicate email 409 (case-insensitive), mass-assignment rejected, malformed JSON/array/`null`/`text/plain` rejected, **8 parallel registrations produce exactly one account**.
@@ -163,8 +167,27 @@ Integration tests cover four areas:
 - **Comments:** author comes from the token (client-supplied `author`/`authorId`/`taskId` rejected), the author edits their own words, **even a project owner cannot edit another user's comment** (403, unchanged), the author or project owner deletes, a stranger gets `404`, comments vanish with their task, **a comment cannot be reached through the wrong task's URL** (IDOR), and on a deleted account the comment keeps its `author` name but loses `authorId` and can only be moderated.
 - **Access matrix:** 24 actions × 3 personas (stranger/member/owner) = **72 cells**, each asserting the exact status and — for every denied request — that a **fingerprint of every table is unchanged before and after**. The matrix is the executable version of the roles table below; a missing cell is visible, a wrong cell fails a test with a readable name.
 
+**Logging & observability**
+- **One structured line per request**, with `event: "http.request"` and a `requestId` matching the `X-Request-Id` response header.
+- **Level mapping**: 200 → `info`, 4xx → `warn`, 5xx → `error`.
+- **Path only, never the query string** — a request with `?search=needle-in-the-query` produces a log line whose `path` field is `/tasks`, and the needle string appears nowhere in the output.
+- **`userId` only on authenticated requests.**
+- **The `auth.refresh_reuse` event written inside `auth.service.ts`** (no explicit `requestId` argument) **carries the request id** of the HTTP request being served — proving the `AsyncLocalStorage` context survives the body parser and reaches code deep inside a service.
+- **Six parallel replays keep their request ids distinct** — no cross-contamination under load.
+- **The leak test** pushes real passwords (correct, wrong, and short), the access token, the refresh token (original and rotated), and the user's email through `register` / `login` / `me` / `refresh` / `logout` — **none of them appear anywhere in the log output**. `$argon2` also absent.
+- **Unexpected 500s** log the real cause at `error` level with the request id, while the client sees a generic message. A fake Prisma error with an email and a password hash in its message produces no `LEAK` in the output but keeps the final "Unique constraint failed" reason.
+
+**Docs & auth coverage & operation ids** (`docs.and.auth.test.ts`)
+- Every documented operation answers `401` without credentials (except `GET /health`, `POST /auth/register`, `/auth/login`, `/auth/refresh`, `/auth/logout`).
+- Every protected operation documents a `401` response in the spec.
+- `/openapi.json` serves, its `openapi: "3.1.0"` and `info.version` matches `package.json`.
+- `/docs/` serves.
+- `bearerAuth` is declared.
+- **`operationId` exists on every operation.**
+- **`operationId` values are unique.**
+
 - **Test infrastructure:** DB name ends in `_test` (both safety layers), all migrations applied, tables empty between tests, `RESTART IDENTITY` gives `id=1`.
-- **Security & docs:** every documented operation answers `401` without credentials (except the `PUBLIC` set), every protected operation documents a `401` response, `/openapi.json` version matches `package.json`, the `bearerAuth` scheme is declared, Helmet headers are present, CORS allows `Authorization` for the configured origin, unknown routes return JSON `404`, oversized bodies return `413` with the standard error shape, and an unexpected failure returns `500` with a generic message + `requestId` while the real cause is logged.
+- **Security & docs:** Helmet headers present, CORS allows `Authorization` for the configured origin, unknown routes return JSON `404`, oversized bodies return `413` with the standard error shape.
 
 ### Coverage (unit + integration together)
 ```bash
@@ -193,13 +216,14 @@ npm run smoke       # 12 checks against the COMPILED server
 ### Test Scripts
 | Script | What it proves |
 |---|---|
-| `npm run test:unit` | Pure functions (pagination, slugs, access rules, tokens, config, schemas, dates) |
+| `npm run test:unit` | Pure functions (pagination, slugs, access rules, tokens, config, schemas, dates, logger) |
 | `npm run test:watch` | Re-runs affected tests on save |
 | `npm run test:integration` | API tests against a real, isolated test database (`taskflow_test`) |
 | `npm test` | Unit tests, then integration tests |
 | `npm run test:coverage` | Runs both suites once with coverage report and thresholds |
 | `npm run smoke` | Post-build check of the compiled server over real HTTP |
 | `npm run test:ratelimit` | Rate-limit behavior (currently script-only; porting into the suite is a future task) |
+| `npm run lint:openapi` | Redocly lint of the exported OpenAPI spec |
 | `npm run verify` | Builds, starts the compiled server, then runs all of the above |
 
 ## Business Rules
@@ -207,6 +231,40 @@ npm run smoke       # 12 checks against the COMPILED server
 - A task's `dueDate` cannot be in the past **on creation** through the API. The rule uses the **UTC calendar date**.
 - Updates may still set a past date (people correct dates after the fact).
 - The CLI (`SYSTEM` actor) is exempt — imports and data fixes are unaffected.
+
+## Logging
+
+Output is **one JSON object per line on stdout**. The platform (Docker, systemd, cloud) collects and rotates; the app does not.
+
+**Fields:**
+
+| Field | Present on | Meaning |
+|---|---|---|
+| `level` | every line | Numeric: 10 trace, 20 debug, 30 info, 40 warn, 50 error, 60 fatal |
+| `time` | every line | ISO 8601 timestamp |
+| `service` | every line | Always `"taskflow"` |
+| `msg` | every line | Short, constant, human-readable |
+| `event` | business events | Stable name, e.g. `http.request`, `auth.refresh_reuse` |
+| `requestId` | inside a request's async context | Matches the `X-Request-Id` response header |
+| `userId` | authenticated requests | The user making the request |
+| `method`, `path`, `status`, `durationMs`, `ip` | `event: "http.request"` | Standard request fields |
+
+**Reading them:**
+
+```bash
+npm run dev                  # pretty output for development
+npm run dev:json             # raw JSON lines
+npm run dev:json | jq 'select(.status >= 400)'                   # only failures
+npm run dev:json | jq 'select(.event == "auth.refresh_reuse")'   # security events
+```
+
+If a user reports a bug, find their `X-Request-Id` in the response header and grep the logs for `"requestId":"<that id>"` — every line written while serving that request will match.
+
+**Security:** secrets are redacted by field name (`password`, `passwordHash`, `accessToken`, `refreshToken`, `authorization`, `cookie`, `jwtSecret`, `databaseUrl` at three depths). Query strings, request bodies and email addresses are never logged. Prisma errors are trimmed to their final line and `meta` is dropped. **A test sends real passwords, hashes, tokens and an email through the API and fails if any appear in the output.**
+
+**Known limits of redaction:** it works by key name only. A secret inside a message string, under an unlisted key (`pwd`, `rawToken`), or nested deeper than the configured paths is not redacted. Defense #1 is **not putting the secret in the log call**; the leak test is the second line.
+
+**Operation IDs in the OpenAPI spec** are auto-generated from method + path (`op.operationId ??= operationIdFor(method, path)` inside `withSecurity()`) so they are unique by construction and stable across runs. A hand-written `operationId` is preserved; a missing one gets generated. `npm run lint:openapi` runs Redocly against the exported spec, and a unit test asserts existence and uniqueness — because a linter only catches what someone remembers to run, and a test catches every push.
 
 ## Security
 
@@ -385,13 +443,16 @@ sequenceDiagram
 ```
 HTTP request
   → helmet → cors → requestId → logger → rate limiter → json parser
+  → requestContext (AsyncLocalStorage)  ← runs AFTER the body parser
   → route (validate params / query / body)
   → controller (HTTP in, HTTP out)
-  → service (business rules)
+  → service (business rules, logs with requestId from context)
   → UnitOfWork (transactions) → repository (SQL queries via Prisma)
 ```
 
 The repository pattern decouples business logic from data storage. Services depend on a `Repository<T>` interface, not a specific implementation. Listing, filtering, sorting, and pagination are handled directly by PostgreSQL. Multi-step operations (like `duplicate` and `merge`) run through a `UnitOfWork`. Role checks happen in the service layer, using a dedicated `Access` helper. Rate limiting runs before body parsing to avoid resource exhaustion.
+
+`requestContext` sits **after** the body parser deliberately: `express.json()` calls `next()` from a stream event, and a listener runs in the context of whoever calls `emit` — so a context store created before the parser would be lost for POST requests. Running it after means every downstream handler — including code inside a service that never received a `requestId` argument — logs with the correct request's id.
 
 The layering above is **enforced by ESLint**, not just documented. `no-restricted-imports` blocks `src/controllers/**`, `src/routes/**`, `src/services/**`, `src/auth/**`, `src/middleware/**`, and `src/schemas/**` from importing Prisma or `src/repositories/prisma/**`. Only `src/container.ts`, `src/server.ts`, and `src/cli.ts` may — the composition root, the shutdown hook, and the CLI.
 
@@ -416,7 +477,7 @@ Moving list queries from JavaScript to SQL drastically reduced response times, e
 | `DATABASE_URL` | PostgreSQL connection string | (required) |
 | `TEST_DATABASE_URL` | PostgreSQL connection string for integration tests (must end in `_test`) | `postgresql://postgres:postgres@localhost:5432/taskflow_test` |
 | `CORS_ORIGIN` | Allowed origins for browser requests | `http://localhost:5173` |
-| `LOG_LEVEL` | Logging verbosity (`info` or `debug`) | `info` |
+| `LOG_LEVEL` | Logging verbosity: `trace`, `debug`, `info`, `warn`, `error`, `fatal`, `silent` | `info` |
 | `JWT_SECRET` | Secret used to sign access tokens (min 32 chars) | (required) |
 | `ACCESS_TOKEN_TTL_SECONDS` | Access token lifetime in seconds | `900` (15 min) |
 | `REFRESH_TOKEN_TTL_DAYS` | Refresh token lifetime in days | `30` |
@@ -490,6 +551,7 @@ erDiagram
 - **Request IDs:** Each request gets an `X-Request-Id` header, echoed back and included in logs for tracing.
 - **Body Limit:** JSON payloads are capped at 100kb to prevent abuse (returns `413 Payload Too Large`).
 - **Rate Limiter:** Throttles brute-force and enumeration attacks. Returns `429` with `Retry-After` and `RateLimit` headers.
+- **Logger:** Pino — one JSON object per line on stdout, with `requestId` and `userId` from the `AsyncLocalStorage` context on every line. Secrets redacted by field name; query strings and bodies never logged; Prisma errors trimmed to their final line.
 
 ## Project Structure
 ```
@@ -508,18 +570,19 @@ src/
 ├── auth/                 # Password hashing, JWT utilities, refresh token helpers, policy (Actor), access (roles)
 ├── container.ts          # Composition root
 ├── db.ts                 # Prisma Client instance
+├── requestContext.ts     # AsyncLocalStorage store + setContextUser
 ├── config.ts, logger.ts, errors.ts, types.ts, utils.ts
 ├── docs/                 # OpenAPI spec
 ├── generated/prisma/     # Auto-generated Prisma Client (gitignored)
 ├── schemas/              # Zod validation
 ├── services/             # Business logic: tasks, projects, comments, auth, dates
-├── middleware/           # Logger, validation, error handling, request IDs, authenticate, rate limiters
+├── middleware/           # Logger, request context, validation, error handling, request IDs, authenticate, rate limiters
 ├── controllers/          # HTTP logic
 └── routes/               # Express routes
 ```
 
 ## Tech Stack
-Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CORS, Swagger UI, Argon2, jose, express-rate-limit, Vitest, Supertest, ESLint (flat config, typescript-eslint), Prettier, Husky, lint-staged.
+Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CORS, Swagger UI, Argon2, jose, express-rate-limit, pino, pino-pretty, Vitest, Supertest, ESLint (flat config, typescript-eslint), Prettier, Husky, lint-staged, Redocly.
 
 ## Roadmap
 - [x] Week 1 — CLI core
@@ -541,6 +604,7 @@ Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CO
   - [x] Combined coverage run with ratcheted thresholds (86/73/88/88)
   - [x] Retired five hand-written scripts (token-attacks, auth-coverage, refresh-flow, access-attacks, security-checks), shrunk smoke to a post-build check
   - [x] ESLint (flat config, type-aware rules), Prettier, Husky pre-commit/pre-push hooks, `precheck` and `ci` scripts (Day 33)
+  - [x] Structured logging with pino + `AsyncLocalStorage` + redaction, and Redocly OpenAPI linting (Day 34)
   - [ ] CI gate (Week 7)
 
 ## Known Limitations
@@ -580,5 +644,10 @@ Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CO
 34. **`precheck` / `ci` catch drift the individual scripts can miss:** The first `npm run ci` found 7 files that had drifted from Prettier's output after the ESLint fixes. `format:check` is the canary — cheap, and it never lies.
 35. **Hooks are not the gate:** the pre-commit hook can be bypassed with `git commit --no-verify`, and the pre-push hook with `git push --no-verify`. Only `npm run ci` on a fresh checkout is a real gate. Week 7's pipeline will run `npm run ci` and will not rely on hooks.
 36. **`prepare: "husky || true"`:** Husky's install is guarded so `npm ci --omit=dev` in a production Docker build doesn't crash when Husky (a devDependency) isn't installed. In environments without Git hooks (CI runners, fresh containers), set `HUSKY=0` before `npm install` to skip the hook install explicitly.
-```
-
+37. **Redaction is by key name only:** A secret inside a message string, a field name not in `SENSITIVE_KEYS` (`pwd`, `rawToken`), or nesting deeper than the 3 configured paths is **not** redacted. The unit tests document both halves (unlisted name → visible, listed name → redacted); the integration leak test is the real defense. Defense #1 is still **not putting the secret in the log call** — redaction is a last safety net.
+38. **Prisma's own query log bypasses pino:** With `LOG_LEVEL=debug` on the Prisma client, SQL is written by Prisma in its own format, not through pino. Routing Prisma's `query` events through `prisma.$on("query", ...)` into `logger.debug({ event: "db.query", durationMs })` is a documented challenge; until then, `LOG_LEVEL=debug` mixes pino lines and Prisma's native output on stdout.
+39. **No log shipping or alerting yet:** The app writes JSON to stdout; a real system would pipe to a log aggregator and set up alerts on `auth.refresh_reuse` frequency, 5xx rate, and rate-limit hits. Documented as a Week 7+ concern.
+40. **Logs from before the context middleware** (rate limiter, malformed JSON) rely on explicit `requestId` in the log call, since the async context doesn't exist yet at those stages. The 500 branch handles this by reading `res.locals.requestId` directly.
+41. **`operationId` is auto-generated from method + path:** Renaming a path or switching a route's method would silently change the `operationId`, which is a breaking change for any consumer that generates an SDK from the spec. A future "pin the id in the spec" convention (or a migration note in the PR) is what mitigates it; today the generator is the baseline.
+42. **`operation-4xx-response` is off in `redocly.yaml`:** `/health` has no meaningful 4xx case. Disabled with a comment — the decision is recorded, not hidden. If `/health` ever grows a failure mode that returns 4xx, the rule should come back on.
+43. **`/health` doesn't run `precheck`'s Redocly step inside the request:** `lint:openapi` is a build-time check. The `/docs` endpoint serves whatever the current `openApiSpec` says — if someone hot-reloaded a spec change that fails `lint:openapi`, `/docs` would still render it, because the app doesn't lint at runtime. `precheck` is the gate.
