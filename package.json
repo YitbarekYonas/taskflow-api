@@ -1,6 +1,6 @@
 {
   "name": "taskflow",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Task manager API built with Node.js, Express, and TypeScript",
   "main": "index.js",
   "scripts": {
@@ -29,7 +29,6 @@
     "setup": "npm run db:up && npm run db:deploy && npm run db:generate && npm run db:seed",
     "bench:login": "tsx scripts/login-timing.ts",
     "auth:purge": "tsx scripts/purge-tokens.ts",
-    "test:ratelimit": "tsx scripts/test-ratelimit.ts",
     "typecheck:all": "tsc -p tsconfig.scripts.json",
     "verify": "bash scripts/verify.sh",
     "test:unit": "vitest run",
