@@ -6,7 +6,7 @@ const bool = (fallback: "true" | "false") =>
     .enum(["true", "false"])
     .default(fallback)
     .transform((v) => v === "true");
-const schema = z.object({
+export const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   LOG_LEVEL: z.enum(["trace", "debug", "info", "warn", "error", "fatal", "silent"]).default("info"),
   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
@@ -29,7 +29,7 @@ const schema = z.object({
   DOCS_ENABLED: bool("true"),
 });
 
-const parsed = schema.safeParse(process.env);
+const parsed = envSchema.safeParse(process.env);
 if (!parsed.success) {
   console.error("Invalid enviroment configuration:");
   for (const issue of parsed.error.issues) {

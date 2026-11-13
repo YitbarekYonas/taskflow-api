@@ -96,7 +96,7 @@ To verify the whole project against a **compiled** server (what actually ships),
 ```bash
 npm run verify
 ```
-This builds `dist/`, starts it, then runs `test:unit`, `test:integration`, `smoke`, and `test:ratelimit` in that order, restarting the server between `smoke` and `test:ratelimit` so the in-memory rate-limit counters start at zero. The script ends with `Everything passed.` when all four steps succeed.
+This builds `dist/`, starts it, then runs `test:unit`, `test:integration`, and `smoke` in that order. The script ends with `Everything passed.` when all three steps succeed.
 
 ![Smoke Test Results](./docs/smoke-test.png)
 
@@ -203,7 +203,7 @@ Current thresholds (measured after Day 32, rounded down − 2 to absorb v8's rou
 - Lines: **88**
 
 Expected low-coverage files that are **not** regressions:
-- `src/middleware/rateLimit.ts` / `limiters.ts` — the suite runs with `RATE_LIMIT_ENABLED=false`, so the limiter body is exercised only by `npm run test:ratelimit`. Porting it into the suite is Challenge 1 (a future task).
+- `src/middleware/rateLimit.ts` / `limiters.ts` — the shared test app runs with `RATE_LIMIT_ENABLED=false`, so the limiter body is exercised by `tests/integration/ratelimit.test.ts` (which builds its own app copy with limits on). Some module-load branches inside `rateLimit.ts` may still show partial coverage.
 - `src/repositories/prisma/*.repository.ts` — the `P2002`/`P2003`/`P2025` mappings that the service layer's fast-path checks prevent from being hit. The `task.repository.ts` P2003 path is covered by a dedicated repo-level test; the rest are documented as gaps.
 
 ### Post-build smoke test
@@ -222,7 +222,6 @@ npm run smoke       # 12 checks against the COMPILED server
 | `npm test` | Unit tests, then integration tests |
 | `npm run test:coverage` | Runs both suites once with coverage report and thresholds |
 | `npm run smoke` | Post-build check of the compiled server over real HTTP |
-| `npm run test:ratelimit` | Rate-limit behavior (currently script-only; porting into the suite is a future task) |
 | `npm run lint:openapi` | Redocly lint of the exported OpenAPI spec |
 | `npm run verify` | Builds, starts the compiled server, then runs all of the above |
 
@@ -631,7 +630,7 @@ Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CO
 21. **Unit tests don't cover HTTP or SQL:** Controllers, repositories, and routes show 0% unit coverage by design. Integration tests (Week 5, Days 30–32) cover them.
 22. **Integration tests run serially:** The test database is shared across files, so `fileParallelism: false` is required. Per-worker databases would allow parallelism at the cost of setup complexity.
 23. **Test database is wiped on every `beforeEach`:** Correct for the current suite (a few ms per wipe), but slower than transaction rollback isolation. Documented as a challenge for later.
-24. **`test:ratelimit` is a script, not part of the suite:** The rate limiter's body (counters, key generators, 429 handling) is exercised only by `scripts/test-ratelimit.ts`, and it needs a fresh in-memory budget. `verify.sh` restarts the compiled server between `smoke` and `test:ratelimit` so the counters start at zero. Porting the script into the integration suite (Challenge 1) will let `beforeEach` reset the store instead.
+24. **Rate-limit tests build their own app copy:** `tests/integration/ratelimit.test.ts` uses `vi.stubEnv` + `vi.resetModules()` + dynamic import to build a fresh app with `RATE_LIMIT_ENABLED=true`. The shared test app still runs with limits off, so ordinary tests can send as many requests as they like. The limiter window's expiry (the counter resetting after 15 minutes) isn't tested — it would need a faked clock inside the limiter's store (Challenge 1).
 25. **Rate limiters must be mounted exactly once:** A limiter attached both in `app.ts` by path **and** on the route handler runs twice per request and halves its effective limit. This bug existed for `registerLimiter`, `loginIpLimiter`, and `refreshLimiter` and was fixed on Day 32 by removing the `app.use("/auth/...", ...)` mounts from `app.ts`, leaving `globalLimiter` as the only app-level mount. Any new limiter must follow the same rule: **one mount, one place** — `grep -rn "Limiter" src/` is the fast check.
 26. **Due-date rule uses the UTC calendar date, not the caller's local date:** A user far west of UTC can be rejected for setting "today" in their time zone late in their evening. Options (accept vs. one-day grace vs. `Time-Zone` header) are documented in `notes.md`; the current choice is to accept UTC for consistency with the rest of the API.
 27. **Integration tests don't cover every branch of `PATCH /tasks/:id`:** Coverage gaps identified in my own test list: preserving `createdById` through a patch is only implicitly covered, and "stranger moves `projectId`" isn't a distinct test. Not bugs — candidates for a second pass.
