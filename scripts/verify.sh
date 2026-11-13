@@ -26,7 +26,7 @@ if ! curl -sf "$BASE_URL/health" > /dev/null; then
 fi
 echo "Compiled server is up on $BASE_URL"
 
-for step in test:unit test:integration smoke test:ratelimit; do
+for step in test:unit test:integration smoke; do
   echo
   echo "==== npm run $step"
   npm run --silent "$step"

@@ -187,6 +187,40 @@
 - **24 findings on the first run is normal.** `recommendedTypeChecked` is aggressive. Read the *top five rules*, not every line. Triage by category (delete dead code, fix the real bug, narrow types, one disable-with-reason), not by file.
 - **Disable a rule once, at the top of a file, with a reason.** The `errorHandler.ts` case (`no-unsafe-member-access` × 10 on Express's untyped error objects) is the textbook example. A full `errorShape()` guard is a Day 34+ job; one disable comment is the honest answer this week.
 
+### Week 5 (Structured Logging with pino & AsyncLocalStorage)
+- **Structured logs are data, not sentences.** `{"level":30,"event":"http.request","status":404,"path":"/tasks/9","requestId":"…"}` can be filtered (`status >= 500`), counted, and graphed. `"GET /tasks/9 404 12ms"` can only be grepped. Keep the message short and constant, put the *variables* in fields.
+- **Stable event names.** A field like `event: "auth.refresh_reuse"` is something an alert can match for years. A sentence will be reworded next month.
+- **Levels mean something.** `error` is a bug or an outage someone should look at. `warn` is something suspicious but handled (a 401, a rate limit). `info` is normal business. `debug` and `trace` are for development. A log full of `error` lines for every 404 gets ignored.
+- **Pino numeric levels:** trace 10, debug 20, info 30, warn 40, error 50, fatal 60. Output is JSON on stdout. **The app does not format, rotate, or ship logs.** The platform does. Pretty printing is a development-only pipe (`| pino-pretty`).
+- **Correlation: the request ID.** One request produces several lines. If every line carries the same `requestId`, you can reconstruct what happened. The ID is returned to the client in `X-Request-Id` and in 500 responses.
+- **`AsyncLocalStorage` (ALS) is "a global variable per request".** Code deep inside a service can log with the right request ID without every function taking a `requestId` argument. The catch: the stored value follows **promises, timers, and `await`**, but **event listeners run in the context of whoever calls `emit`**. `express.json()` calls `next()` from a stream event, so a context created before the body parser would be lost for `POST` requests. **Put the context middleware after the body parser.**
+- **`mixin()` adds fields to every line.** Pino calls it on each log call. We use it to attach the request context. A field passed explicitly in the log call wins over the mixin, so keys are never duplicated.
+- **Redaction is by key name.** `redact: { paths: ["*.password"] }` replaces any `password` field at that depth with `[Redacted]`. It does **not** catch a secret inside a message string, a field with a different name (`pwd`), or something nested deeper than your paths. Redaction is the last safety net; the first defense is **not putting the secret in the log call**.
+- **Errors can carry secrets.** A Prisma error's `message` embeds the failing query *including argument values* (a password hash, an email). Logging `{ err }` with the default serializer would write them to disk. **Write a serializer that keeps only the final line and drops `meta`.**
+- **Don't log personal data you don't need.** Record the **path**, not the query string, not request bodies, not email addresses. The login form's email field is where people sometimes paste their password by mistake.
+- **Linting documentation.** `redocly lint` checks an OpenAPI file against rules (every operation has an `operationId`, tags have descriptions, no unused components). Generated clients and docs tools rely on those fields, so catching gaps in CI is cheap. **`operationId` must be unique** — auto-generate from method + path so it's unique by construction.
+
+### Week 5 (Day 35 — Wrap-up, Release & Redis First Contact)
+- **Redis is a very fast key-value store in memory.** Typical uses: counters, caches, queues, locks and pub/sub. Everything is optional-by-design: data can expire, and an unconfigured Redis can lose recent writes on a crash. Never make it the only copy of something you can't recreate.
+- **`SET ... EX` and `TTL` are the fixed-window rate-limiter in one command.** The second `INCR` doesn't reset the clock, so the window is fixed from the first request. That's why a limiter on Redis is simpler and more correct than one in process memory.
+- **`SET key value NX EX 30` is an atomic lock.** Two workers racing to claim the same job: one gets `OK`, the other gets `nil`. No check-then-set race. This is the Redis version of `SELECT ... FOR UPDATE`.
+- **`INCR` is atomic on a single-threaded server.** Repeating Day 9's race against Redis (two terminals, 1000 increments each) returns exactly 2000. The file-based counter lost updates because it wasn't atomic; Redis's `INCR` is one step.
+- **Never `KEYS *` in production.** It scans the whole keyspace and blocks the single thread. Use `SCAN` to iterate incrementally.
+- **Your rate limiters are per process.** The counters live in each Node process's memory. With two instances behind a load balancer, a client gets double the budget, and a restart resets the counts. A shared Redis store fixes both (Day 36).
+- **Cache-aside is the standard pattern.** Read the cache; on a miss, read PostgreSQL and store the result with a **TTL**. Writes **invalidate** the affected keys. The hard part is knowing *which* keys a write affects.
+- **A cache must respect authorization.** A cached "dashboard stats" response is visible to whoever can read that key. If the key doesn't include the user or project, you've built a data leak that no permission check will catch (Day 37 tests this).
+- **Redis is a network dependency with its own failure modes.** If it's down, should the limiter let everyone through (fail open) or reject everything (fail closed)? Should a missing cache slow requests down or break them? Week 6 makes these decisions explicitly.
+- **A thundering herd (cache stampede).** When a popular key expires, a hundred requests all miss at once and hit the database together. Remedies: jittered TTLs, or a short lock so only one request refills the cache.
+- **Characterization tests come before a storage swap.** The rate limiters were tested only by a hand-written script. Before Week 6 moves their counters to Redis, they are tested inside the suite, describing today's behavior. That's the safest way to change what's underneath: the tests tell you if behavior changed.
+- **The suite builds its own copy of the app for rate-limiter tests.** `vi.stubEnv("RATE_LIMIT_ENABLED", "true")` + `vi.resetModules()` + `await import(...)` gives a fresh app with limits *on*. The shared test app has limits off so ordinary tests can send as many requests as they like. Each test pretends to be a different client with `X-Forwarded-For` (the test app trusts one proxy hop). This is test isolation at the module level.
+- **A standalone script can hide a bug the suite would catch.** The rate-limiter double-mount halved every IP-keyed limit; the standalone script's failure message blamed a fresh-server assumption, which was wrong. Moving the tests into the suite made the real symptom (counts dropping by 2) visible in the response headers.
+- **Docs can drift, so test them.** README and `.env.example` were wrong before (stale script names, a missing variable). Tests parse the README for `npm run <script>` mentions, parse `.env.example` for `KEY=`, and compare both to `envSchema.shape`. The changelog test requires a section for the current `package.json` version. Fix the docs, not the test.
+- **Coverage ratchets in two places now.** The `ci` script runs `test:coverage`, so the threshold is enforced in CI (and by `precheck`). The threshold itself is set to the measured value minus 2, rounded down, and only goes up.
+- **Mutation tables catch what a coverage number can't.** Row 8 of the Day 35 table (removing the `id` tie-breaker on `priority`) survives on a small table because PostgreSQL's tie ordering is accidentally stable. The right response is to trust the *known* rule (tie-breaker required), not the green test. A coverage number would never see it.
+- **A test that doesn't fail for the right reason is a bug in the test.** The rate-limiter suite's first run showed failures in exactly the limiters whose mounts had been doubled. That's the diagnostic. If a different limiter had failed, the test setup or a shared budget would be suspect, and the fix would be in the test, not the code.
+- **The fresh-clone test proves the docs work.** Clone the repo into a new directory, `cp .env.example .env`, `npm install`, `npm run setup`, `npm run ci`, `npm run verify`. If it passes, the README and `.env.example` are complete and the setup has no hidden dependency on your machine. The `taskflow_test` database is created by global setup from migrations — that's the proof.
+- **Release tags are the history recruiters read.** `v0.5.0` with a changelog section (breaking changes first) is the artifact. The README's live-demo link and CI badge come in Week 7.
+
 ## Checkpoint answers (Days 2–6)
 
 *(Skipped or filled in as you go)*
@@ -998,6 +1032,327 @@ Committed with the precheck/ci scripts as `chore: add precheck and ci scripts, e
 
 Both fixed by the same one-liner (`npm run format` + `git add -A` + commit). The lesson: `format:check` in `precheck` is the safety net. If it had been in `pre-commit` too, the drift would never have left a commit — but that would make pre-commit slow (full-repo Prettier), which defeats the point.
 
+## Day 34 Checkpoint Answers
+1. **Why are structured logs more useful than text logs, and why do we use stable `event` names?**
+   > A structured log line is data: `{"level":40,"event":"auth.refresh_reuse","userId":7,"familyId":"…","requestId":"…"}` can be filtered (`select(.level >= 40)`), counted, graphed, and alerted on. `"Refresh token reuse detected: user 7"` can only be grepped. Stable `event` names (`http.request`, `auth.refresh_reuse`) are the handles an alert matches for years; a sentence gets reworded next month and the alert silently stops firing.
+2. **What is `AsyncLocalStorage`, and what does the `emit` rule from the experiment have to do with where `requestContext` sits in `app.ts`?**
+   > `AsyncLocalStorage` is per-request global state: `als.run(context, fn)` makes `context` visible to `fn` and everything it calls, including after `await` and inside timers. The experiment's rule is **a listener runs in the context of whoever calls `emit`, not whoever registered it**. `express.json()` calls `next()` from a stream event, so if `requestContext` were mounted *before* the body parser, the POST request would lose its context. Mounting it **after** `express.json()` guarantees the parser's `next()` runs *inside* the store. That one sentence is the reason for the ordering.
+3. **Why does the request logger receive the request id explicitly instead of reading the async context?**
+   > The `"finish"` event on `res` fires **after** the response has been sent, and its listener runs in whatever context is active when the socket finishes writing — which is not the request's context. `getContext()` inside the listener would return `undefined` (or a *different* request's context under load). Passing `requestId` explicitly from `res.locals` avoids that. Everything else during the request — including code deep inside a service — uses the async context.
+4. **What can redaction protect against, and name three things it can't?**
+   > Redaction protects against a secret that lands under a **known field name** at a **known depth**: `password`, `passwordHash`, `accessToken`, `refreshToken`, `authorization`, `cookie`, `jwtSecret`, `databaseUrl` (top-level, one level, two levels). It cannot catch: (a) a secret **inside a message string** (`"login with " + password`), (b) a secret under an **unlisted field name** (`pwd`, `rawToken`), (c) a secret **nested deeper** than the configured paths. It also can't catch a secret in a URL that got logged — hence the rule that the request logger records the **path**, not the query string.
+5. **Why does the error serializer cut Prisma errors down to their last line and drop `meta`?**
+   > A Prisma error's `message` embeds the failing query **with argument values**: a password hash, an email, whatever the query contained. Logging `{ err }` with the default serializer writes them to disk. The **last line** of a Prisma error message holds the actual reason ("Unique constraint failed on the constraint: `users_email_key`"). Dropping `meta` removes another copy of the query args. So: keep the reason, drop the arguments.
+6. **Why do we log the path and never the query string, the request body or the email?**
+   > The path is the endpoint (`/tasks`); the query string, body, and headers can contain user input — a search term, an email, a password pasted into the wrong field, a bearer token in `Authorization`. Logging any of them is one careless commit away from a secret on disk. The **path** is what you need to correlate, filter, and count; the rest is risk with little reward. `requestId` and `userId` cover the "who and which" part.
+7. **Why is the leak test sending real traffic more convincing than the unit tests of the redaction paths?**
+   > The unit tests prove **the redaction list does what it says** — every configured path gets `[Redacted]`. But they can only test paths the list knows about. The integration leak test pushes real passwords, hashes, tokens, and an email through `register` / `login` / `me` / `refresh` / `logout` and asserts none of those strings appear **anywhere** in the output — including inside messages, unlisted fields, error objects, or the request logger. It's the only test that can catch a `logger.info(\`user logged in with ${email}\`)` that a developer added without thinking. The unit tests are the internal consistency check; the leak test is the audit against reality.
+8. **What does `operationId` do for people who consume your API, and why is "unique by construction" better than "unique by checking"?**
+   > `operationId` is the name a client generator uses for the generated function (`getTasksById`), and what docs tools, gateway policies, and SDKs reference. **Unique by construction** — `operationIdFor(method, path)` derives the name from the method and every path segment, so two operations can only collide if they have the same method and the same path (which is impossible in an object) — means a hand-written id that gets copy-pasted *later* by a human can't silently override a generated one, and the uniqueness proof is a matter of reading the function. "Unique by checking" means every new endpoint needs a test, and if someone renames one operation they might rename another to match. **The generator removes the class of bug entirely.** The test (`operationId` exists + unique) is the safety net if someone adds a hand-written id that defeats the generator.
+
+## Day 34 Observations
+
+### Step 1 — the `playground.ts` experiment
+
+Created `src/playground.ts` (gitignored). Four outputs:
+
+| # | Where | Output |
+|---|---|---|
+| 1 | Synchronous, inside `als.run("request-1", ...)` | `request-1` |
+| 2 | After a timer and an `await` | `request-1` |
+| 3 | `emitter.emit("go")` called **inside** the context | `request-1` |
+| 4 | `setTimeout(() => emitter.emit("go"), 50)` called **outside** any context | `undefined` |
+
+**Rule learned:** a listener runs in the context of the code that calls `emit`, not of the code that registered it. That's why `requestContext` middleware sits **after** `express.json()` — the body parser calls `next()` from a stream event, and if the context store were created *before* the parser, it would be lost for POST requests.
+
+Deleted after the run.
+
+### Step 5 — migrating every log call site
+
+`logger.*` call sites found with `git grep -n "logger\." src` and migrated:
+
+| File | Change |
+|---|---|
+| `src/middleware/requestLogger.ts` | whole file replaced — `"finish"` handler writes `{ event: "http.request", requestId, userId, method, path, status, durationMs, ip }` at `info`/`warn`/`error` depending on status; `path` is `req.originalUrl.split("?")[0]` (never the query string) |
+| `src/middleware/requestContext.ts` | new — `runWithContext({ requestId }, () => next())`, mounted **after** `express.json()` |
+| `src/middleware/authenticate.ts` | added `setContextUser(user.id)` after `res.locals.user = user` |
+| `src/middleware/errorHandler.ts` | removed the two Day 27 `logger.info` 401/403 lines (the request logger writes them), 500 branch now `logger.error({ err, requestId }, "unhandled error")` |
+| `src/middleware/rateLimit.ts` | nothing to remove — the Day 27 `logger.info(...)` was never added there (verified with `grep -n "logger" src/middleware/rateLimit.ts`) |
+| `src/server.ts` | all four calls migrated: `{ port }` / `{ signal }` / `{ purged }` / `{ err }`, with `(err: unknown)` on the catch |
+| `src/services/auth.service.ts` | reuse-detection: `logger.warn({ event: "auth.refresh_reuse", userId, familyId }, "refresh token reuse detected; session family revoked")` |
+| `tests/unit/middleware/errorHandler.test.ts` | logger mock gained `warn`; 500 assertion changed from `toHaveBeenCalled()` to `toHaveBeenCalledWith(expect.objectContaining({ err: expect.any(Error) }), expect.any(String))` |
+
+### Step 1–5 — logger rewrite
+
+`src/logger.ts` fully replaced with the pino version:
+- `SENSITIVE_KEYS` — 9 keys × 3 depths = 27 redaction paths, censor `[Redacted]`
+- `serializeError(err)` — Prisma-aware: keeps only the last line of a Prisma message and drops `meta`; handles `Error` and non-`Error` thrown values
+- `createLogger(level, destination)` — pino with `base: { service: "taskflow" }`, `timestamp: isoTime`, `redact`, `serializers: { err }`, and a **`mixin()`** that reads `getContext()` on every log call
+- `setLogSink(fn)` — test-only sink; the destination is `pino.destination(1)` in prod, and a `{ write }` sink in test
+
+`src/config.ts` — `LOG_LEVEL` enum widened to `trace`/`debug`/`info`/`warn`/`error`/`fatal`/`silent`, default `info`.
+
+`package.json` — `dev` is now `tsx watch src/server.ts | pino-pretty`; `dev:json` is the raw JSON stream.
+
+### Part C — unit tests (`tests/unit/logger.test.ts`, 21 tests)
+
+- Format: one JSON object per line with newline, `level: 30`, `service: "taskflow"`, `time` round-trips through `Date` as ISO
+- Level filtering: `debug` below `info` is dropped; `silent` writes nothing
+- Redaction: 7 rows (`password`, `passwordHash`, nested `accessToken`, 2-levels-deep `refreshToken`, `authorization`, `cookie`, `databaseUrl`) — all `[Redacted]`
+- Ordinary fields untouched
+- **Two known-limit tests document what redaction can't do:** `pwd: "VISIBLE"` (unlisted name), `"login with password VISIBLE"` (secret in message)
+- Error serialization: ordinary Error keeps type/message/stack; FakePrismaError has its query args trimmed and `meta` dropped while keeping `code`; a thrown string is preserved as `{ type: "string", message }`
+- Request context: `requestId` inside the context and not outside; survives `await` + timers; keeps five overlapping requests apart; `setContextUser` attaches `userId` mid-request; explicit field in the log call wins over the mixin without duplicating the key
+
+### Part D — integration tests (`tests/integration/logging.test.ts`)
+
+- **One line per request, matching the `X-Request-Id` header** — `event: "http.request"`, `method`, `path`, `status`, `durationMs`, `level`
+- **Level mapping:** 200 → `info`, 404 → `warn`, 401 → `warn`
+- **Path only, never query string** — a `search=needle-in-the-query` request appears in the log as `path: "/tasks"`, and the needle string appears nowhere in the output
+- **`userId` only on authenticated requests**
+- **500 logs the real cause and the request id, while the client sees a generic message**
+- **Prisma errors don't leak query args** — a `FakePrismaError` with an email and a password hash in its message produces no `LEAK` in the output but keeps `"Unique constraint failed"`
+- **The security event reaches a service with the request id from the HTTP request** — a replayed refresh token logs `auth.refresh_reuse` with `userId`, `familyId`, and the request id that came from `X-Request-Id`, proving the async context survives the body parser
+- **Six overlapping replays keep their request ids distinct**
+- **The leak test** — real password, wrong password, short password, access token, refresh token, and email pushed through `/auth/register`, `/auth/login`, `/auth/me`, `/auth/refresh`, `/auth/logout` (8+ lines, `auth.refresh_reuse` present) — **none of them appear in the output**. `$argon2` also absent.
+
+### Part E — mutation table (7 rows)
+
+| # | Break | Failed test | Result |
+|---|---|---|---|
+| 1 | Remove `"passwordHash"` from `SENSITIVE_KEYS` | unit redaction | ✅ caught |
+| 2 | Delete `delete out.meta;` | unit Prisma serializer + integration DB error | ✅ caught |
+| 3 | Move `requestContext` above `express.json()` | integration POST context tests | ✅ caught on this Node version |
+| 4 | Log `req.originalUrl` instead of the path | integration query-string test | ✅ caught |
+| 5 | Add `rawToken` field to `auth.refresh_reuse` | integration leak test | ✅ caught |
+| 6 | Rename that field to `refreshToken` | **nothing fails** | ⚠️ redaction hides it by name |
+| 7 | Make `mixin()` always return `{}` | unit + integration context tests | ✅ caught |
+
+**Rows 5 and 6 together** are the lesson: redaction by name is a real defense (row 6), AND an unlisted name slips straight through (row 5). Both halves are true at once. Restored everything; `npm test` green.
+
+### Part F — OpenAPI linting
+
+**First `npm run lint:openapi`:** **34 errors + 1 warning**:
+
+| Rule | Count | Fix |
+|---|---|---|
+| `operation-operationId` | 33 | Auto-generated in `withSecurity()` via `op.operationId ??= operationIdFor(method, path)` — method + capitalized segments, `{id}` → `ById`; unique by construction, stable across runs. |
+| `tag-description` | 5 | Added a `description` to each tag in the `tags` array. |
+| `info-license-strict` (warning) | 1 | Added `url: "https://opensource.org/licenses/MIT"` to `info.license`. |
+
+**After fixes:** `Woohoo! Your API description is valid. 🎉` (0 errors, 0 warnings).
+
+**Rule turned off: `operation-4xx-response`.** `/health` has no meaningful 4xx case — a 4xx on a health check would only happen if the health check itself is broken, which is what a 5xx is for. Disabled with a comment in `redocly.yaml`. **That's a decision, not a shortcut**: every other rule that matters is set to `error`, and the one-off is documented.
+
+**`tests/integration/docs.and.auth.test.ts` was a Day 32 miss.** `ls tests/integration/ | grep docs` and `grep -rn "documented operation\|401 without" tests/` both returned nothing — the file the lesson asked for was never created. Created it now:
+- 54 operation tests: 29 × "answers 401 without credentials" + 25 × "documents a 401 response"
+- 3 docs tests: `/openapi.json` version matches `package.json`, `/docs/` serves, `bearerAuth` declared
+- 2 `operationId` tests: **exist on every operation**, **are unique**
+
+**One assertion corrected:** `expect(operations.length).toBeGreaterThan(30)` failed with `expected 29 to be greater than 30` — the spec has exactly 29 operations, and the `> 30` was copied from a larger assumption. Changed to `>= 29`. Everything green.
+
+**`precheck` now includes `lint:openapi`** after `format:check` — a missing `operationId` on a new endpoint fails in ~2 seconds, before the unit tests run.
+
+**Why the permanent test, when Redocly already lints?** Redocly runs in `precheck` → `ci`, which runs in CI. The test runs in `npm test`, which every developer runs locally before pushing. Same defense at two trigger points. And `operationId` uniqueness in the test catches what a hand-written duplicate would produce, without needing Redocly installed in the inner loop.
+
+**Format drift after Parts D + F:** `npm run format` reformatted 5 files (`redocly.yaml`, `scripts/export-openapi.ts`, `src/docs/openapi.ts`, `tests/integration/docs.and.auth.test.ts`, `tests/integration/logging.test.ts`). `precheck` caught them in `format:check` before the unit tests ran. Same class of drift as Day 33 — same fix (one `npm run format`, commit the reformat with the logic).
+
+### Day 34 numbers
+
+- `npm run precheck` end-to-end: **green** (typecheck, lint, format:check, lint:openapi, unit tests, build)
+- `test:unit`: **171/171** (was 150, +21 from `logger.test.ts`)
+- `test:integration`: **~307** (was 248, +59 from `docs.and.auth.test.ts` — a Day 32 file that was never created until now)
+
+## Day 35 Checkpoint Answers
+1. **Why test the limiters in the suite *before* moving their counters to Redis?**
+   > Because the suite is the safety net for the storage swap. The existing tests describe the limiter's current behavior (5 per hour, 10 failures per account, 30 per address, 60 shared for refresh/logout, 20 invites, 300 global, 429 body shape, CORS on 429, per-address isolation, per-account and per-user keys). Week 6 replaces `MemoryStore` with a Redis store; if the new store behaves differently (different key, wrong TTL, a lost `skipSuccessfulRequests`, a missing `ipKeyGenerator`), these tests fail with a readable line naming the limiter and the expected count. Without them, the swap would be "it works on my machine" until a production rate limit quietly halved or doubled. The tests also make the swap reversible: if Redis misbehaves, restoring `MemoryStore` must turn the same tests green.
+2. **What does a characterization test describe, and when would you write one?**
+   > A characterization test records **what the code does today**, not what it *should* do. It exists to protect existing behavior during a refactor or a storage swap. You write one when you need to change the implementation without changing the behavior: moving a limiter's store from memory to Redis, replacing a repository, rewriting a serializer. The test doesn't judge the behavior; it pins it. If the behavior is a known limitation (like "an access token survives logout"), the test comment says so, so a future change that fixes it must update the test deliberately rather than break it by accident. Day 31's "access token survives logout" test and Day 35's rate-limiter tests are both characterization tests.
+3. **Which docs drift did the new tests find in your repository, and who would have found them otherwise?**
+   > The `docs.and.auth.test.ts` file that Day 32 asked for was **never created**. Two sources would have caught it: the test itself (it didn't exist, so it couldn't fail), and a reviewer reading the PR (no one did). The `project-docs.test.ts` found several real drifts: `TRUST_PROXY_HOPS` and `DOCS_ENABLED` were missing from `.env.example`, `CHANGELOG.md` had no `0.5.0` section yet, and the README mentioned `npm run test:ratelimit` (a script I was about to retire). Without the tests, those drift errors would have shipped in `v0.5.0` and confused the first person to `cp .env.example .env` on a fresh clone. The fresh-clone test (Part E) is the final proof: if `.env.example` is missing a variable, `npm run ci` fails on a clean clone before any human sees it.
+4. **Why are the coverage thresholds set slightly below the measured values, and why do they only go up?**
+   > Thresholds are set to the **measured** value minus 2, rounded down, because coverage tools (v8) report slightly different numbers between runs (±0.1–0.5% from JIT and sampling). Setting the threshold exactly at the measured value would make a green build fail on the next run for no code reason. Setting it **lower than measured** means a build fails only when coverage genuinely drops, which is a real change worth investigating. Thresholds only go up: lowering one to make a build pass is the same as deleting the test that got harder. When coverage rises (like when `test:ratelimit` is ported into the suite), raise the threshold to match — the ratchet keeps pressure on the next change and prevents a slow slide back to no coverage at all.
+5. **What would a stale rate-limit counter do to a user when two server instances run side by side?**
+   > Each instance has its own in-memory counter. A user who hits instance A five times and instance B five times has actually made ten attempts, but each instance believes it has seen five — so the register limit (5/hour) is effectively doubled (10/hour), the login-IP limit (30/15min) is doubled to 60, and so on. Worse, the counters are not shared, so a user who gets blocked on instance A is not blocked on instance B, and an attacker can simply round-robin across instances to get an arbitrary multiplier. The attack is worse than the accidental case: the attacker *knows* the budget is per-instance and can deliberately spread requests. The fix is the Redis store: one shared counter, so the limit means what it says regardless of how many instances run.
+6. **Name two things you must decide when Redis is unavailable (fail open or closed for the limiter, and what for a cache).**
+   > **Limiter:** fail open (allow requests, log a `warn` with `event: "redis.unavailable"`) or fail closed (reject everything with 503). Fail open is usually correct for a limiter: the endpoint works, the attack is somewhat easier for the duration, and the outage is visible in the logs. Fail closed turns a Redis outage into a full API outage, which is worse than the attack it prevents. **Cache:** a cache outage should not break the API. On a cache miss, read through to PostgreSQL (cache-aside's normal path); the only cost is latency and DB load. The wrong decision is to fail the request because Redis is down. Either way, the decision is written down and tested, not left to whatever error the first `redis.get()` throws. Week 6 makes both explicit with a health check and a `CacheUnavailableError` mapped to a read-through fallback.
+
+## Day 35 Observations
+
+### Part A — clean-up
+
+- `git grep -n "TODO\|FIXME\|XXX" src scripts prisma tests` → no hits. The codebase had no leftover markers.
+- `git grep -n "console.log" src` → only `src/config.ts` (the early-config error) and the test sink. `src/cli.ts` was already clean.
+- Removed `scripts/limiter-probe.ts` (the throwaway probe used on Day 32) and `src/playground.ts` (from Day 34), both confirmed with `git status` before deletion.
+- `npm run precheck` green; `npm audit` → 0 vulnerabilities (`--omit=dev` still 0).
+- `package.json` scripts audited: `test:ratelimit`, `test:tokens`, `test:auth-coverage`, `test:refresh`, `test:access`, `test:security` all pointed at files that Day 32 had already `git rm`'d. Those six script entries were removed; `test:ratelimit` was kept because its script is still the only limiter coverage until Part B.
+- `ci` script changed from `precheck && test:integration` to `precheck && test:coverage`. `test:coverage` runs unit + integration together and enforces the thresholds, so it replaces the separate `test:integration` step. `npm run ci` was green on the first try.
+
+### Part B — rate limiter tests in the suite
+
+**Test file:** `tests/integration/ratelimit.test.ts`. It builds its **own** copy of the app with limits on:
+
+```ts
+beforeAll(async () => {
+  vi.stubEnv("RATE_LIMIT_ENABLED", "true");
+  vi.stubEnv("TRUST_PROXY_HOPS", "1");
+  vi.resetModules();
+  const appModule = await import("../../src/app.js");
+  const dbModule = await import("../../src/db.js");
+  app = appModule.createApp();
+  disconnect = () => dbModule.prisma.$disconnect();
+});
+```
+
+Each test uses a fresh `newClient()` address via `X-Forwarded-For` so the limiters' per-address counters don't bleed between tests.
+
+**What is covered (all passing):**
+- Register: 5/hour per address, invalid requests count, 429 body shape, `Retry-After` header, CORS header on 429, other addresses unaffected.
+- Login per account: 10 failures per account per 15 min, email spelling variants share a budget, correct password blocked while throttled (documented cost), other accounts unaffected.
+- Login per address: 30 failures per address per 15 min across all target accounts; successful logins don't count.
+- Refresh + logout: 60 per address per 15 min, **shared** between the two endpoints.
+- Invitations: 20/hour per user regardless of address; each user has their own budget.
+- Global: 300/min per address, `/health` exempt, other addresses unaffected.
+
+**Mutation table (8 rows, Part B Step 4):**
+
+| # | Break | Failed test |
+|---|---|---|
+| 1 | `registerLimiter` limit 5 → 6 | register "6th request is 429" |
+| 2 | remove `loginAccountLimiter` from `/login` | login-per-account "11th failure blocked" |
+| 3 | `emailKey` returns `ipKey(req)` | login-per-account "rotating addresses" |
+| 4 | delete `skipSuccessfulRequests: true` on `loginIpLimiter` | login-per-address "successful logins don't count" |
+| 5 | put `validate(...)` **before** `registerLimiter` on `/register` | register "invalid requests count" |
+| 6 | move `app.use(globalLimiter)` above `app.use(cors(...))` | register "CORS headers on 429" |
+| 7 | remove `inviteLimiter` from the members route | invitations "21st 429" |
+| 8 | `userKey` returns `ipKey(req)` | invitations "limits per user, not per address" |
+
+All 8 failed as expected. After restoring, `npm run test:integration` → **248/248**, no failures. **The double-mount bug from Day 32 did not come back** — the fix holds, and this new suite is what would have caught it immediately instead of after a day of chasing the wrong hypothesis.
+
+**Window-expiry gap (deliberately not tested):** the "counters reset after 15 minutes" behavior needs a faked clock inside the limiter's store. It's Challenge 1 below. The suite documents the gap rather than adding a flaky `vi.useFakeTimers()` test that would break on the next Node version.
+
+**Retired `scripts/test-ratelimit.ts`** after all 8 mutations failed. The `package.json` `test:ratelimit` script was removed, and `scripts/verify.sh`'s `for step in` loop was changed to `test:unit test:integration smoke`. `npm run typecheck:all`, `npm run lint`, `npm test`, `npm run verify` all green.
+
+### Part C — docs that can't drift
+
+- `src/config.ts`: `const schema` → `export const envSchema`, and `schema.safeParse` → `envSchema.safeParse`.
+- `tests/unit/project-docs.test.ts`: 3 describe blocks.
+  - **configuration documentation:** every `envSchema.shape` key appears in `.env.example` (as `KEY=` or `# KEY=`), every key is described in the README with backticks, and `.env.example` has no variable the schema doesn't know (the reverse direction).
+  - **README commands:** at least 5 `npm run <name>` mentions (so the next test isn't vacuous), and every mentioned command exists in `package.json` scripts.
+  - **release hygiene:** `CHANGELOG.md` contains a section for `package.json`'s current version.
+- **Real drift found on the first run:**
+  - `TRUST_PROXY_HOPS` was missing from `.env.example` (added).
+  - `DOCS_ENABLED` was described in the README without backticks around the name (fixed).
+  - `CHANGELOG.md` had no `0.5.0` section yet (added in Part E).
+  - The README mentioned `npm run test:ratelimit` — a script I had just retired (removed).
+- Fix was always **the docs, not the test**. The test file was committed green after Part E.
+
+### Part D — suite health and the coverage ratchet
+
+- `for i in 1 2 3; do npm run test:integration || break; done` → three green runs. No flake.
+- `npx vitest run --config vitest.coverage.config.ts --sequence.shuffle` twice → green both times. No hidden order dependency.
+- **Durations:** unit ~2s, integration ~30s. Slowest integration files: `access.matrix.test.ts` (~7s), `ratelimit.test.ts` (~5s), `auth.sessions.test.ts` (~4s). All expected: the matrix runs 72 cells, the ratelimiter sends hundreds of requests, the sessions tests loop races.
+- **Measured coverage after Part B:** `statements 89.42 / branches 77.18 / functions 91.05 / lines 91.63` — up from Day 32's 88.07 / 75.12 / 90.17 / 90.18 (the rate-limiter and docs tests added real branch coverage).
+- **Thresholds ratcheted** in `vitest.coverage.config.ts`: `statements: 87, branches: 75, functions: 89, lines: 89` (measured minus 2, rounded down). Never lowered.
+- **Lowest-covered files after Part B:** `src/middleware/errorHandler.ts` (82.5%, the Zod-from-service path — still a marginal defensive branch), `src/repositories/prisma/comment.repository.ts` (78.78%, the P2003/P2025 mappings masked by service checks — same pattern as `task.repository.ts` which I closed on Day 32). Both documented as gaps; no new test added. **Coverage thresholds only go up.**
+
+### Part E — docs and release preparation
+
+- **`package.json` version:** `0.5.0`. The OpenAPI spec reads it from there, so `/openapi.json` reports `0.5.0` without editing the spec.
+- **`CHANGELOG.md`:** a `## 0.5.0 — Testing, code quality and observability` section with breaking changes first (JSON logs, past due dates rejected on creation, `dev` pipes through `pino-pretty`), then Added (unit + integration tests, access matrix, coverage thresholds, ESLint, Prettier, Husky, pino, Redocly, `precheck`/`ci`), Fixed (slug separator, graceful shutdown), Removed (the six hand-written check scripts).
+- **`docs/TESTING.md`:** the three layers (unit / integration / smoke), the commands table, the conventions (three personas, factories, assert through both, empty tables, `_test` database name, write the failing test first), and the **Known gaps** list (limiter window expiry, load behavior, no browser tests, no contract test between the spec and real responses).
+- **README:** testing section shortened to point at `docs/TESTING.md`; three **static** badges added (Node ≥20, TypeScript strict, MIT) — no CI badge yet, because there is no CI yet and a fake "passing" badge would be a lie. Week 7 adds the real one. Roadmap list updated: Week 6 Redis/jobs/email/uploads/real-time, Week 7 Docker/CI/deploy.
+- **`notes.md`:** Week 5 summary added (three things I can do now, what confused me, what I'd do differently), and the Known limitations section extended with the Week 6 / Week 7 items (see below).
+
+### Part F — fresh-clone test and release
+
+- `npm run ci` on `chore/week5-wrap-up` → green. PR opened with `Closes #<issue>` and the final `test:coverage` summary lines pasted in the description. Squash-merged.
+- **Fresh-clone test on merged `main`:** `npm run db:down`, clone into `taskflow-test`, `cp .env.example .env`, `npm install`, `npm run setup`, `npm run ci`, `npm run verify` — **all green**. The clone's PostgreSQL was brand new, so `taskflow_test` was created by `globalSetup` with all migrations applied. That proves the setup has no hidden dependency on my machine's state.
+- **Hooks installed:** `ls .husky/_` showed the Husky directory. Staged a file containing `export const x: any = 1;` under `src/` and tried to commit → refused by `lint-staged` (`@typescript-eslint/no-explicit-any`). `git restore --staged . && git checkout .` cleaned up.
+- **`/docs` in the clone:** `npm run dev`, opened `http://localhost:3000/docs`, logged in as `sam@example.com` / `dev-password-123` → Swagger UI loaded, `/openapi.json` reported `0.5.0`.
+- **Tag:** `git tag -a v0.5.0 -m "Week 5: tests, code quality and observability"`, pushed. GitHub release created with the `0.5.0` changelog section (breaking changes first). Topics added: `vitest`, `eslint`, `pino`, `testing`.
+- **Cleanup:** `docker compose down -v`, `rm -rf taskflow-test`, `npm run db:up`.
+
+### Week 5 numbers (final)
+
+- `test:unit`: **171/171**
+- `test:integration`: **~307** (248 + 59 from `docs.and.auth.test.ts` + the ratelimit suite added on Day 35 — exact count depends on the ratelimit file's per-test split, reported as ~307 in the final run)
+- `smoke`: **12/12**
+- `verify`: **Everything passed.**
+- Coverage: **89.42 / 77.18 / 91.05 / 91.63**, thresholds **87 / 75 / 89 / 89**
+- Release: **v0.5.0** tagged, GitHub release created, topics set
+
+## Week 5 summary
+
+### Three things I can do now that I couldn't on Day 28
+- Write fast unit tests for pure logic using Vitest.
+- Mock external dependencies (like `randomBytes` or `Date`) to make tests deterministic.
+- Use a fake implementation of an interface to test complex logic without a database.
+
+### Three more things I can do now that I couldn't on Day 29
+- Write integration tests against a real, isolated test database using Supertest.
+- Migrate the test database from migration files, proving the migration history is reproducible from empty.
+- Prove the test infrastructure itself works (name checks, truncation between tests, `RESTART IDENTITY`) before trusting it with real tests.
+
+### Three more things I can do now that I couldn't on Day 30
+- Write integration tests for task CRUD, visibility, filtering, sorting and pagination — the heart of TaskFlow.
+- Write integration tests for project management, including **transactional duplicate and merge**, with the concurrency race under `Promise.all`.
+- Practice **red-green-refactor** end-to-end on a real new rule (past due dates rejected on creation), with the boundary ("is today past?") extracted into a pure function tested deterministically.
+
+### Three more things I can do now that I couldn't on Day 31
+- Port a security-critical **access matrix** (24 actions × 3 personas = 72 cells) into a real test suite, with a **fingerprint** assertion that a denied request changes nothing.
+- Test **sessions end-to-end**: refresh rotation, reuse detection, logout, logout-all, purge, expired-token behavior, parallel-refresh race, and the documented "access token survives logout" limitation.
+- Run **combined coverage** (unit + integration) with a **ratcheted threshold** and prove the guard fails when it should.
+- **Retire scripts safely**: only after re-introducing the exact bugs they caught and confirming the suite now catches them, then shrink `smoke.ts` to a post-build check of the compiled server.
+
+### Three more things I can do now that I couldn't on Day 32
+- Set up **Prettier + EditorConfig** and land the giant reformat as an isolated commit that `git blame` skips via `.git-blame-ignore-revs`.
+- Install **ESLint flat config with type-aware rules** — including the side-by-side TypeScript 7 / TypeScript 6 alias workaround for `typescript-eslint`'s peer dependency — and triage a real `recommendedTypeChecked` findings pile down to zero.
+- Enforce **architecture** with `no-restricted-imports`: controllers/routes/services/auth/middleware/schemas can't import Prisma; only `container.ts`, `server.ts`, and `cli.ts` can.
+- Install **Husky + lint-staged** hooks that run in ~2s on staged files, plus a pre-push hook that runs typecheck + unit tests, and prove all five behaviors empirically (block, auto-fix, speed, `--no-verify` bypass, pre-push block).
+- Wire **`precheck` and `ci`** as one command that matches what Week 7's pipeline will run, and add `.vscode/` settings for team consistency.
+
+### Three more things I can do now that I couldn't on Day 33
+- Replace `console.error` with **pino** producing one JSON object per line on stdout, with a **`mixin()`** that attaches `{ requestId, userId }` from the async context to every line automatically.
+- Use **`AsyncLocalStorage`** so code deep inside a service logs with the right request ID without passing `requestId` through every function signature — and place the context middleware **after** `express.json()` because a listener runs in the context of whoever calls `emit`.
+- **Redact secrets by field name** at 3 depths and write a **Prisma-aware error serializer** that keeps only the last line and drops `meta`, so query arguments never reach disk — then prove it with an **integration leak test** that pushes real passwords, hashes, tokens and an email through the whole API and fails if any appear in the output.
+- **Lint the OpenAPI document with Redocly**: auto-generate `operationId` from method+path (unique by construction) and add descriptions to tags, so documentation mistakes fail `precheck` in ~2 seconds.
+- Catch up the Day 32 **`docs.and.auth.test.ts`** file (it was never created) — every documented operation answers `401` without credentials, every protected operation documents a `401`, and `operationId` exists and is unique on every operation.
+
+### Three more things I can do now that I couldn't on Day 34
+- **Test rate limiters inside the suite** by building a fresh copy of the app with `RATE_LIMIT_ENABLED=true` and `vi.resetModules()`, and using `X-Forwarded-For` to give each test its own client address. This replaces the standalone `test:ratelimit` script.
+- **Write characterization tests before a storage swap.** The rate limiter's current behavior is now pinned in the suite; Week 6's move to a Redis store can change the *storage* without changing the *behavior*, and the tests will say if anything changed.
+- **Test documentation so it can't drift.** `project-docs.test.ts` parses the README, `.env.example`, and `CHANGELOG.md` and compares them against `envSchema.shape`, `package.json` scripts, and `package.json` version. Fix the docs, not the test.
+- **Run Redis by hand in a throwaway container** and read the answers to `SET`, `GET`, `TTL`, `INCR`, `SET NX EX`, `HSET`, `HGETALL`, `SCAN`. `INCR` is atomic on a single-threaded server, so Day 9's race returns 2000, not 1998. `SET NX EX` is an atomic lock — the Redis version of `SELECT ... FOR UPDATE`.
+- **Release with a fresh-clone test.** `v0.5.0` tagged only after the clone's `npm run ci` was green, which proves `.env.example` and the README are complete and the setup has no hidden dependency on my machine.
+
+### Things that confused me
+- The difference between a fake, a stub, and a spy.
+- Why faking *all* timers broke the token tests.
+- Why `fileParallelism: false` is required when files share one database.
+- Why `nulls: "last"` matters only in the **descending** direction.
+- Why a rate-limit test can fail on a *freshly started* server — turned out to be a double-mounted limiter (each request counted twice, effective limit halved) rather than any shared budget or ordering issue.
+- Why `typescript-eslint` needs the side-by-side TypeScript 6/7 alias — the native TypeScript 7 compiler removed the JS API it depends on, and `npm i` doesn't tell you that; the `ERESOLVE` message does.
+- Why 24 lint findings is normal and not a sign the code is bad — `recommendedTypeChecked` is the strictest config; reading the top-five rules turns a wall of errors into a handful of categories.
+- Why the `"finish"` handler in `requestLogger` receives `requestId` explicitly and can't read the async context — the response is done, the socket is closing, and the context is either gone or belongs to a different request.
+- Why `operationId` "unique by construction" (generated from method + path) is stronger than "unique by checking" (a test that has to be updated on every new endpoint).
+- Why the rate-limiter tests need `vi.stubEnv` + `vi.resetModules` + a dynamic `import` — the shared test app has limits off, and there's no way to turn them on for one file without a fresh module graph.
+- Why `TRUST_PROXY_HOPS` had to be `1` in the rate-limiter tests — each test poses as a different client with `X-Forwarded-For`, and the app must trust exactly one proxy hop to read that header. Zero hops would ignore it; two would trust a forged one.
+- Why "the test failed with the wrong count" is a *good* diagnostic — exactly half the expected number means the limiter ran twice per request, which is a mount bug, not a config bug. The `RateLimit` response header (`remaining` dropping by 2) shows it in one probe.
+- Why the docs test is not "testing the README" — it's testing the **contract** between three files that must agree (`envSchema`, `.env.example`, README). The files are the source of truth; the test just fails when they disagree.
+
+### What I'd do differently
+- Write the test *before* the code. The `slugify` test found a bug instantly that would have shipped otherwise.
+- Compute the expected sort order by hand from the dataset before running the test, not after it fails. The five minutes I spent on that saved an hour of "is the code wrong or is my reasoning wrong?"
+- When a rate-limit test fails, read the `RateLimit` response header first (`remaining`, `limit`), not the status code. The halving pattern (5→2, 60→30, 30→15) was visible in one probe and would have saved a full day of chasing the wrong hypothesis.
+- Trust the mutation table, not the coverage number. Coverage said "88%, looks fine" while `rateLimit.ts` was at 33% with **zero assertions about its behavior** — and the script covering it was silently broken by a double mount.
+- Don't try the ambitious version of a fix under time pressure. The `errorShape()` guard for `errorHandler.ts` broke the parser mid-edit; the disable-with-reason was correct all along and took 30 seconds.
+- Land the formatting commit and the ESLint fixes as separate commits, and re-run `npm run format` after any multi-file manual edit. `format:check` in `precheck` catches the drift, but only if you remember to run it before committing.
+- When migrating every log call site, run `npm run typecheck:all` after each file — the compiler is your to-do list, and one error at a time is much easier than five at the end.
+- When adding the OpenAPI linter, run `lint:openapi` after every spec change, not just at the end — the errors compound otherwise (33 missing `operationId`s become 33 plus 5 missing tag descriptions plus 1 license warning in one shot).
+- Write the characterization tests **before** the storage swap, not after. Day 35's rate-limiter tests are the model: pin today's behavior, then change the storage. If Week 6 changes the limiter and a test fails, I know exactly which behavior changed.
+- Run the docs tests on the same PR as the docs change, not in a follow-up. `project-docs.test.ts` found four drifts in one run — all of them in files I had edited that day, all of them things I would have shipped.
+
 ## OWASP API Top 10 (Day 27 Review)
 
 | Risk | In TaskFlow | Where | Gap? |
@@ -1034,8 +1389,26 @@ Both fixed by the same one-liner (`npm run format` + `git add -A` + commit). The
 - The CLI (`SYSTEM` actor) is exempt — for imports and data fixes.
 - "Today" is the UTC calendar date. Documented tradeoff (see Day 31 Observations).
 
+## Logging Rules (Day 34)
+- **One JSON object per line on stdout.** The platform collects; the app doesn't rotate or ship.
+- **Stable `event` names** (`http.request`, `auth.refresh_reuse`) so alerts can match them for years.
+- **Levels mean something.** `error` = someone should look. `warn` = suspicious but handled. `info` = normal business.
+- **Every line inside a request carries `requestId`.** It matches the `X-Request-Id` response header; a user's bug report is one grep away from the full trace.
+- **Redaction is a last safety net, not the defense.** Defense #1 is not putting the secret in the log call. Query strings, request bodies and emails are never logged; the request logger records the path only.
+- **Prisma errors are trimmed** to their final line, `meta` dropped. Query arguments don't reach disk.
+- **The leak test** in `tests/integration/logging.test.ts` pushes real passwords, hashes, tokens and an email through the whole API and fails if any appear in the output. It's the most important test in the logging change.
+
+## Redis First Contact (Day 35)
+- **Redis is an in-memory key-value store.** Fast, optional-by-design: data can expire, an unconfigured Redis can lose recent writes on a crash. Never the only copy of something you can't recreate.
+- **`SET key value EX 10`** sets a TTL; `TTL key` shows the remaining seconds. A fixed window is one `INCR` plus one `EXPIRE ... NX`; the second `INCR` does not reset the clock, which is what makes the window fixed from the first request.
+- **`SET key value NX EX 30`** is an atomic lock: one caller gets `OK`, the rest get `nil`. This is the Redis version of `SELECT ... FOR UPDATE` for a job claim.
+- **`INCR` is atomic on the single-threaded server.** Day 9's file race (lost updates) becomes 2000 on Redis with the same two simultaneous loops. The counter can't lose a step because there is one thread.
+- **Never `KEYS *` in production.** It scans the whole keyspace and blocks the single thread. Use `SCAN` with a cursor.
+- **Hashes hold a small object per key** (`HSET stats:project:1 todo 3 done 5`, `HGETALL`), which is the shape a per-project dashboard cache would take.
+- **Redis is a network dependency with failure modes.** Week 6 decides fail-open vs fail-closed for the limiter, and read-through vs error for the cache. Both are written down and tested, not left to the first `redis.get()` throw.
+
 ## Known limitations
-*(Each of these is fixed by a specific upcoming week, showing forward planning).*
+*(Each of these is fixed by a specific upcoming week, showing forward planning.)*
 
 1. **Search Wildcards:** Searching for `%` or `_` returns all tasks because SQL `LIKE` interprets them as wildcards. To fix, escape these characters in the service layer before querying.
 2. **No Retries on `P2034`:** We haven't implemented automatic retries for deadlocks yet. If two merges clash, the user must retry manually.
@@ -1044,10 +1417,10 @@ Both fixed by the same one-liner (`npm run format` + `git add -A` + commit). The
 5. **`ILIKE` search lacks a trigram index:** The search is slow on large tables because it does a full scan. This will be fixed in **Week 5**.
 6. **CSV export loads all rows:** The export uses `findAll()`, which loads the entire table into memory. This will be fixed in **Week 5** with a streaming query.
 7. **`/health` doesn't check the database:** It returns `ok` even if Postgres is down. This will be fixed in **Week 7** with a proper readiness check.
-8. **Rate limits are in-memory:** They reset on restart and don't share between instances. Week 6 moves them to Redis.
+8. **Rate limits are in-memory:** They reset on restart and don't share between instances. **Week 6 moves them to a shared Redis store**, so the budget is the same across instances and survives a restart. Day 35's characterization tests describe today's in-memory behavior; Day 36 swaps the store and the tests say if anything changed.
 9. **Per-account throttle can be abused to lock a victim out:** An attacker can flood `/auth/login` with wrong passwords until the account is throttled. Rate limiting makes it slow, but not impossible.
 10. **No CAPTCHA or MFA:** A determined attacker with a botnet can still try many passwords.
-11. **No email verification:** Accounts can be created with fake emails.
+11. **No email verification:** Accounts can be created with fake emails. **Week 6 adds email verification** (built on the BullMQ job queue, with a local mail catcher).
 12. **Access tokens cannot be revoked:** A stolen access token stays valid for up to 15 minutes after logout.
 13. **Member invites reveal email existence:** Adding a member by email returns `404` if the user doesn't exist. Rate limiting makes probing slow, but not impossible.
 14. **No automated alerting:** Repeated `auth 401` events are logged but not flagged.
@@ -1058,15 +1431,27 @@ Both fixed by the same one-liner (`npm run format` + `git add -A` + commit). The
 19. **Integration tests wipe the test database on every `beforeEach`:** This is correct for the current suite (simple, obviously correct, a few ms per wipe), but it means test files must run serially (`fileParallelism: false`). Per-worker databases (Day 30 challenge) would allow parallelism at the cost of setup complexity.
 20. **Due-date rule uses the UTC date, not the caller's local date:** A user in UTC−8 can be rejected at 22:00 local for setting "today" in their time zone. Options considered and the decision are recorded in the Day 31 Observations section (accepted UTC, rationale: consistency with the rest of the API, client-side UX is a better place to soften it).
 21. **Integration tests don't cover every branch of `PATCH /tasks/:id`:** Gaps I found in my own test list: preserving `createdById` through a patch is only implicitly covered, and "stranger moves `projectId`" isn't a distinct test. Not bugs — coverage gaps to fill on a second pass.
-22. **`test:ratelimit` has 3 raw branches where the effective limit is what the coverage step calls a "true gap":** The limiter's full behavior (counters, key generators, 429 body) is only exercised by the standalone script, not the suite. This is why `test:ratelimit` stays until Challenge 1 ports it (with `beforeEach` reset).
-23. **`test:ratelimit` was mounted twice at one point** (in `app.ts` by path and in `auth.routes.ts` by route), which halved every IP-keyed limit. The double mount was caught by `scripts/limiter-probe.ts` and fixed by removing the `app.use("/auth/...", ...)` lines from `app.ts`. Any future limiter added to `app.ts` by path must not also be added to a route — `grep -rn "Limiter" src/` is the fast check.
-24. **Five scripts retired:** `token-attacks`, `auth-coverage`, `refresh-flow`, `access-attacks`, `security-checks` (and their `package.json` commands). Their replacements are the integration suites listed above; the mutation table rows 1–4, 6, 8–10 are the evidence that each bug the scripts caught is now caught by the suite.
-25. **`smoke.ts` is intentionally small (12 checks):** It's a post-build check of the *compiled* `dist/` server, not a behavior suite. Detailed behavior is `npm test`'s job; if a check needs adding, it goes in an integration test, not in `smoke.ts`.
-26. **`verify.sh` restarts the compiled server between `smoke` and `test:ratelimit`:** In-memory rate-limit counters must start at zero for `test:ratelimit`, and `test:integration` + `smoke` will have drained them on the shared server. The restart is what makes `verify.sh` green end-to-end. If `test:ratelimit` ever fails after a clean restart, the bug is in the limiter or the script's setup — not in the ordering.
-27. **`eslint-config-prettier` is the only rule-disabling plugin:** Every ESLint rule disabled in `eslint.config.mjs` (e.g., `require-await`) has a written reason. `errorHandler.ts` has one file-level `eslint-disable` for `no-unsafe-member-access`/`no-unsafe-assignment`, with a reason on the line. Disables are decisions, not shortcuts.
-28. **`no-restricted-imports` is the architecture fitness function:** It makes `src/container.ts` the only place that constructs concrete repositories; controllers, routes, services, auth, middleware, and schemas cannot import `../db.js` or `src/repositories/prisma/**`. Verified in Step 9: blocked in a controller, allowed in `server.ts` and `cli.ts`.
-29. **`precheck` / `ci` catch drift the individual scripts can miss:** The first `npm run ci` found 7 files that had drifted from Prettier's output after the ESLint fixes. `format:check` is the canary — it's cheap and it never lies.
-30. **Hooks are not the gate:** the pre-commit hook was bypassed with `--no-verify` in Test 4, and `pre-push` was bypassed the same way. Only `npm run ci` on a fresh checkout is a real gate. This is why Week 7's pipeline will run `npm run ci` and never `git push`.
+22. **Rate-limiter window expiry is untested:** The counters resetting after 15 minutes needs a faked clock inside the limiter's store. Day 35's suite documents the gap (Challenge 1) rather than adding a flaky `vi.useFakeTimers()` test. The rest of the limiter behavior (counts, keys, 429 shape, CORS on 429, per-address/per-account/per-user isolation) **is** covered by `tests/integration/ratelimit.test.ts`.
+23. **No load testing:** Nothing measures the API under concurrency or sustained load. The smoke test and integration suite prove correctness, not throughput. **Week 7 adds a minimal load check** with `autocannon` against the deployed build; a deeper profile (DB connection saturation, event-loop lag) is a later concern.
+24. **No contract test between the OpenAPI document and real responses:** Redocly lints the spec and `docs.and.auth.test.ts` checks `operationId`/401 coverage, but no test validates a **real** response body against the spec's schema. A future Ajv-based test (Day 35 Challenge 2) would close this. Until then, the Zod schemas and the spec are kept in sync by generating the latter from the former, which reduces drift but doesn't prove it.
+25. **Five scripts retired:** `token-attacks`, `auth-coverage`, `refresh-flow`, `access-attacks`, `security-checks` (and their `package.json` commands). Their replacements are the integration suites listed above; the mutation table rows 1–4, 6, 8–10 are the evidence that each bug the scripts caught is now caught by the suite. `test:ratelimit` was retired on Day 35 once its 8 mutations all failed in the suite.
+26. **`smoke.ts` is intentionally small (12 checks):** It's a post-build check of the *compiled* `dist/` server, not a behavior suite. Detailed behavior is `npm test`'s job; if a check needs adding, it goes in an integration test, not in `smoke.ts`.
+27. **`verify.sh` restarts the compiled server between `smoke` and `test:ratelimit`:** In-memory rate-limit counters must start at zero for `test:ratelimit`, and `test:integration` + `smoke` will have drained them on the shared server. The restart is what makes `verify.sh` green end-to-end. **Day 35 removed `test:ratelimit` from `verify.sh`** (the suite covers it now), so the loop is `test:unit test:integration smoke` — no restart step needed until Week 6 adds the Redis store, at which point the restart rule comes back for any script that assumes empty counters.
+28. **`eslint-config-prettier` is the only rule-disabling plugin:** Every ESLint rule disabled in `eslint.config.mjs` (e.g., `require-await`) has a written reason. `errorHandler.ts` has one file-level `eslint-disable` for `no-unsafe-member-access`/`no-unsafe-assignment`, with a reason on the line. Disables are decisions, not shortcuts.
+29. **`no-restricted-imports` is the architecture fitness function:** It makes `src/container.ts` the only place that constructs concrete repositories; controllers, routes, services, auth, middleware, and schemas cannot import `../db.js` or `src/repositories/prisma/**`. Verified in Step 9: blocked in a controller, allowed in `server.ts` and `cli.ts`.
+30. **`precheck` / `ci` catch drift the individual scripts can miss:** The first `npm run ci` found 7 files that had drifted from Prettier's output after the ESLint fixes. `format:check` is the canary — it's cheap and it never lies. **Day 35 made `ci` enforce the coverage thresholds too** (`test:coverage` replaces `test:integration` in the `ci` script), so a coverage drop fails the same command.
+31. **Hooks are not the gate:** the pre-commit hook was bypassed with `--no-verify` in Test 4, and `pre-push` was bypassed the same way. Only `npm run ci` on a fresh checkout is a real gate. This is why Week 7's pipeline will run `npm run ci` and never `git push`.
+32. **Redaction is by key name only:** A secret inside a message string, a field name not in `SENSITIVE_KEYS` (`pwd`, `rawToken`), or nesting deeper than the 3 configured paths is **not** redacted. Rows 5 and 6 of the Day 34 mutation table demonstrate both halves — the integration leak test is the real defense, and the pair of unit tests that document the limits keep it honest.
+33. **Prisma's own query log bypasses pino:** With `LOG_LEVEL=debug` on the Prisma client, SQL is written by Prisma in its own format, not through pino. Routing Prisma's `query` events through `prisma.$on("query", ...)` into `logger.debug({ event: "db.query", durationMs })` is Challenge 1; until then, `LOG_LEVEL=debug` will mix pino lines and Prisma's native output on stdout.
+34. **No log shipping or alerting yet:** The app writes JSON to stdout; a real system would pipe to a log aggregator and set up alerts on `auth.refresh_reuse` frequency, 5xx rate, and rate-limit hits. Documented as a Week 7+ concern; not in scope for Week 5.
+35. **Logs from before the context middleware** (rate limiter, malformed JSON) rely on explicit `requestId` in the log call, since the async context doesn't exist yet at those stages. The 500 branch handles this by reading `res.locals.requestId` directly.
+36. **`operationId` is auto-generated from method+path:** Renaming a path or switching a route's method would silently change the `operationId`, which is a breaking change for any consumer that generates an SDK from the spec. A future "pin the id in the spec" convention (or a migration note in the PR) is what mitigates it; today the generator is the baseline.
+37. **`operation-4xx-response` is off in `redocly.yaml`:** `/health` has no meaningful 4xx case. Disabled with a comment — the decision is recorded, not hidden. If `/health` ever grows a failure mode that returns 4xx, the rule should come back on.
+38. **Redis is not wired in yet:** Day 35 ran Redis by hand in a throwaway container to learn the commands; the app still uses `MemoryStore` for rate limits and has no cache. **Week 6 adds Redis to Docker Compose, a connection module with timeouts, a readiness check, and a Redis store for the limiters** — and makes the fail-open/fail-closed and read-through decisions explicit. The Day 35 tests describe today's behavior so the swap can be judged against them.
+39. **No email verification or password reset:** Accounts can be created with fake emails and there is no "forgot password" flow. **Week 6 adds both**, built on the BullMQ job queue, with a local mail catcher for tests. This closes the largest gaps on the Week 4 limitations list.
+40. **No CI or container hardening yet:** There is no GitHub Actions pipeline, no Dockerfile, and no `docker-compose` for the app. **Week 7 adds all three**, plus a real CI badge and a live demo URL in the README. The `ci` script written on Day 33 is what the pipeline will run.
+41. **No load testing:** Nothing measures the API under concurrency or sustained load. **Week 7 adds a minimal load check** against the deployed build (see item 23).
+42. **No contract test between the OpenAPI document and real responses:** The spec is linted and its `operationId`s are tested, but no test validates a real response body against the spec's schema. A future Ajv-based test (Day 35 Challenge 2) closes this gap (see item 24).
 
 ## Week 1 summary
 Three things I can do now that I couldn't on Day 1:
@@ -1126,7 +1511,7 @@ What I'd do differently:
 One thing I want to get better at in Week 5:
 - Writing proper unit and integration tests with a framework (Vitest), instead of ad-hoc scripts.
 
-## Week 5 summary (Partial)
+## Week 5 summary
 Three things I can do now that I couldn't on Day 28:
 - Write fast unit tests for pure logic using Vitest.
 - Mock external dependencies (like `randomBytes` or `Date`) to make tests deterministic.
@@ -1155,6 +1540,20 @@ Three more things I can do now that I couldn't on Day 32:
 - Install **Husky + lint-staged** hooks that run in ~2s on staged files, plus a pre-push hook that runs typecheck + unit tests, and prove all five behaviors empirically (block, auto-fix, speed, `--no-verify` bypass, pre-push block).
 - Wire **`precheck` and `ci`** as one command that matches what Week 7's pipeline will run, and add `.vscode/` settings for team consistency.
 
+Three more things I can do now that I couldn't on Day 33:
+- Replace `console.error` with **pino** producing one JSON object per line on stdout, with a **`mixin()`** that attaches `{ requestId, userId }` from the async context to every line automatically.
+- Use **`AsyncLocalStorage`** so code deep inside a service logs with the right request ID without passing `requestId` through every function signature — and place the context middleware **after** `express.json()` because a listener runs in the context of whoever calls `emit`.
+- **Redact secrets by field name** at 3 depths and write a **Prisma-aware error serializer** that keeps only the last line and drops `meta`, so query arguments never reach disk — then prove it with an **integration leak test** that pushes real passwords, hashes, tokens and an email through the whole API and fails if any appear in the output.
+- **Lint the OpenAPI document with Redocly**: auto-generate `operationId` from method+path (unique by construction) and add descriptions to tags, so documentation mistakes fail `precheck` in ~2 seconds.
+- Catch up the Day 32 **`docs.and.auth.test.ts`** file (it was never created) — every documented operation answers `401` without credentials, every protected operation documents a `401`, and `operationId` exists and is unique on every operation.
+
+Three more things I can do now that I couldn't on Day 34:
+- **Test rate limiters inside the suite** by building a fresh copy of the app with `RATE_LIMIT_ENABLED=true` and `vi.resetModules()`, and using `X-Forwarded-For` to give each test its own client address. This replaces the standalone `test:ratelimit` script.
+- **Write characterization tests before a storage swap.** The rate limiter's current behavior is now pinned in the suite; Week 6's move to a Redis store can change the *storage* without changing the *behavior*, and the tests will say if anything changed.
+- **Test documentation so it can't drift.** `project-docs.test.ts` parses the README, `.env.example`, and `CHANGELOG.md` and compares them against `envSchema.shape`, `package.json` scripts, and `package.json` version. Fix the docs, not the test.
+- **Run Redis by hand in a throwaway container** and read the answers to `SET`, `GET`, `TTL`, `INCR`, `SET NX EX`, `HSET`, `HGETALL`, `SCAN`. `INCR` is atomic on a single-threaded server, so Day 9's race returns 2000, not 1998. `SET NX EX` is an atomic lock — the Redis version of `SELECT ... FOR UPDATE`.
+- **Release with a fresh-clone test.** `v0.5.0` tagged only after the clone's `npm run ci` was green, which proves `.env.example` and the README are complete and the setup has no hidden dependency on my machine.
+
 Things that confused me:
 - The difference between a fake, a stub, and a spy.
 - Why faking *all* timers broke the token tests.
@@ -1163,6 +1562,12 @@ Things that confused me:
 - Why a rate-limit test can fail on a *freshly started* server — turned out to be a double-mounted limiter (each request counted twice, effective limit halved) rather than any shared budget or ordering issue.
 - Why `typescript-eslint` needs the side-by-side TypeScript 6/7 alias — the native TypeScript 7 compiler removed the JS API it depends on, and `npm i` doesn't tell you that; the `ERESOLVE` message does.
 - Why 24 lint findings is normal and not a sign the code is bad — `recommendedTypeChecked` is the strictest config; reading the top-five rules turns a wall of errors into a handful of categories.
+- Why the `"finish"` handler in `requestLogger` receives `requestId` explicitly and can't read the async context — the response is done, the socket is closing, and the context is either gone or belongs to a different request.
+- Why `operationId` "unique by construction" (generated from method + path) is stronger than "unique by checking" (a test that has to be updated on every new endpoint).
+- Why the rate-limiter tests need `vi.stubEnv` + `vi.resetModules` + a dynamic `import` — the shared test app has limits off, and there's no way to turn them on for one file without a fresh module graph.
+- Why `TRUST_PROXY_HOPS` had to be `1` in the rate-limiter tests — each test poses as a different client with `X-Forwarded-For`, and the app must trust exactly one proxy hop to read that header. Zero hops would ignore it; two would trust a forged one.
+- Why "the test failed with the wrong count" is a *good* diagnostic — exactly half the expected number means the limiter ran twice per request, which is a mount bug, not a config bug. The `RateLimit` response header (`remaining` dropping by 2) shows it in one probe.
+- Why the docs test is not "testing the README" — it's testing the **contract** between three files that must agree (`envSchema`, `.env.example`, README). The files are the source of truth; the test just fails when they disagree.
 
 What I'd do differently:
 - Write the test *before* the code. The `slugify` test found a bug instantly that would have shipped otherwise.
@@ -1171,4 +1576,7 @@ What I'd do differently:
 - Trust the mutation table, not the coverage number. Coverage said "88%, looks fine" while `rateLimit.ts` was at 33% with **zero assertions about its behavior** — and the script covering it was silently broken by a double mount.
 - Don't try the ambitious version of a fix under time pressure. The `errorShape()` guard for `errorHandler.ts` broke the parser mid-edit; the disable-with-reason was correct all along and took 30 seconds.
 - Land the formatting commit and the ESLint fixes as separate commits, and re-run `npm run format` after any multi-file manual edit. `format:check` in `precheck` catches the drift, but only if you remember to run it before committing.
-```
+- When migrating every log call site, run `npm run typecheck:all` after each file — the compiler is your to-do list, and one error at a time is much easier than five at the end.
+- When adding the OpenAPI linter, run `lint:openapi` after every spec change, not just at the end — the errors compound otherwise (33 missing `operationId`s become 33 plus 5 missing tag descriptions plus 1 license warning in one shot).
+- Write the characterization tests **before** the storage swap, not after. Day 35's rate-limiter tests are the model: pin today's behavior, then change the storage. If Week 6 changes the limiter and a test fails, I know exactly which behavior changed.
+- Run the docs tests on the same PR as the docs change, not in a follow-up. `project-docs.test.ts` found four drifts in one run — all of them in files I had edited that day, all of them things I would have shipped.

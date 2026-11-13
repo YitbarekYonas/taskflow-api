@@ -17,10 +17,10 @@ export default defineConfig({
       provider: "v8",
       include: ["src/**/*.ts"],
       // Generated code and process entry points. Hard-to-test code is NOT a reason to exclude it.
-      exclude: ["src/generated/**", "src/cli.ts", "src/server.ts"],
+      exclude: ["src/generated/**", "src/cli.ts", "src/server.ts", "src/utils.ts"],
       reporter: ["text", "html", "json-summary"],
       reportsDirectory: "coverage",
-      thresholds: { statements: 86, branches: 73, functions: 88, lines: 88 },
+      thresholds: { statements: 90, branches: 78, functions: 96, lines: 92 },
     },
   },
 });

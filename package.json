@@ -1,6 +1,6 @@
 {
   "name": "taskflow",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Task manager API built with Node.js, Express, and TypeScript",
   "main": "index.js",
   "scripts": {
@@ -29,7 +29,6 @@
     "setup": "npm run db:up && npm run db:deploy && npm run db:generate && npm run db:seed",
     "bench:login": "tsx scripts/login-timing.ts",
     "auth:purge": "tsx scripts/purge-tokens.ts",
-    "test:ratelimit": "tsx scripts/test-ratelimit.ts",
     "typecheck:all": "tsc -p tsconfig.scripts.json",
     "verify": "bash scripts/verify.sh",
     "test:unit": "vitest run",
@@ -42,7 +41,7 @@
     "lint": "eslint . --max-warnings 0",
     "lint:fix": "eslint . --fix",
     "precheck": "npm run typecheck:all && npm run lint && npm run format:check && npm run lint:openapi && npm run test:unit && npm run build",
-    "ci": "npm run precheck && npm run test:integration",
+    "ci": "npm run precheck && npm run test:coverage",
     "dev": "tsx watch src/server.ts | pino-pretty",
     "dev:json": "tsx watch src/server.ts",
     "lint:openapi": "tsx scripts/export-openapi.ts && redocly lint .tmp/openapi.json"

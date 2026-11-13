@@ -1,5 +1,9 @@
 # TaskFlow
 
+![Node](https://img.shields.io/badge/node-%E2%89%A520-339933)
+![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6)
+![License](https://img.shields.io/badge/license-MIT-blue)
+
 A team task-management API built with Node.js, Express, TypeScript, and Prisma.
 
 ## Features
@@ -92,11 +96,19 @@ A new developer who tries `import { prisma } from "../db.js"` in a controller ge
 
 Interactive API docs are available at `http://localhost:3000/docs` when the server is running. You can test every endpoint directly in the browser.
 
+See [docs/TESTING.md](./docs/TESTING.md) for the full testing guide: the three layers (unit / integration / smoke), commands, conventions and known gaps.
+
+```bash
+npm test                  # unit, then integration
+npm run test:coverage     # both suites, with thresholds
+npm run verify            # build + all tests + smoke against the compiled server
+```
+
 To verify the whole project against a **compiled** server (what actually ships), run:
 ```bash
 npm run verify
 ```
-This builds `dist/`, starts it, then runs `test:unit`, `test:integration`, `smoke`, and `test:ratelimit` in that order, restarting the server between `smoke` and `test:ratelimit` so the in-memory rate-limit counters start at zero. The script ends with `Everything passed.` when all four steps succeed.
+This builds `dist/`, starts it, then runs `test:unit`, `test:integration`, and `smoke` in that order. The script ends with `Everything passed.` when all three steps succeed.
 
 ![Smoke Test Results](./docs/smoke-test.png)
 
@@ -137,7 +149,7 @@ Integration tests run the real HTTP stack — validation, controllers, services,
   2. `truncateAll()` runs `SELECT current_database()` and refuses if the name doesn't end in `_test`.
 - **Files run one at a time** (`fileParallelism: false`) because they share one database.
 
-Integration tests cover five areas:
+Integration tests cover six areas:
 
 **Auth**
 - Registration: 201 with public fields, Argon2id hash stored, no password in body, security headers, duplicate email 409 (case-insensitive), mass-assignment rejected, malformed JSON/array/`null`/`text/plain` rejected, **8 parallel registrations produce exactly one account**.
@@ -186,6 +198,12 @@ Integration tests cover five areas:
 - **`operationId` exists on every operation.**
 - **`operationId` values are unique.**
 
+**Rate limiters** (`ratelimit.test.ts`)
+- Builds its own copy of the app with `RATE_LIMIT_ENABLED=true` via `vi.stubEnv` + `vi.resetModules()` + dynamic import.
+- Each test uses its own `X-Forwarded-For` address so limiters don't interfere.
+- Covers: register (5/hour per IP), login per account (10/15min, case-insensitive emails, "correct password while throttled"), login per IP (30/15min, successful logins don't count), refresh/logout (60/15min shared), invites (20/hour per user), global (300/min per IP, `Health` exempt).
+- The limiter body is no longer a coverage gap: `rateLimit.ts` and `limiters.ts` now at 100% statements.
+
 - **Test infrastructure:** DB name ends in `_test` (both safety layers), all migrations applied, tables empty between tests, `RESTART IDENTITY` gives `id=1`.
 - **Security & docs:** Helmet headers present, CORS allows `Authorization` for the configured origin, unknown routes return JSON `404`, oversized bodies return `413` with the standard error shape.
 
@@ -196,14 +214,13 @@ npm run test:coverage   # Runs both suites once and enforces thresholds
 
 The combined run prints a per-file coverage report and writes HTML to `coverage/`. **Thresholds are a ratchet:** they live in `vitest.coverage.config.ts` and only go up. A failing threshold means "add tests", never "lower the number". If a threshold fails, the command exits non-zero — this is what the Week 7 CI gate will check.
 
-Current thresholds (measured after Day 32, rounded down − 2 to absorb v8's rounding noise):
-- Statements: **86**
-- Branches: **73**
-- Functions: **88**
-- Lines: **88**
+Current thresholds (measured after Day 35, rounded down − 2 to absorb v8's rounding noise):
+- Statements: **90**
+- Branches: **78**
+- Functions: **96**
+- Lines: **92**
 
 Expected low-coverage files that are **not** regressions:
-- `src/middleware/rateLimit.ts` / `limiters.ts` — the suite runs with `RATE_LIMIT_ENABLED=false`, so the limiter body is exercised only by `npm run test:ratelimit`. Porting it into the suite is Challenge 1 (a future task).
 - `src/repositories/prisma/*.repository.ts` — the `P2002`/`P2003`/`P2025` mappings that the service layer's fast-path checks prevent from being hit. The `task.repository.ts` P2003 path is covered by a dedicated repo-level test; the rest are documented as gaps.
 
 ### Post-build smoke test
@@ -222,7 +239,6 @@ npm run smoke       # 12 checks against the COMPILED server
 | `npm test` | Unit tests, then integration tests |
 | `npm run test:coverage` | Runs both suites once with coverage report and thresholds |
 | `npm run smoke` | Post-build check of the compiled server over real HTTP |
-| `npm run test:ratelimit` | Rate-limit behavior (currently script-only; porting into the suite is a future task) |
 | `npm run lint:openapi` | Redocly lint of the exported OpenAPI spec |
 | `npm run verify` | Builds, starts the compiled server, then runs all of the above |
 
@@ -560,6 +576,11 @@ prisma/
 ├── seed.ts               # Development seed data
 └── migrations/           # SQL migration history
 
+docs/
+├── TESTING.md            # Testing layers, commands, conventions, known gaps
+├── THREAT_MODEL.md       # Threat model and what is not defended
+└── smoke-test.png        # Smoke test screenshot
+
 tests/
 ├── unit/                 # Vitest unit tests (mirrors src/)
 ├── integration/          # Supertest tests against a real test database
@@ -595,23 +616,25 @@ Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CO
 - [x] Roles and project membership
 - [x] Rate limiting and security hardening
 - [x] Week 4 wrap-up and v0.4.0
-- [ ] Week 5 — Testing (Vitest unit tests, integration tests, coverage, CI test gate)
+- [x] Week 5 — Testing, code quality and observability
   - [x] Vitest setup and unit tests for pure logic
   - [x] Test database + Supertest integration tests for auth
   - [x] Integration tests for tasks and projects (incl. filtering, sorting, pagination, duplicate, merge)
   - [x] Due-date business rule (past dates rejected on creation, CLI exempt) with unit-tested boundary
-  - [x] Integration tests for members, comments, sessions, access matrix and docs (Day 32)
-  - [x] Combined coverage run with ratcheted thresholds (86/73/88/88)
-  - [x] Retired five hand-written scripts (token-attacks, auth-coverage, refresh-flow, access-attacks, security-checks), shrunk smoke to a post-build check
-  - [x] ESLint (flat config, type-aware rules), Prettier, Husky pre-commit/pre-push hooks, `precheck` and `ci` scripts (Day 33)
-  - [x] Structured logging with pino + `AsyncLocalStorage` + redaction, and Redocly OpenAPI linting (Day 34)
-  - [ ] CI gate (Week 7)
+  - [x] Integration tests for members, comments, sessions, access matrix and docs
+  - [x] Combined coverage run with ratcheted thresholds (90/78/96/92)
+  - [x] Retired six hand-written scripts (token-attacks, auth-coverage, refresh-flow, access-attacks, security-checks, test-ratelimit), shrunk smoke to a post-build check
+  - [x] ESLint (flat config, type-aware rules), Prettier, Husky pre-commit/pre-push hooks, `precheck` and `ci` scripts
+  - [x] Structured logging with pino + `AsyncLocalStorage` + redaction, and Redocly OpenAPI linting
+  - [x] Documentation drift tests and Week 5 wrap-up and v0.5.0
+- [ ] Week 6 — Real-world features (Redis, jobs, email, uploads, real-time)
+- [ ] Week 7 — Docker, CI and deployment
 
 ## Known Limitations
 1. **In-memory rate limits:** Reset on restart and don't share between multiple server instances. Week 6 moves them to Redis.
 2. **Per-account throttle:** An attacker can intentionally lock a victim out by flooding `/auth/login` with wrong passwords.
 3. **No CAPTCHA or MFA:** A determined attacker with a botnet can still try many passwords.
-4. **No email verification:** Accounts can be created with fake emails.
+4. **No email verification:** Accounts can be created with fake emails. Week 6 adds verification and password reset.
 5. **Access tokens cannot be revoked:** A stolen access token stays valid for up to 15 minutes after logout. `auth.sessions.test.ts` locks this in as a characterization test.
 6. **Member invites reveal email existence:** Adding a member by email returns 404 if the user doesn't exist. Rate limiting makes probing slow, but not impossible.
 7. **No automated alerting:** Repeated `auth 401` events are logged but not flagged.
@@ -631,12 +654,12 @@ Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CO
 21. **Unit tests don't cover HTTP or SQL:** Controllers, repositories, and routes show 0% unit coverage by design. Integration tests (Week 5, Days 30–32) cover them.
 22. **Integration tests run serially:** The test database is shared across files, so `fileParallelism: false` is required. Per-worker databases would allow parallelism at the cost of setup complexity.
 23. **Test database is wiped on every `beforeEach`:** Correct for the current suite (a few ms per wipe), but slower than transaction rollback isolation. Documented as a challenge for later.
-24. **`test:ratelimit` is a script, not part of the suite:** The rate limiter's body (counters, key generators, 429 handling) is exercised only by `scripts/test-ratelimit.ts`, and it needs a fresh in-memory budget. `verify.sh` restarts the compiled server between `smoke` and `test:ratelimit` so the counters start at zero. Porting the script into the integration suite (Challenge 1) will let `beforeEach` reset the store instead.
+24. **Rate-limit tests build their own app copy:** `tests/integration/ratelimit.test.ts` uses `vi.stubEnv` + `vi.resetModules()` + dynamic import to build a fresh app with `RATE_LIMIT_ENABLED=true`. The shared test app still runs with limits off, so ordinary tests can send as many requests as they like. The limiter window's expiry (the counter resetting after 15 minutes) isn't tested — it would need a faked clock inside the limiter's store (Challenge 1).
 25. **Rate limiters must be mounted exactly once:** A limiter attached both in `app.ts` by path **and** on the route handler runs twice per request and halves its effective limit. This bug existed for `registerLimiter`, `loginIpLimiter`, and `refreshLimiter` and was fixed on Day 32 by removing the `app.use("/auth/...", ...)` mounts from `app.ts`, leaving `globalLimiter` as the only app-level mount. Any new limiter must follow the same rule: **one mount, one place** — `grep -rn "Limiter" src/` is the fast check.
 26. **Due-date rule uses the UTC calendar date, not the caller's local date:** A user far west of UTC can be rejected for setting "today" in their time zone late in their evening. Options (accept vs. one-day grace vs. `Time-Zone` header) are documented in `notes.md`; the current choice is to accept UTC for consistency with the rest of the API.
 27. **Integration tests don't cover every branch of `PATCH /tasks/:id`:** Coverage gaps identified in my own test list: preserving `createdById` through a patch is only implicitly covered, and "stranger moves `projectId`" isn't a distinct test. Not bugs — candidates for a second pass.
 28. **Coverage gaps still open after Day 32:** `src/middleware/rateLimit.ts` and `src/middleware/limiters.ts` are at ~33% and ~66% respectively (the suite runs with `RATE_LIMIT_ENABLED=false`); `user.repository.ts` at ~54% (the `P2002` catch's `else` branch is never hit); `errorHandler.ts` at ~82% (the Zod-error-from-service branch is defensive). None are bugs — the first is scheduled for Challenge 1, the second is a genuine safety net worth a repo-level test, the third is accepted as defensive code.
-29. **Five scripts retired on Day 32:** `scripts/token-attacks.ts`, `scripts/auth-coverage.ts`, `scripts/refresh-flow.ts`, `scripts/access-attacks.ts`, and `scripts/security-checks.ts` were deleted. Each replacement is a named integration suite (`auth.sessions`, `access.matrix`, `projects.members`, `comments`, `security`, `docs.and.auth`), and the Day 32 mutation table (10 rows) is the evidence that the suite catches the bugs the scripts caught.
+29. **Six scripts retired in Week 5:** `scripts/token-attacks.ts`, `scripts/auth-coverage.ts`, `scripts/refresh-flow.ts`, `scripts/access-attacks.ts`, `scripts/security-checks.ts` (retired Day 32), and `scripts/test-ratelimit.ts` (retired Day 35). Each replacement is a named integration suite (`auth.sessions`, `access.matrix`, `projects.members`, `comments`, `security`, `docs.and.auth`, `ratelimit`), and the mutation tables (10 rows + 7 rows + 8 rows) are the evidence that the suites catch the bugs the scripts caught.
 30. **`smoke.ts` is intentionally small (12 checks):** It's a post-build check of the *compiled* `dist/` server, not a behavior suite. Detailed behavior is `npm test`'s job; if a check needs adding, it goes in an integration test, not in `smoke.ts`.
 31. **`typescript-eslint` needs TypeScript 6, not 7:** The project uses the native TypeScript 7 compiler (`tsc`), but `typescript-eslint` requires the TypeScript 6 JS compiler API. `package.json` uses the official side-by-side alias: `@typescript/native@npm:typescript@^7.0.2` (provides `tsc`) and `typescript@npm:@typescript/typescript6@^6.0.2` (provides the API). `npx tsc --version` → 7.x, `npx tsc6 --version` → 6.x. When `typescript-eslint` supports TS 7, the alias can be removed.
 32. **`eslint-config-prettier` is the only rule-disabling plugin:** Every ESLint rule disabled in `eslint.config.mjs` (e.g., `require-await`) has a written reason in the config. `errorHandler.ts` has one file-level `eslint-disable` for `no-unsafe-member-access`/`no-unsafe-assignment`, with a written reason. Disables are decisions, not shortcuts.
