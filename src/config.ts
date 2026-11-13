@@ -8,7 +8,7 @@ const bool = (fallback: "true" | "false") =>
     .transform((v) => v === "true");
 const schema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
-  LOG_LEVEL: z.enum(["debug", "info", "error"]).default("info"),
+  LOG_LEVEL: z.enum(["trace", "debug", "info", "warn", "error", "fatal", "silent"]).default("info"),
   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
   CORS_ORIGIN: z
     .string()

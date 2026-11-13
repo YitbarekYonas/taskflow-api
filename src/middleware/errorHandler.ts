@@ -14,7 +14,7 @@ export const notFound: RequestHandler = (req, res) => {
   res.status(404).json({ error: { message: `Route not found: ${req.method} ${req.originalUrl}` } });
 };
 
-export const errorHandler: ErrorRequestHandler = (err, req, res, _next) => {
+export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
   // 👈 Catch express-rate-limit errors
   if (err.statusCode === 429 || err.status === 429) {
     const retryAfter = err.headers?.["Retry-After"] || err.retryAfter;
@@ -58,7 +58,6 @@ export const errorHandler: ErrorRequestHandler = (err, req, res, _next) => {
     return;
   }
   if (err instanceof UnauthorizedError) {
-    logger.info(`[${res.locals.requestId}] auth 401 ${req.method} ${req.originalUrl} ip=${req.ip}`);
     res
       .status(401)
       .set("WWW-Authenticate", 'Bearer realm="taskflow"')
@@ -66,7 +65,6 @@ export const errorHandler: ErrorRequestHandler = (err, req, res, _next) => {
     return;
   }
   if (err instanceof ForbiddenError) {
-    logger.info(`[${res.locals.requestId}] auth 403 ${req.method} ${req.originalUrl} ip=${req.ip}`);
     res.status(403).json({ error: { message: err.message } });
     return;
   }
@@ -79,7 +77,10 @@ export const errorHandler: ErrorRequestHandler = (err, req, res, _next) => {
     return;
   }
 
-  logger.error(`[${res.locals.requestId}] Unhandled error:`, err);
+  logger.error(
+    { err, requestId: (res.locals as { requestId?: string }).requestId },
+    "unhandled error",
+  );
   res
     .status(500)
     .json({ error: { message: "Internal server error", requestId: res.locals.requestId } });
