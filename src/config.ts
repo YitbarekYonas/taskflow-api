@@ -27,6 +27,11 @@ export const envSchema = z.object({
   // how many reverse proxies sit in front of the app (0 = none, clients connect directly)
   TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(5).default(0),
   DOCS_ENABLED: bool("true"),
+  // Empty means "no Redis": rate limits then live in each process's memory
+  REDIS_URL: z.preprocess(
+    (value) => (value === "" ? undefined : value),
+    z.string().startsWith("redis").optional(),
+  ),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -45,6 +50,12 @@ if (parsed.data.NODE_ENV === "production" && /replace-me/i.test(parsed.data.JWT_
   console.error("Refusing to start: JWT_SECRET is still the placeholder from .env.example.");
   process.exit(1);
 }
+if (parsed.data.NODE_ENV === "production" && !parsed.data.REDIS_URL) {
+  console.error(
+    "Refusing to start: REDIS_URL is required in production (rate limits must be shared).",
+  );
+  process.exit(1);
+}
 export const config = {
   env: parsed.data.NODE_ENV,
   logLevel: parsed.data.LOG_LEVEL,
@@ -57,4 +68,5 @@ export const config = {
   rateLimitEnabled: parsed.data.RATE_LIMIT_ENABLED,
   trustProxyHops: parsed.data.TRUST_PROXY_HOPS,
   docsEnabled: parsed.data.DOCS_ENABLED,
+  redisUrl: parsed.data.REDIS_URL,
 };

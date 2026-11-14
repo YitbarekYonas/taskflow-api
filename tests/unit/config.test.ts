@@ -12,6 +12,7 @@ const BASELINE: Record<string, string> = {
   RATE_LIMIT_ENABLED: "true",
   TRUST_PROXY_HOPS: "0",
   DOCS_ENABLED: "true",
+  REDIS_URL: "redis://localhost:6379/15",
 };
 
 // Loads a fresh copy of the config module under a complete, controlled environment
@@ -49,6 +50,11 @@ describe("config", () => {
     expect(config.docsEnabled).toBe(false);
   });
 
+  it("treats an empty REDIS_URL as no Redis", async () => {
+    const config = await loadConfig({ REDIS_URL: "" });
+    expect(config.redisUrl).toBeUndefined();
+  });
+
   it.each([
     ["a non-numeric PORT", { PORT: "abc" }, "PORT"],
     ["a PORT out of range", { PORT: "70000" }, "PORT"],
@@ -56,6 +62,7 @@ describe("config", () => {
     ["a boolean spelled yes", { RATE_LIMIT_ENABLED: "yes" }, "RATE_LIMIT_ENABLED"],
     ["a non-postgres DATABASE_URL", { DATABASE_URL: "mysql://u:p@h/db" }, "DATABASE_URL"],
     ["an unknown LOG_LEVEL", { LOG_LEVEL: "banana" }, "LOG_LEVEL"],
+    ["a REDIS_URL that is not a Redis URL", { REDIS_URL: "http://localhost:6379" }, "REDIS_URL"],
   ])("refuses to start with %s and names the variable", async (_name, overrides, variable) => {
     const errors = trapExit();
     await expect(loadConfig(overrides)).rejects.toThrow("exit 1");
@@ -78,6 +85,11 @@ describe("config", () => {
       await expect(
         loadConfig({ NODE_ENV: "production", RATE_LIMIT_ENABLED: "false" }),
       ).rejects.toThrow("exit 1");
+    });
+
+    it("refuses to run without Redis", async () => {
+      trapExit();
+      await expect(loadConfig({ NODE_ENV: "production", REDIS_URL: "" })).rejects.toThrow("exit 1");
     });
 
     it("accepts a properly configured production environment", async () => {

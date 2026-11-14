@@ -3,9 +3,10 @@ import { config } from "./config.js";
 import { logger } from "./logger.js";
 import { prisma } from "./db.js";
 import { authService } from "./container.js";
+import { connectRedis, closeRedis } from "./redis.js";
 
 const app = createApp();
-
+await connectRedis();
 const server = app.listen(config.port, () => {
   logger.info({ port: config.port }, "TaskFlow API listening");
 });
@@ -29,10 +30,10 @@ purgeTimer.unref(); // never keep the process alive just for this timer
 function shutdown(signal: string) {
   logger.info({ signal }, "shutting down");
   server.close(() => {
-    prisma.$disconnect().then(
+    Promise.all([closeRedis(), prisma.$disconnect()]).then(
       () => process.exit(0),
       (error: unknown) => {
-        logger.error({ err: error }, "disconnect failed during shutdown");
+        logger.error({ err: error }, "cleanup failed during shutdown");
         process.exit(1);
       },
     );

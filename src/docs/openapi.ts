@@ -122,6 +122,19 @@ export const baseSpec = {
       },
     },
 
+    "/ready": {
+      get: {
+        tags: ["System"],
+        summary: "Readiness check",
+        description:
+          "200 while the database is reachable (Redis being down only reports `degraded`); 503 when the database is unreachable.",
+        responses: {
+          200: { description: "Ready, possibly degraded", content: json(ref("Readiness")) },
+          503: { description: "Not ready", content: json(ref("Readiness")) },
+        },
+      },
+    },
+
     "/tasks": {
       get: {
         tags: ["Tasks"],
@@ -588,6 +601,19 @@ export const baseSpec = {
           joinedAt: { type: "string" },
         },
       },
+      Readiness: {
+        type: "object",
+        properties: {
+          status: { type: "string", enum: ["ok", "degraded", "unavailable"] },
+          checks: {
+            type: "object",
+            properties: {
+              database: { type: "string", enum: ["up", "down"] },
+              redis: { type: "string", enum: ["up", "down", "disabled"] },
+            },
+          },
+        },
+      },
     },
     securitySchemes: {
       bearerAuth: { type: "http", scheme: "bearer", bearerFormat: "JWT" },
@@ -640,6 +666,7 @@ export const baseSpec = {
 const METHODS = ["get", "post", "put", "patch", "delete"] as const;
 const PUBLIC_OPS = new Set([
   "GET /health",
+  "GET /ready",
   "POST /auth/register",
   "POST /auth/login",
   "POST /auth/refresh",
@@ -684,7 +711,8 @@ function withSecurity<T extends { paths: object }>(spec: T): T {
         op.security = []; // overrides the global requirement
         continue;
       }
-      if (key !== "GET /health") op.responses["429"] ??= errorRef("RateLimited");
+      if (key !== "GET /health" && key !== "GET /ready")
+        op.responses["429"] ??= errorRef("RateLimited");
       op.responses["401"] ??= errorRef("Unauthorized");
       if (FORBIDDEN_OPS.has(key)) op.responses["403"] ??= errorRef("Forbidden");
     }

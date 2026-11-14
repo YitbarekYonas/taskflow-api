@@ -25,6 +25,12 @@ const email = `smoke+${stamp}@example.com`;
 const password = "smoke-test-password";
 
 check("health", (await call("GET", "/health")).status === 200);
+const ready = await call("GET", "/ready");
+check(
+  "ready",
+  ready.status === 200 && ready.json?.checks?.database === "up",
+  JSON.stringify(ready.json),
+);
 check("docs page", (await fetch(`${base}/docs/`)).status === 200);
 check("tasks need a login", (await call("GET", "/tasks")).status === 401);
 
