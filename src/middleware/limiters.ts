@@ -26,6 +26,7 @@ function userKey(_req: Request, res: Response): string {
 }
 
 export const globalLimiter = makeLimiter({
+  name: "global",
   windowMs: MINUTE,
   limit: 300,
   skip: (req) => req.path === "/health" || req.path === "/ready", // monitors poll these constantly
@@ -33,12 +34,14 @@ export const globalLimiter = makeLimiter({
 });
 
 export const registerLimiter = makeLimiter({
+  name: "register",
   windowMs: HOUR,
   limit: 5,
   message: "Too many accounts created from this address. Try again later.",
 });
 
 export const loginIpLimiter = makeLimiter({
+  name: "login-ip",
   windowMs: 15 * MINUTE,
   limit: 30,
   skipSuccessfulRequests: true, // only failures count
@@ -46,6 +49,7 @@ export const loginIpLimiter = makeLimiter({
 });
 
 export const loginAccountLimiter = makeLimiter({
+  name: "login-account",
   windowMs: 15 * MINUTE,
   limit: 10,
   skipSuccessfulRequests: true,
@@ -54,6 +58,7 @@ export const loginAccountLimiter = makeLimiter({
 });
 
 export const refreshLimiter = makeLimiter({
+  name: "refresh",
   windowMs: 15 * MINUTE,
   limit: 60,
   message: "Too many token requests. Try again later.",
@@ -61,6 +66,7 @@ export const refreshLimiter = makeLimiter({
 
 // Adding members by email reveals whether an account exists, so this is a sensitive flow
 export const inviteLimiter = makeLimiter({
+  name: "invite",
   windowMs: HOUR,
   limit: 20,
   key: userKey,
