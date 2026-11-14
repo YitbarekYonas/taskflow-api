@@ -1,6 +1,8 @@
 import { execFileSync } from "node:child_process";
+import { Redis } from "ioredis";
 import pg from "pg";
-import { TEST_DATABASE_URL } from "./env.js";
+import { TEST_DATABASE_URL, TEST_REDIS_URL } from "./env.js";
+import { assertTestRedis } from "./redis.js";
 
 export default async function setup() {
   const url = new URL(TEST_DATABASE_URL);
@@ -32,4 +34,23 @@ export default async function setup() {
     env: { ...process.env, DATABASE_URL: TEST_DATABASE_URL },
     stdio: "inherit",
   });
+
+  // Redis must be reachable too, and must be the test database
+  assertTestRedis();
+  const probe = new Redis(TEST_REDIS_URL, {
+    lazyConnect: true,
+    maxRetriesPerRequest: 1,
+    connectTimeout: 2_000,
+    retryStrategy: () => null,
+  });
+  try {
+    await probe.connect();
+    await probe.ping();
+  } catch (error) {
+    throw new Error(`Cannot reach Redis at ${TEST_REDIS_URL}. Is it running? Try: npm run db:up`, {
+      cause: error,
+    });
+  } finally {
+    probe.disconnect();
+  }
 }
