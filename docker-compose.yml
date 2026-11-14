@@ -1,4 +1,4 @@
-# Development database only. Week 7 adds the app itself.
+# Development infrastructure only. Week 7 adds the app itself.
 # These credentials are for local development. Never reuse them anywhere real.
 services:
   db:
@@ -9,7 +9,7 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: taskflow
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432" # localhost only: never publish a database on every interface
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -18,5 +18,31 @@ services:
       timeout: 3s
       retries: 20
 
+  redis:
+    image: redis:7-alpine
+    container_name: taskflow-redis
+    # noeviction: Redis never silently deletes data when memory is full (Day 38 stores jobs here),
+    # so every key we write must have a TTL. appendonly keeps data across restarts.
+    command:
+      [
+        "redis-server",
+        "--appendonly",
+        "yes",
+        "--maxmemory",
+        "256mb",
+        "--maxmemory-policy",
+        "noeviction",
+      ]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
 volumes:
   pgdata:
+  redisdata:

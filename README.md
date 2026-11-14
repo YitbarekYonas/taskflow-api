@@ -500,6 +500,7 @@ Moving list queries from JavaScript to SQL drastically reduced response times, e
 | `RATE_LIMIT_ENABLED` | Enable rate limiting (must be `true` in production) | `false` (dev) |
 | `TRUST_PROXY_HOPS` | Number of reverse proxies in front of the app | `0` |
 | `DOCS_ENABLED` | Serve Swagger docs at `/docs` | `true` |
+| `REDIS_URL` | Redis connection string for shared rate-limit counters. Empty means in-memory (per-process) counters. | `redis://localhost:6379` (dev); **required in production** |
 
 ## Database
 
