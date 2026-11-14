@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { Request, Response } from "express";
 import type { User } from "../types.js";
 import { ipKey, makeLimiter } from "./rateLimit.js";
@@ -9,9 +10,14 @@ const HOUR = 60 * MINUTE;
 // Falls back to the IP if the body has no usable email (the request will be a 400 anyway).
 function emailKey(req: Request): string {
   const email = (req.body as { email?: unknown } | undefined)?.email;
-  return typeof email === "string" && email.trim()
-    ? `email:${email.trim().toLowerCase().slice(0, 254)}`
-    : `ip:${ipKey(req)}`;
+  if (typeof email === "string" && email.trim()) {
+    // Hashed: Redis keys are visible to anyone who can run KEYS or MONITOR
+    const digest = createHash("sha256")
+      .update(email.trim().toLowerCase().slice(0, 254))
+      .digest("hex");
+    return `email:${digest.slice(0, 32)}`;
+  }
+  return `ip:${ipKey(req)}`;
 }
 
 // Only valid on routes mounted AFTER `authenticate`
@@ -22,7 +28,7 @@ function userKey(_req: Request, res: Response): string {
 export const globalLimiter = makeLimiter({
   windowMs: MINUTE,
   limit: 300,
-  skip: (req) => req.path === "/health", // monitors poll this constantly
+  skip: (req) => req.path === "/health" || req.path === "/ready", // monitors poll these constantly
   message: "Too many requests. Please slow down.",
 });
 

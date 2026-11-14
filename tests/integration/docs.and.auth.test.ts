@@ -6,6 +6,7 @@ import { api } from "../support/app.js";
 // Operations that must work without credentials. Anything else documented must answer 401.
 const PUBLIC = new Set([
   "GET /health",
+  "GET /ready",
   "POST /auth/register",
   "POST /auth/login",
   "POST /auth/refresh",
