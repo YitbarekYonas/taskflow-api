@@ -221,6 +221,27 @@
 - **The fresh-clone test proves the docs work.** Clone the repo into a new directory, `cp .env.example .env`, `npm install`, `npm run setup`, `npm run ci`, `npm run verify`. If it passes, the README and `.env.example` are complete and the setup has no hidden dependency on your machine. The `taskflow_test` database is created by global setup from migrations — that's the proof.
 - **Release tags are the history recruiters read.** `v0.5.0` with a changelog section (breaking changes first) is the artifact. The README's live-demo link and CI badge come in Week 7.
 
+### Week 6 (Day 36 — Redis in Docker Compose & Shared Rate-Limit Counters)
+- **A shared counter needs an atomic increment.** Two Node processes cannot share a number in memory. `INCR` on Redis's single thread is one step; Day 9's read-modify-write was not. The two-instance experiment makes the difference visible: without a shared counter, each process counts to 3 against its own limit of 5, and **no** request is limited; with Redis, five requests across both processes consume the shared 5/hour budget and the sixth is 429.
+- **The fixed-window limiter is three commands in one transaction.** `INCR key`, `PEXPIRE key windowMs NX`, `PTTL key`, wrapped in `MULTI`/`EXEC`. The `NX` is load-bearing: without it, every hit resets the window and a client is never unblocked. With it, the window starts once, on the first hit, and expires after `windowMs` regardless of later traffic.
+- **Every key must expire, and the store must not resurrect an expired key without a TTL.** A plain `DECR` on an expired key creates a key with **no** expiry, so the counter blocks forever. The Lua `if EXISTS then DECR else 0` guard prevents that. The `PTTL < 0` fallback in `increment` re-applies the TTL if the transaction ever leaves a counter with no expiry.
+- **`express-rate-limit` increments *then* compares**, so a request that gets blocked still leaves the counter at `limit + 1`. The register limiter's key shows `6` after five `400`s and one `429`. A `skipSuccessfulRequests` limiter (`loginIpLimiter`) decrements on success, so its count stays honest; a limiter without it (register) counts every request including the blocked one.
+- **`ipKeyGenerator` normalizes IPv6 to a subnet, not a single address.** Two clients in the same `/56` share one budget, which stops an attacker rotating through the block. The key becomes `rl:register:::/56`, not `rl:register:::1` — a `get` on `:::1` returns nothing (`PTTL -2`) even though the counter exists.
+- **Every limiter's `name` is part of its key (`rl:<name>:<key>`), so names must be unique.** Two limiters with the same name share a counter — the register and refresh limiter would merge, halving one and doubling the other. The mutation table's row 2 tests this: give `refresh` the name `register` and **only the redis variant** of the rate-limit tests fails, because the memory variant has separate stores and can't see the collision. This is exactly the case the `describe.each(["memory", "redis"])` restructure exists to catch.
+- **A Redis store must implement the `Store` interface without hiding its shape.** `express-rate-limit`'s `Store` has an optional public `prefix` property; a class cannot declare `private prefix` in its place. Rename the private field (`keyPrefix`) and pass positionally. `init(options)` is `void | Promise<void>`; `increment` returns `ClientRateLimitInfo | Promise<ClientRateLimitInfo>`; `decrement`/`resetKey` return `void | Promise<void>`. An `async` method with `await`/`return await` satisfies both `no-floating-promises` and the interface; `void this.run(...)` satisfies the lint but breaks the type. `void this.primary.init?.(options)` in `init` is the only place `void` is correct.
+- **Fail fast on a dead Redis.** `enableOfflineQueue: false`, `maxRetriesPerRequest: 1`, `connectTimeout: 2s`, `commandTimeout: 500ms`. With the default `enableOfflineQueue: true`, commands queue during an outage and the request stalls for seconds; with it off, the request fails in ~1ms and the fallback store answers. The `retryStrategy` keeps the connection retrying in the background without blocking requests.
+- **The `error` event fires on every failed retry.** Without a throttle, an outage logs 5+ lines per second. The 30-second `ERROR_LOG_INTERVAL_MS` (and the separate 30-second fallback-log throttle) reduce this to one line each. `redis.ready` on recovery is one line, and it's what confirms the retry succeeded.
+- **Redis is a network dependency with a failure policy per feature.** The limiter degrades to per-instance memory (fail open would remove the limit; fail closed would 503 every login). `/ready` reports `degraded` but stays `200` (the load balancer should keep routing). Startup proceeds without Redis (a deploy-time hiccup must not take the API down). All three are written down in a table **before** the code, so the choice isn't made by whatever error the first `redis.get()` throws.
+- **A readiness probe needs a deadline.** `checkReadiness` wraps each dependency check in `Promise.race` against a `setTimeout(...)`; a hanging database is reported as `down` instead of hanging the probe. `unavailable` (database down) returns 503; `degraded` (Redis down) returns 200; `disabled` (no `REDIS_URL`) is `ok`.
+- **Two probes must be exempt from the global rate limiter.** `/health` and `/ready` are polled every few seconds by the load balancer and orchestrator; without a `skip`, a health-check storm would 429 the probes and trigger an orchestrator restart loop. `skip: (req) => req.path === "/health" || req.path === "/ready"` is the exact fix.
+- **A store can be swappable if its behavior is pinned first.** Day 35's characterization tests are unchanged today. The new suite runs them **twice**, once against `MemoryStore` and once against the `RedisCounterStore` + `ResilientStore` pairing — the same assertions, two storages. If the redis variant fails and the memory variant passes, the store or the key logic is wrong; if both fail, something shared broke.
+- **The redis variant of the suite needs its own assertions to prove it isn't vacuously passing.** If `connectRedis()` returned `false` (Redis unreachable), `buildStore` would return `undefined` and the memory store would be used silently — every behavior test would still pass. The "Redis specifics" block inspects `rl:register:<ip>` in Redis directly: `"1"` with a positive `PTTL`, and no email in any `rl:*` key. That's the proof the counter is actually in Redis.
+- **Tests must not silently use the developer's Redis.** `tests/support/env.ts` sets `REDIS_URL: ""` in `TEST_ENV` for the same reason it sets `DATABASE_URL`: an empty string exists in `process.env`, so `dotenv` doesn't overwrite it with `.env`'s value. `TEST_REDIS_URL` points at Redis database `/15`, and `assertTestRedis` refuses any other pathname — two layers, like `_test` DB names.
+- **Hashing an email before it becomes a Redis key is the only way to keep `MONITOR`/`KEYS` from leaking user data.** `emailKey` now returns `email:<32-hex>`, not `email:user@example.com`. Same email → same digest (same budget), different case → same digest (lowercase before hashing), but the raw address never appears in Redis. The integration test asserts `rl:login-account:` exists and no `@` or email string appears in any key.
+- **Redis keys are visible to anyone who can `MONITOR` or `KEYS`.** A shared Redis instance is *not* a place for user data. The store's own tests and the rate-limit "Redis specifics" test enforce this — a future change that puts an email or a token in a key fails the test, not just review.
+- **A single Redis instance serves two different kinds of data, and the eviction policy matters.** `noeviction` today, because Week 6 will add BullMQ jobs (which cannot be silently evicted). A cache would prefer `allkeys-lru`. Both in one instance means the wrong policy for one of them — a reason to run separate instances later. The `--appendonly yes` line preserves data across restarts, but a crash without AOF configured would lose recent writes.
+- **`127.0.0.1:6379:6379` is not the same as `6379:6379`.** The first binds to localhost only; the second publishes the port on **every** network interface, which on a café Wi-Fi exposes an unauthenticated Redis to the whole network. The same fix was applied to PostgreSQL's port in the same commit — an incidental but important hardening from Day 3.
+
 ## Checkpoint answers (Days 2–6)
 
 *(Skipped or filled in as you go)*
@@ -1326,7 +1347,7 @@ All 8 failed as expected. After restoring, `npm run test:integration` → **248/
 - **Run Redis by hand in a throwaway container** and read the answers to `SET`, `GET`, `TTL`, `INCR`, `SET NX EX`, `HSET`, `HGETALL`, `SCAN`. `INCR` is atomic on a single-threaded server, so Day 9's race returns 2000, not 1998. `SET NX EX` is an atomic lock — the Redis version of `SELECT ... FOR UPDATE`.
 - **Release with a fresh-clone test.** `v0.5.0` tagged only after the clone's `npm run ci` was green, which proves `.env.example` and the README are complete and the setup has no hidden dependency on my machine.
 
-### Things that confused me
+Things that confused me:
 - The difference between a fake, a stub, and a spy.
 - Why faking *all* timers broke the token tests.
 - Why `fileParallelism: false` is required when files share one database.
@@ -1341,7 +1362,7 @@ All 8 failed as expected. After restoring, `npm run test:integration` → **248/
 - Why "the test failed with the wrong count" is a *good* diagnostic — exactly half the expected number means the limiter ran twice per request, which is a mount bug, not a config bug. The `RateLimit` response header (`remaining` dropping by 2) shows it in one probe.
 - Why the docs test is not "testing the README" — it's testing the **contract** between three files that must agree (`envSchema`, `.env.example`, README). The files are the source of truth; the test just fails when they disagree.
 
-### What I'd do differently
+What I'd do differently:
 - Write the test *before* the code. The `slugify` test found a bug instantly that would have shipped otherwise.
 - Compute the expected sort order by hand from the dataset before running the test, not after it fails. The five minutes I spent on that saved an hour of "is the code wrong or is my reasoning wrong?"
 - When a rate-limit test fails, read the `RateLimit` response header first (`remaining`, `limit`), not the status code. The halving pattern (5→2, 60→30, 30→15) was visible in one probe and would have saved a full day of chasing the wrong hypothesis.
@@ -1407,6 +1428,110 @@ All 8 failed as expected. After restoring, `npm run test:integration` → **248/
 - **Hashes hold a small object per key** (`HSET stats:project:1 todo 3 done 5`, `HGETALL`), which is the shape a per-project dashboard cache would take.
 - **Redis is a network dependency with failure modes.** Week 6 decides fail-open vs fail-closed for the limiter, and read-through vs error for the cache. Both are written down and tested, not left to the first `redis.get()` throw.
 
+## Day 36 Observations
+
+### Step 1 — failure-policy experiment (before the code)
+
+| Feature | If Redis is down | Choice | Why |
+|---|---|---|---|
+| Global request limiter | Degrade to per-instance `MemoryStore` | **degrade** | Limits still apply, just per instance. Fail closed would 503 every request during any Redis outage; fail open would remove it entirely. |
+| Login, register, refresh limiters | Degrade | **degrade** | Failing closed on `/auth/login` locks every user out during a Redis outage — worse than a temporarily weaker limit. Failing open gives an attacker unlimited guesses. Per-instance counting is the compromise. |
+| Invitation limiter | Degrade | **degrade** | Same reasoning, lower stakes: 20/hour per instance instead of 20/hour total. |
+| `/ready` endpoint | `200` with `degraded` | **degraded** | The app can serve; the operator sees it in the readiness output; the load balancer should keep routing. A 503 here would take the whole API down for a Redis outage. |
+| Server startup | Start anyway, retry in background | **degrade** | A Redis hiccup during a deploy must not prevent the API from booting. `connectRedis()` returns `false`, logs `redis.unavailable`, and the retry loop kicks in. |
+
+**Worst an attacker can do during a Redis outage under "degrade for login":** with N instances running, up to N × 10 login failures per 15 min per account (the per-instance fallback limit), instead of 10 total. A single-instance deployment has no worse behavior than before; a multi-instance deployment has the weakness until Redis recovers. Deliberate trade-off: without Redis, either every login is blocked (fail closed) or no login is limited (fail open). Per-instance counting is the middle ground.
+
+### Step 17 — two-instance experiment (shared budget)
+
+Setup: two servers, `RATE_LIMIT_ENABLED=true PORT=3000/3001`, `REDIS_URL` set (so both use Redis). Loop hits `POST /auth/register` with an empty body (`-d '{}'`), alternating ports:
+
+```
+port 3000 -> 400
+port 3001 -> 400
+port 3000 -> 400
+port 3001 -> 400
+port 3000 -> 400
+port 3001 -> 429
+```
+
+Five `400` then one `429` on the **sixth** request, split across two processes. Before Day 36 (each process with its own `MemoryStore`) the same six requests would all have been `400`, because each instance would have counted only three.
+
+**Redis inspection right after the loop:**
+- `redis-cli --scan --pattern 'rl:*'` → `rl:register:::/56`, `rl:global:::/56` — two keys, one per limiter, **one shared counter each**.
+- `get 'rl:register:::/56'` → `6`. The register limit is 5; `express-rate-limit` increments *then* compares, so a blocked request leaves the counter at `limit + 1`. The test asserts the status sequence (`[400, 400, 400, 400, 400, 429]`), not the counter value.
+- `pttl 'rl:register:::/56'` → `3368289` ms (≈ 56 minutes left of the 1-hour window).
+- `get 'rl:global:::/56'` → `(nil)` and `pttl` → `-2` **when inspected later** — the global window is 60 s, and the inspection happened more than a minute after the loop. Immediately after the loop it read `"6"` with a positive PTTL.
+- The key contains `::` (the IPv6 loopback, normalized by `ipKeyGenerator` to the `/56` subnet) and `/56` (the prefix length), so it is `rl:register:::/56`, **not** `rl:register:::1`. A `get` on `:::1` returns nothing (`-2`) even though the counter exists.
+
+### Step 17 — survives a restart / rebuild from empty state
+
+1. Deleted every `rl:*` key (`del` returned `1` — one key, the register key; the global had already expired on its 60 s window).
+2. Re-ran the same 3×2 loop → **same sequence** `[400, 400, 400, 400, 400, 429]`. Both ports still share one counter that starts from zero and reaches the limit after five requests.
+3. With the counter over the limit:
+   - Request against the running server → `429`.
+   - Restarted port 3000 (`RATE_LIMIT_ENABLED=true PORT=3000 npx tsx src/server.ts`).
+   - Same request against the **fresh** process → **`429`**, not `400`. The counter lives in Redis, not in the process. This is the pod-restart-in-Kubernetes case: a restart must not hand an attacker a fresh budget.
+
+### Step 17 — per-instance when `REDIS_URL` is empty
+
+Both servers restarted with `REDIS_URL=` (empty). Same 3×2 loop → **six `400`, zero `429`**. Three places confirm the fallback:
+
+- `redis-cli --scan --pattern 'rl:*'` → **no keys**. Redis is never touched in this mode.
+- Each process sees 3 requests against its own limit of 5 (3 < 5 on both).
+- `GET /ready` → `{ "status": "ok", "checks": { "database": "up", "redis": "disabled" } }`. `disabled`, not `down` — the app doesn't treat a missing `REDIS_URL` as an error, just "not in use."
+
+**This is the documented fallback:** N instances give an attacker N times the budget. Acceptable in dev, unacceptable in production, which is why `REDIS_URL` is required when `NODE_ENV=production` (`src/config.ts` refuses to start without it).
+
+### Step 18 — the store as Redis sees it
+
+`redis-cli monitor` while one register request is served shows a single `MULTI` transaction:
+
+```
+"multi"
+"incr"     "rl:register:::/56"
+"pexpire"  "rl:register:::/56"  "3600000"  "NX"
+"pttl"     "rl:register:::/56"
+"exec"
+```
+
+The `NX` is visible in the `pexpire` arguments — that's what makes the window fixed from the first hit. Every key is visible here, which is why `emailKey` hashes the address (see Step 19/20's test). Healthcheck `ping`s (from `127.0.0.1` with a **new source port every ~3 s**) are interspersed; the app's own connection has a stable source port.
+
+### Step 19 — outage drill
+
+With one server running and limits on:
+
+- `docker stop taskflow-redis` → `/ready` flipped to `degraded` with `checks.redis: "down"` within ~1 s (the `commandTimeout: 500ms` plus the parallel probes).
+- Six register requests → `400 400 400 400 400 429` — the in-memory fallback still applies the limit, per instance.
+- `docker start taskflow-redis` → within ~8 s (the `retryStrategy` backoff), `/ready` returned `ok` again with `checks.redis: "up"` **without restarting the server**.
+- Server log during the outage: **one** `rate_limit.store_fallback` warning (with `event`, `limiter`, `operation`, `err`) and **one** `redis.error` — not hundreds. The 30-second throttles in `src/redis.ts` and `src/middleware/rateLimit.ts` did their job.
+- Server log after recovery: **one** `redis.ready`. The connection was reused; no reconnect storm.
+
+### Step F — mutation table (7 rows)
+
+| # | Break | Failed test | Result |
+|---|---|---|---|
+| 1 | Drop `"NX"` from `PEXPIRE` | store test "does not extend the window" | ✅ caught |
+| 2 | Give the `refresh` limiter the name `register` | **only the redis variant** of the rate-limit tests ("Redis specifics" and the per-limiter count tests) | ✅ caught — the memory variant cannot see the collision; this is why `describe.each(["memory", "redis"])` exists |
+| 3 | Return the raw email from `emailKey` | "never puts an email address into a Redis key" | ✅ caught |
+| 4 | Rethrow in `ResilientStore.run` instead of falling back | outage test ("keeps limiting, in memory, and never answers with a server error") | ✅ caught |
+| 5 | Remove `enableOfflineQueue: false` | outage tests still pass, but are **noticeably slower** — the queued commands block each request for up to the command timeout | ⚠️ caught only as a **speed regression**, not a correctness failure. `enableOfflineQueue: false` is a latency decision, not a correctness one, and the suite documents that. |
+| 6 | Delete the "REDIS_URL required in production" guard | config unit test ("refuses to run without Redis") | ✅ caught |
+| 7 | Make `/ready` return 200 when `unavailable` | health integration test ("/ready answers 503 when the database is down") | ✅ caught |
+
+**Row 2 is the sentence for `notes.md`:** *a bug that exists only with the shared store is invisible to tests that use only the memory store*, which is why the suite runs both. This is exactly the class of bug the Day 32 double-mount belonged to, and the reason the `describe.each` restructure in Step 14 is not cosmetic.
+
+### Step 20 — checkpoint answers
+
+1. **Why does one `INCR` count correctly when two servers hit it at once, while Day 9's read, modify, write didn't?** Because `INCR` is a single command executed by Redis's single-threaded event loop — read and write are one step, no gap. Day 9's read-modify-write had a window between the read and the write in which the other process could read the same value and overwrite.
+2. **Why is `PEXPIRE ... NX` needed, and what would happen to a client if the key were created without an expiry?** `NX` makes the expiry **only set if the key has no expiry yet** — so the window starts on the *first* hit and is not extended by later hits. Without `NX`, every request resets the timer and a client is never unblocked. If the key were created without any expiry at all (a crash between `INCR` and `PEXPIRE`, if they weren't in a `MULTI`), the counter would block forever; the `PTTL < 0` fallback in `increment` re-applies the TTL, and the Lua `EXISTS` guard in `decrement` prevents an expired key from being resurrected without an expiry.
+3. **What does `enableOfflineQueue: false` buy you, and what did row 5 show?** It makes a command fail in ~1 ms when Redis is disconnected instead of being queued until the connection returns. Without it, a request during an outage waits for the reconnect (potentially seconds). Row 5 of the mutation table shows the correctness tests still pass with the queue on — the difference is **latency**, not behavior, and the suite documents that (a slow test is a worse test, but not a failing one).
+4. **Compare failing open, failing closed and degrading for the login limiter. Which did you choose, and what can an attacker do during an outage?** Fail open removes the limit (unlimited guesses). Fail closed turns a Redis outage into a login outage (worse than the attack). **Degrade** keeps the per-account and per-IP limits in each process's memory, so an attacker facing N instances gets N × the budget but not unlimited. That's the choice, documented in the Step 1 table.
+5. **Why is the email address hashed inside the Redis key?** Redis keys are visible to anyone who can run `KEYS`/`MONITOR` — a shared Redis instance is not a place for user data. `emailKey` normalizes (trim, lowercase, truncate) then `sha256(...).slice(0, 32)` so the same email always produces the same digest (same budget), but the raw address never appears in Redis. The integration test asserts `rl:login-account:` exists and neither `someone.private` nor `@` appears in any `rl:*` key.
+6. **Why must two limiters never share a name, and why can't the memory-only tests detect it?** The key is `rl:<name>:<key>`, so two limiters with the same name share one counter — one of them gets a smaller effective limit and the other a larger one. The memory-only variant cannot see the collision because `MemoryStore` keys are local to each limiter's own store instance; only the redis variant writes to the shared `rl:*` namespace, so only the redis variant fails when two names collide. That's exactly mutation row 2.
+7. **What's the difference between `/health` and `/ready`, and why is Redis being down `degraded` and not `unavailable`?** `/health` is liveness: "the process is alive" (a restart fixes a failure). `/ready` is readiness: "I can serve requests" (the load balancer should stop sending traffic if not). `/ready` checks dependencies with a deadline. The database is required — down → `unavailable` → 503. Redis being down only weakens the rate limits — the app can still serve every request, so `degraded` → 200, which keeps the load balancer routing.
+8. **Why is `"127.0.0.1:6379:6379"` safer than `"6379:6379"`, and why does this instance use `noeviction`?** `"6379:6379"` publishes the port on **every** network interface — an unauthenticated Redis on a café Wi-Fi is a known way to get a laptop compromised. `"127.0.0.1:6379:6379"` binds to localhost only. `noeviction` (rather than `allkeys-lru`) is for the queue that arrives on Day 38: BullMQ jobs must never be silently evicted when memory is full. The trade-off: every key must have a TTL, since eviction won't reclaim space. A cache would prefer `allkeys-lru`; the right answer for one shared instance is `noeviction` until the cache gets its own instance.
+
 ## Known limitations
 *(Each of these is fixed by a specific upcoming week, showing forward planning.)*
 
@@ -1416,42 +1541,50 @@ All 8 failed as expected. After restoring, `npm run test:integration` → **248/
 4. **Offset pagination is slow on deep pages:** `OFFSET 49980` still walks past 49,980 rows. This will be fixed in **Week 5** with keyset pagination.
 5. **`ILIKE` search lacks a trigram index:** The search is slow on large tables because it does a full scan. This will be fixed in **Week 5**.
 6. **CSV export loads all rows:** The export uses `findAll()`, which loads the entire table into memory. This will be fixed in **Week 5** with a streaming query.
-7. **`/health` doesn't check the database:** It returns `ok` even if Postgres is down. This will be fixed in **Week 7** with a proper readiness check.
-8. **Rate limits are in-memory:** They reset on restart and don't share between instances. **Week 6 moves them to a shared Redis store**, so the budget is the same across instances and survives a restart. Day 35's characterization tests describe today's in-memory behavior; Day 36 swaps the store and the tests say if anything changed.
-9. **Per-account throttle can be abused to lock a victim out:** An attacker can flood `/auth/login` with wrong passwords until the account is throttled. Rate limiting makes it slow, but not impossible.
-10. **No CAPTCHA or MFA:** A determined attacker with a botnet can still try many passwords.
-11. **No email verification:** Accounts can be created with fake emails. **Week 6 adds email verification** (built on the BullMQ job queue, with a local mail catcher).
-12. **Access tokens cannot be revoked:** A stolen access token stays valid for up to 15 minutes after logout.
-13. **Member invites reveal email existence:** Adding a member by email returns `404` if the user doesn't exist. Rate limiting makes probing slow, but not impossible.
-14. **No automated alerting:** Repeated `auth 401` events are logged but not flagged.
-15. **Only two roles (owner, member):** No read-only "viewer" role yet.
-16. **Legacy tasks and projects with no owner are invisible:** Only the CLI can see/modify them.
-17. **Moving a task out of a project can orphan it from a creator who left.**
-18. **`listComments` still loads every comment before filtering:** It uses `findAll()` instead of a `WHERE taskId = ?` query.
-19. **Integration tests wipe the test database on every `beforeEach`:** This is correct for the current suite (simple, obviously correct, a few ms per wipe), but it means test files must run serially (`fileParallelism: false`). Per-worker databases (Day 30 challenge) would allow parallelism at the cost of setup complexity.
-20. **Due-date rule uses the UTC date, not the caller's local date:** A user in UTC−8 can be rejected at 22:00 local for setting "today" in their time zone. Options considered and the decision are recorded in the Day 31 Observations section (accepted UTC, rationale: consistency with the rest of the API, client-side UX is a better place to soften it).
-21. **Integration tests don't cover every branch of `PATCH /tasks/:id`:** Gaps I found in my own test list: preserving `createdById` through a patch is only implicitly covered, and "stranger moves `projectId`" isn't a distinct test. Not bugs — coverage gaps to fill on a second pass.
-22. **Rate-limiter window expiry is untested:** The counters resetting after 15 minutes needs a faked clock inside the limiter's store. Day 35's suite documents the gap (Challenge 1) rather than adding a flaky `vi.useFakeTimers()` test. The rest of the limiter behavior (counts, keys, 429 shape, CORS on 429, per-address/per-account/per-user isolation) **is** covered by `tests/integration/ratelimit.test.ts`.
-23. **No load testing:** Nothing measures the API under concurrency or sustained load. The smoke test and integration suite prove correctness, not throughput. **Week 7 adds a minimal load check** with `autocannon` against the deployed build; a deeper profile (DB connection saturation, event-loop lag) is a later concern.
-24. **No contract test between the OpenAPI document and real responses:** Redocly lints the spec and `docs.and.auth.test.ts` checks `operationId`/401 coverage, but no test validates a **real** response body against the spec's schema. A future Ajv-based test (Day 35 Challenge 2) would close this. Until then, the Zod schemas and the spec are kept in sync by generating the latter from the former, which reduces drift but doesn't prove it.
-25. **Five scripts retired:** `token-attacks`, `auth-coverage`, `refresh-flow`, `access-attacks`, `security-checks` (and their `package.json` commands). Their replacements are the integration suites listed above; the mutation table rows 1–4, 6, 8–10 are the evidence that each bug the scripts caught is now caught by the suite. `test:ratelimit` was retired on Day 35 once its 8 mutations all failed in the suite.
-26. **`smoke.ts` is intentionally small (12 checks):** It's a post-build check of the *compiled* `dist/` server, not a behavior suite. Detailed behavior is `npm test`'s job; if a check needs adding, it goes in an integration test, not in `smoke.ts`.
-27. **`verify.sh` restarts the compiled server between `smoke` and `test:ratelimit`:** In-memory rate-limit counters must start at zero for `test:ratelimit`, and `test:integration` + `smoke` will have drained them on the shared server. The restart is what makes `verify.sh` green end-to-end. **Day 35 removed `test:ratelimit` from `verify.sh`** (the suite covers it now), so the loop is `test:unit test:integration smoke` — no restart step needed until Week 6 adds the Redis store, at which point the restart rule comes back for any script that assumes empty counters.
-28. **`eslint-config-prettier` is the only rule-disabling plugin:** Every ESLint rule disabled in `eslint.config.mjs` (e.g., `require-await`) has a written reason. `errorHandler.ts` has one file-level `eslint-disable` for `no-unsafe-member-access`/`no-unsafe-assignment`, with a reason on the line. Disables are decisions, not shortcuts.
-29. **`no-restricted-imports` is the architecture fitness function:** It makes `src/container.ts` the only place that constructs concrete repositories; controllers, routes, services, auth, middleware, and schemas cannot import `../db.js` or `src/repositories/prisma/**`. Verified in Step 9: blocked in a controller, allowed in `server.ts` and `cli.ts`.
-30. **`precheck` / `ci` catch drift the individual scripts can miss:** The first `npm run ci` found 7 files that had drifted from Prettier's output after the ESLint fixes. `format:check` is the canary — it's cheap and it never lies. **Day 35 made `ci` enforce the coverage thresholds too** (`test:coverage` replaces `test:integration` in the `ci` script), so a coverage drop fails the same command.
-31. **Hooks are not the gate:** the pre-commit hook was bypassed with `--no-verify` in Test 4, and `pre-push` was bypassed the same way. Only `npm run ci` on a fresh checkout is a real gate. This is why Week 7's pipeline will run `npm run ci` and never `git push`.
-32. **Redaction is by key name only:** A secret inside a message string, a field name not in `SENSITIVE_KEYS` (`pwd`, `rawToken`), or nesting deeper than the 3 configured paths is **not** redacted. Rows 5 and 6 of the Day 34 mutation table demonstrate both halves — the integration leak test is the real defense, and the pair of unit tests that document the limits keep it honest.
-33. **Prisma's own query log bypasses pino:** With `LOG_LEVEL=debug` on the Prisma client, SQL is written by Prisma in its own format, not through pino. Routing Prisma's `query` events through `prisma.$on("query", ...)` into `logger.debug({ event: "db.query", durationMs })` is Challenge 1; until then, `LOG_LEVEL=debug` will mix pino lines and Prisma's native output on stdout.
-34. **No log shipping or alerting yet:** The app writes JSON to stdout; a real system would pipe to a log aggregator and set up alerts on `auth.refresh_reuse` frequency, 5xx rate, and rate-limit hits. Documented as a Week 7+ concern; not in scope for Week 5.
-35. **Logs from before the context middleware** (rate limiter, malformed JSON) rely on explicit `requestId` in the log call, since the async context doesn't exist yet at those stages. The 500 branch handles this by reading `res.locals.requestId` directly.
-36. **`operationId` is auto-generated from method+path:** Renaming a path or switching a route's method would silently change the `operationId`, which is a breaking change for any consumer that generates an SDK from the spec. A future "pin the id in the spec" convention (or a migration note in the PR) is what mitigates it; today the generator is the baseline.
-37. **`operation-4xx-response` is off in `redocly.yaml`:** `/health` has no meaningful 4xx case. Disabled with a comment — the decision is recorded, not hidden. If `/health` ever grows a failure mode that returns 4xx, the rule should come back on.
-38. **Redis is not wired in yet:** Day 35 ran Redis by hand in a throwaway container to learn the commands; the app still uses `MemoryStore` for rate limits and has no cache. **Week 6 adds Redis to Docker Compose, a connection module with timeouts, a readiness check, and a Redis store for the limiters** — and makes the fail-open/fail-closed and read-through decisions explicit. The Day 35 tests describe today's behavior so the swap can be judged against them.
-39. **No email verification or password reset:** Accounts can be created with fake emails and there is no "forgot password" flow. **Week 6 adds both**, built on the BullMQ job queue, with a local mail catcher for tests. This closes the largest gaps on the Week 4 limitations list.
-40. **No CI or container hardening yet:** There is no GitHub Actions pipeline, no Dockerfile, and no `docker-compose` for the app. **Week 7 adds all three**, plus a real CI badge and a live demo URL in the README. The `ci` script written on Day 33 is what the pipeline will run.
-41. **No load testing:** Nothing measures the API under concurrency or sustained load. **Week 7 adds a minimal load check** against the deployed build (see item 23).
-42. **No contract test between the OpenAPI document and real responses:** The spec is linted and its `operationId`s are tested, but no test validates a real response body against the spec's schema. A future Ajv-based test (Day 35 Challenge 2) closes this gap (see item 24).
+7. **`/health` doesn't check the database:** It returns `ok` even if Postgres is down. **Day 36 added `/ready`** with a real dependency check (database required, Redis optional-but-visible). `/health` is still liveness only, by design. Week 7's deployment will use `/ready` for the load balancer and `/health` for the orchestrator's liveness probe.
+8. **Rate limits are in-memory:** They reset on restart and don't share between instances. **Week 6 (Day 36) moves them to a shared Redis store** (`RedisCounterStore` + `ResilientStore`), so the budget is the same across instances and survives a restart. Day 35's characterization tests describe today's behavior; Day 36's `describe.each(["memory", "redis"])` runs them against both stores.
+9. **During a Redis outage, rate limits degrade to per-instance:** The `ResilientStore` falls back to `MemoryStore`, so an attacker facing N instances gets N × the budget until Redis recovers. The alternative (fail closed) would 503 every login during the outage; the alternative (fail open) would remove the limit entirely. `/ready` reports `degraded` so operators see the outage. Documented in the Day 36 Observations.
+10. **Fixed-window rate limiting allows a burst at the window boundary:** A client can make `limit` requests at the end of one window and `limit` at the start of the next, getting `2 × limit` in a short span. Sliding-window (sorted set + Lua) is a challenge; the current fixed window is deliberate for simplicity and the `PEXPIRE ... NX` semantics.
+11. **Per-account throttle can be abused to lock a victim out:** An attacker can flood `/auth/login` with wrong passwords until the account is throttled (`429`). Rate limiting makes it slow, but not impossible.
+12. **No CAPTCHA or MFA:** A determined attacker with a botnet can still try many passwords.
+13. **No email verification:** Accounts can be created with fake emails. **Week 6 adds email verification** (built on the BullMQ job queue, with a local mail catcher).
+14. **Access tokens cannot be revoked:** A stolen access token stays valid for up to 15 minutes after logout.
+15. **Member invites reveal email existence:** Adding a member by email returns `404` if the user doesn't exist. Rate limiting makes probing slow, but not impossible.
+16. **No automated alerting:** Repeated `auth 401` events are logged but not flagged.
+17. **Only two roles (owner, member):** No read-only "viewer" role yet.
+18. **Legacy tasks and projects with no owner are invisible:** Only the CLI can see/modify them.
+19. **Moving a task out of a project can orphan it from a creator who left.**
+20. **`listComments` still loads every comment before filtering:** It uses `findAll()` instead of a `WHERE taskId = ?` query.
+21. **Integration tests wipe the test database on every `beforeEach`:** This is correct for the current suite (simple, obviously correct, a few ms per wipe), but it means test files must run serially (`fileParallelism: false`). Per-worker databases (Day 30 challenge) would allow parallelism at the cost of setup complexity.
+22. **Due-date rule uses the UTC date, not the caller's local date:** A user in UTC−8 can be rejected at 22:00 local for setting "today" in their time zone. Options considered and the decision are recorded in the Day 31 Observations section (accepted UTC, rationale: consistency with the rest of the API, client-side UX is a better place to soften it).
+23. **Integration tests don't cover every branch of `PATCH /tasks/:id`:** Gaps I found in my own test list: preserving `createdById` through a patch is only implicitly covered, and "stranger moves `projectId`" isn't a distinct test. Not bugs — coverage gaps to fill on a second pass.
+24. **Rate-limiter window expiry is untested (fixed on Day 36):** The counters resetting after the window closes was untested on Day 35 because it needed a faked clock. **Day 36's `tests/integration/rateLimitStores.test.ts` covers it against a real Redis** with a short `windowMs` (300 ms) and a `sleep(400)`; the "fresh window after expiry" test proves the key expires and the next hit starts from 1.
+25. **No load testing:** Nothing measures the API under concurrency or sustained load. The smoke test and integration suite prove correctness, not throughput. **Week 7 adds a minimal load check** with `autocannon` against the deployed build; a deeper profile (DB connection saturation, event-loop lag) is a later concern.
+26. **No contract test between the OpenAPI document and real responses:** Redocly lints the spec and `docs.and.auth.test.ts` checks `operationId`/401 coverage, but no test validates a **real** response body against the spec's schema. A future Ajv-based test (Day 35 Challenge 2) would close this. Until then, the Zod schemas and the spec are kept in sync by generating the latter from the former, which reduces drift but doesn't prove it.
+27. **Five scripts retired:** `token-attacks`, `auth-coverage`, `refresh-flow`, `access-attacks`, `security-checks` (and their `package.json` commands). Their replacements are the integration suites listed above; the mutation table rows 1–4, 6, 8–10 are the evidence that each bug the scripts caught is now caught by the suite. `test:ratelimit` was retired on Day 35 once its 8 mutations all failed in the suite.
+28. **`smoke.ts` is intentionally small (12 checks):** It's a post-build check of the *compiled* `dist/` server, not a behavior suite. Detailed behavior is `npm test`'s job; if a check needs adding, it goes in an integration test, not in `smoke.ts`. **Day 36 added a `/ready` check** to the smoke test, so the compiled artifact is proven to expose the new endpoint too.
+29. **`verify.sh` restarts the compiled server between `smoke` and `test:ratelimit`:** In-memory rate-limit counters must start at zero for `test:ratelimit`, and `test:integration` + `smoke` will have drained them on the shared server. **Day 35 removed `test:ratelimit` from `verify.sh`** (the suite covers it now). **Day 36 re-adds the same restart rule** between `smoke` and the rate-limit test if the shared Redis has leftover keys from a previous run — the store's `beforeAll` calls `flushTestRedis()` on database 15, so a restart isn't strictly required for the Redis store, but it is for the memory store.
+30. **`eslint-config-prettier` is the only rule-disabling plugin:** Every ESLint rule disabled in `eslint.config.mjs` (e.g., `require-await`) has a written reason. `errorHandler.ts` has one file-level `eslint-disable` for `no-unsafe-member-access`/`no-unsafe-assignment`, with a reason on the line. Disables are decisions, not shortcuts.
+31. **`no-restricted-imports` is the architecture fitness function:** It makes `src/container.ts` the only place that constructs concrete repositories; controllers, routes, services, auth, middleware, and schemas cannot import `../db.js` or `src/repositories/prisma/**`. Verified in Step 9: blocked in a controller, allowed in `server.ts` and `cli.ts`.
+32. **`precheck` / `ci` catch drift the individual scripts can miss:** The first `npm run ci` found 7 files that had drifted from Prettier's output after the ESLint fixes. `format:check` is the canary — it's cheap and it never lies. **Day 35 made `ci` enforce the coverage thresholds too** (`test:coverage` replaces `test:integration` in the `ci` script), so a coverage drop fails the same command.
+33. **Hooks are not the gate:** the pre-commit hook was bypassed with `--no-verify` in Test 4, and `pre-push` was bypassed the same way. Only `npm run ci` on a fresh checkout is a real gate. This is why Week 7's pipeline will run `npm run ci` and never `git push`.
+34. **Redaction is by key name only:** A secret inside a message string, a field name not in `SENSITIVE_KEYS` (`pwd`, `rawToken`), or nesting deeper than the 3 configured paths is **not** redacted. Rows 5 and 6 of the Day 34 mutation table demonstrate both halves — the integration leak test is the real defense, and the pair of unit tests that document the limits keep it honest.
+35. **Prisma's own query log bypasses pino:** With `LOG_LEVEL=debug` on the Prisma client, SQL is written by Prisma in its own format, not through pino. Routing Prisma's `query` events through `prisma.$on("query", ...)` into `logger.debug({ event: "db.query", durationMs })` is Challenge 1; until then, `LOG_LEVEL=debug` will mix pino lines and Prisma's native output on stdout.
+36. **No log shipping or alerting yet:** The app writes JSON to stdout; a real system would pipe to a log aggregator and set up alerts on `auth.refresh_reuse` frequency, 5xx rate, and rate-limit hits. Documented as a Week 7+ concern; not in scope for Week 5.
+37. **Logs from before the context middleware** (rate limiter, malformed JSON) rely on explicit `requestId` in the log call, since the async context doesn't exist yet at those stages. The 500 branch handles this by reading `res.locals.requestId` directly.
+38. **`operationId` is auto-generated from method+path:** Renaming a path or switching a route's method would silently change the `operationId`, which is a breaking change for any consumer that generates an SDK from the spec. A future "pin the id in the spec" convention (or a migration note in the PR) is what mitigates it; today the generator is the baseline.
+39. **`operation-4xx-response` is off in `redocly.yaml`:** `/health` has no meaningful 4xx case. Disabled with a comment — the decision is recorded, not hidden. If `/health` ever grows a failure mode that returns 4xx, the rule should come back on.
+40. **During a Redis outage, rate limits are per instance, not shared:** The `ResilientStore` falls back to `MemoryStore`, so an attacker facing N instances gets N × the budget until Redis recovers. `rate_limit.store_fallback` is logged once per 30 s per limiter so the outage is visible; `/ready` reports `degraded`. Fixed by making Redis reliable (a real production concern) or by a hybrid approach that caches the current counter value on the primary store. Documented as a deliberate trade-off.
+41. **Fixed-window rate limiting allows a burst at the boundary:** Up to `2 × limit` requests in a short span around a window rollover. A sliding-window implementation (sorted set of timestamps + Lua script) is a challenge for later; the fixed window is deliberate for simplicity and `PEXPIRE ... NX` semantics.
+42. **No Redis authentication or TLS in development:** The `docker-compose.yml` Redis instance is unauthenticated and unencrypted. It is bound to `127.0.0.1` (so not reachable from the network), but a shared or remote Redis must run with `requirepass` and TLS. `REDIS_URL` supports the `redis://:password@host:port` form; the config doesn't enforce it yet.
+43. **`/ready` is public and reveals dependency state:** It returns `checks.database` and `checks.redis` to anyone who asks. That's acceptable for an internal service behind a load balancer, but on a public API a readiness endpoint should be restricted to the infrastructure (a header check, or a private port). Documented as a decision; the field shape is intentionally minimal (no versions, no hostnames, no credentials).
+44. **No email verification or password reset:** Accounts can be created with fake emails and there is no "forgot password" flow. **Week 6 adds both**, built on the BullMQ job queue, with a local mail catcher for tests. This closes the largest gaps on the Week 4 limitations list.
+45. **No CI or container hardening yet:** There is no GitHub Actions pipeline, no Dockerfile, and no `docker-compose` for the app (only the dev infra on Day 36). **Week 7 adds all three**, plus a real CI badge and a live demo URL in the README. The `ci` script written on Day 33 is what the pipeline will run.
+46. **No load testing:** Nothing measures the API under concurrency or sustained load. **Week 7 adds a minimal load check** against the deployed build (see item 25).
+47. **No contract test between the OpenAPI document and real responses:** The spec is linted and its `operationId`s are tested, but no test validates a real response body against the spec's schema. A future Ajv-based test (Day 35 Challenge 2) closes this gap (see item 26).
+48. **Redis is a single instance with `noeviction` and `appendonly yes`:** If memory fills, writes fail (correct for the queue that arrives on Day 38, wrong for a cache). A real system would run separate instances for cache and queues, or a cluster. Documented in the Day 36 observations.
+49. **The `in-memory` fallback's counters are local to the process and reset on restart:** During a Redis outage, if the app is also restarted, per-instance counters start at zero again. This is the same limitation as pre-Day-36 rate limits, but it's now scoped to outages instead of the normal path.
+50. **`ipKeyGenerator` normalizes IPv6 to a `/56` subnet:** Two clients in the same block share a budget. That's the intended defense against rotating through addresses, but it also means one abusive client in a shared /56 can rate-limit neighbors. Documented as a trade-off; a per-address option would be worse.
 
 ## Week 1 summary
 Three things I can do now that I couldn't on Day 1:
@@ -1554,6 +1687,20 @@ Three more things I can do now that I couldn't on Day 34:
 - **Run Redis by hand in a throwaway container** and read the answers to `SET`, `GET`, `TTL`, `INCR`, `SET NX EX`, `HSET`, `HGETALL`, `SCAN`. `INCR` is atomic on a single-threaded server, so Day 9's race returns 2000, not 1998. `SET NX EX` is an atomic lock — the Redis version of `SELECT ... FOR UPDATE`.
 - **Release with a fresh-clone test.** `v0.5.0` tagged only after the clone's `npm run ci` was green, which proves `.env.example` and the README are complete and the setup has no hidden dependency on my machine.
 
+### Three more things I can do now that I couldn't on Day 35
+- **Run Redis in Docker Compose with a healthcheck and a localhost-only port binding.** `docker compose up -d` starts both PostgreSQL and Redis; `docker port taskflow-redis` shows `127.0.0.1:6379` (not `0.0.0.0:6379`); `redis-cli --scan --pattern 'rl:*'` shows the counters after a request.
+- **Build a `Store` for `express-rate-limit` that counts in Redis with `INCR` + `PEXPIRE ... NX` + `PTTL` in one `MULTI`.** The `NX` makes the window fixed from the first hit; the `PTTL < 0` fallback re-applies the TTL if the transaction ever leaves a counter without an expiry; the Lua `if EXISTS then DECR else 0` guard prevents `decrement` from resurrecting an expired key without a TTL.
+- **Wrap a store in a `ResilientStore` that falls back to `MemoryStore` when Redis is down.** A limiter never errors and never returns a 5xx because of a Redis outage; each instance degrades to per-instance counting, and a `rate_limit.store_fallback` warning (throttled to once per 30 s per limiter) makes the outage visible. Recovery is automatic — the next call tries the primary again.
+- **Add a `GET /ready` endpoint with an injectable probe.** `checkReadiness({ database, redis?, timeoutMs? })` wraps each dependency in `Promise.race` against a `setTimeout`, so a hanging dependency is `down` instead of hanging the probe. `unavailable` (database down) → 503; `degraded` (Redis down) → 200; `disabled` (no `REDIS_URL`) → `ok`.
+- **Write tests that run the same Day 35 suite against both stores** by wrapping it in `describe.each(["memory", "redis"])`. `vi.stubEnv("REDIS_URL", ...)` + `vi.resetModules()` + `await import(...)` gives a fresh module graph per variant. `flushTestRedis()` in `beforeAll` clears database 15; `assertTestRedis()` refuses any other pathname (two layers, like `_test` DB names). A separate "Redis specifics" block inspects `rl:register:<ip>` directly to prove the redis variant isn't silently falling back to memory.
+- **Test the outage path without taking Docker down** by pointing `REDIS_URL` at `redis://127.0.0.1:6390/15` (nothing listening) and asserting the limit still applies (`400×5, 429`) and `/ready` reports `degraded` while returning `200`.
+- **Decide fail-open / fail-closed / degrade per feature *before* writing the code**, so the choice isn't whatever error the first `redis.get()` throws. The limiter degrades; `/ready` reports `degraded` but stays `200`; startup proceeds without Redis. This is the policy table in the Step 1 experiment, and every line is enforced by a test.
+- **Hash the email inside a rate-limit key** with `sha256(email.trim().toLowerCase().slice(0, 254)).slice(0, 32)` so `MONITOR`/`KEYS` can't enumerate login targets. The `email:` prefix and the `ip:` fallback keep the key shape unchanged; only the sensitive part is obscured.
+- **Prove the shared budget with two servers and `curl`.** Six alternating requests across ports 3000 and 3001 give `400, 400, 400, 400, 400, 429` — five successes then one block. Before Day 36, each process counted separately, so the same six requests would all have been `400`. The single `rl:register:::/56` key with one counter is the observable proof.
+- **Prove the counter survives a restart.** With the counter over the limit, restart one server and send the same request: still `429`, not `400`. The counter lives in Redis, not in the process — the pod-restart-in-Kubernetes case.
+- **Prove the empty-`REDIS_URL` fallback.** With `REDIS_URL=` on both servers, the same six requests all return `400` (each process counted 3 against its own limit of 5), `--scan` shows no `rl:*` keys, and `/ready` reports `redis: "disabled"` (not `down`).
+- **Decide `noeviction` vs `allkeys-lru` with the next feature in mind.** Day 38 adds BullMQ jobs; eviction would silently delete them. `noeviction` + `appendonly yes` is the safe choice for the current single instance, with the trade-off that every key must have a TTL. A separate instance for the cache would let it use `allkeys-lru` later.
+
 Things that confused me:
 - The difference between a fake, a stub, and a spy.
 - Why faking *all* timers broke the token tests.
@@ -1568,6 +1715,14 @@ Things that confused me:
 - Why `TRUST_PROXY_HOPS` had to be `1` in the rate-limiter tests — each test poses as a different client with `X-Forwarded-For`, and the app must trust exactly one proxy hop to read that header. Zero hops would ignore it; two would trust a forged one.
 - Why "the test failed with the wrong count" is a *good* diagnostic — exactly half the expected number means the limiter ran twice per request, which is a mount bug, not a config bug. The `RateLimit` response header (`remaining` dropping by 2) shows it in one probe.
 - Why the docs test is not "testing the README" — it's testing the **contract** between three files that must agree (`envSchema`, `.env.example`, README). The files are the source of truth; the test just fails when they disagree.
+- Why the Redis key was `rl:register:::/56`, not `rl:register:::1` — `ipKeyGenerator` normalizes IPv6 to a subnet, not a single address, so two clients in the same `/56` share one budget. This stops an attacker rotating through the block but means a `get` on `:::1` returns `-2` (key not found) even though the counter exists.
+- Why `get rl:register:::/56` returned `6` when the limit is `5` — `express-rate-limit` increments *then* compares, and a blocked request leaves the counter at `limit + 1`. The Day 35 test asserts the status sequence (`[400, 400, 400, 400, 400, 429]`), not the counter value; `6` is correct.
+- Why `rl:global:::/56` returned `(nil)` when I inspected it later — the global window is 60 s, so the key had already expired. The `pttl -2` confirms "key not found", not "no TTL". Inspect within the minute to see `"6"`.
+- Why `void this.run(...)` satisfied the linter but broke the type — `increment` returns `ClientRateLimitInfo | Promise<ClientRateLimitInfo>`, and `void` makes it `undefined`. `async increment(...) { return await this.run(...) }` satisfies both. Only `init`'s `this.primary.init?.(options)` actually needs `void` — its return type is `void | Promise<void>`, so discarding it is fine.
+- Why `express-rate-limit`'s `Store` interface collides with a private `prefix` field — the interface has an optional **public** `prefix`, so a class can't declare `private prefix`. Rename the private field (`keyPrefix`), pass positionally; no getter needed because the interface's `prefix` is optional.
+- Why the Redis-specific tests live in `if (store === "redis")` — they inspect `rl:*` keys, which only exist in the redis variant. If they ran under the memory variant they'd fail (no keys) and if they were missing, the redis variant could pass vacuously (all behavior tests would pass even if the store silently fell back to `MemoryStore`). The two assertions together prove the store is actually in use.
+- Why `ipKeyGenerator` is called on the *fallback* path in `emailKey` (not a raw IP) — IPv6 clients in the same `/64` block share one budget, so a request with no usable email doesn't become a per-address bypass.
+- Why `enableOfflineQueue: false` matters even though the correctness tests don't fail without it — the mutation row 5 observation is that the *outage test got much slower*, because every command waited for the reconnect. In production that's the difference between a 429 in a few milliseconds and a 429 after the connection comes back.
 
 What I'd do differently:
 - Write the test *before* the code. The `slugify` test found a bug instantly that would have shipped otherwise.
@@ -1580,3 +1735,8 @@ What I'd do differently:
 - When adding the OpenAPI linter, run `lint:openapi` after every spec change, not just at the end — the errors compound otherwise (33 missing `operationId`s become 33 plus 5 missing tag descriptions plus 1 license warning in one shot).
 - Write the characterization tests **before** the storage swap, not after. Day 35's rate-limiter tests are the model: pin today's behavior, then change the storage. If Week 6 changes the limiter and a test fails, I know exactly which behavior changed.
 - Run the docs tests on the same PR as the docs change, not in a follow-up. `project-docs.test.ts` found four drifts in one run — all of them in files I had edited that day, all of them things I would have shipped.
+- **Decide the failure policy in writing before writing the code.** Day 36's Step 1 table is the model: fail open / fail closed / degrade per feature, with a one-line reason. The worst time to make that decision is inside the `catch` of the first `redis.get()`.
+- **Make the shared store visible in the test, not just in the assertion.** The "Redis specifics" block reads `rl:register:<ip>` directly — without it, a silent fallback to `MemoryStore` would pass every behavior test. The same lesson as the Day 34 leak test: prove *where* the data is, not just that the response looked right.
+- **Run the same test suite against both implementations of an interface.** `describe.each(["memory", "redis"])` is the cheapest way to catch a store-specific bug (the mutation row 2, where two limiters with the same name share a counter). The memory variant can't see the collision, so a memory-only suite would let it ship.
+- **Look at the key format before debugging the values.** Two wasted inspections on `rl:register:::1` before noticing the actual key was `rl:register:::/56`. `--scan --pattern 'rl:*'` shows the real key; start there, then `get` the exact string.
+- **Don't put user data in a shared-dependency key.** The hashed email in `emailKey` isn't about security (anyone with `MONITOR` can see the digest) — it's about not exposing the email address. A future "log the raw key in an error" would leak it; the hash makes that impossible.

@@ -53,6 +53,9 @@ export function makeLimiter(spec: Spec): RequestHandler {
     limit: spec.limit,
     standardHeaders: "draft-7", // RateLimit and RateLimit-Policy headers
     legacyHeaders: false,
+    validate: {
+      singleCount: false, // ResilientStore may retry on the fallback after the primary fails
+    },
     skipSuccessfulRequests: spec.skipSuccessfulRequests ?? false,
     skip: spec.skip ? (req) => spec.skip!(req) : undefined,
     keyGenerator: (req, res) => (spec.key ?? ipKey)(req, res),
