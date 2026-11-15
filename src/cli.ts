@@ -5,6 +5,8 @@ import { PRIORITIES, STATUSES, type Priority, type Status, type Task } from "./t
 import { parseChoice } from "./utils.js";
 import { prisma } from "./db.js";
 import { SYSTEM } from "./auth/policy.js";
+import { closeRedis, connectRedis } from "./redis.js";
+import { logger } from "./logger.js";
 
 const { addTask, listTasks, setStatus, deleteTask, exportCsv, listOverdue, summary } = taskService;
 
@@ -154,6 +156,8 @@ async function run(cmd: Command): Promise<void> {
 }
 
 async function main() {
+  logger.level = "warn"; // the CLI talks to humans: show only problems from the logger
+  await connectRedis(); // so changes made here invalidate cached statistics
   await run(parseCommand(process.argv.slice(2)));
 }
 
@@ -166,4 +170,4 @@ main()
     }
     process.exitCode = 1;
   })
-  .finally(() => prisma.$disconnect());
+  .finally(() => Promise.all([closeRedis(), prisma.$disconnect()]));

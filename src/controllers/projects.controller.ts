@@ -1,6 +1,6 @@
 import type { Request, Response } from "express";
 import { actorOf } from "../middleware/authenticate.js";
-import { projectService } from "../container.js";
+import { projectService, statsService } from "../container.js";
 import type {
   NewProject,
   ProjectPatch,
@@ -84,4 +84,13 @@ export async function removeMember(_req: Request, res: Response) {
   const { id, userId } = res.locals.params as { id: number; userId: number };
   await projectService.removeMember(id, userId, actorOf(res));
   res.status(204).end();
+}
+
+export async function stats(_req: Request, res: Response) {
+  const { id } = res.locals.params as { id: number };
+  const { value, status } = await statsService.getProjectStats(id, actorOf(res));
+
+  res.setHeader("X-Cache", status); // hit, miss or bypass: a debugging aid and a test hook
+  res.setHeader("Cache-Control", "private, no-cache"); // personalised by login: no shared caches
+  res.json({ data: value });
 }

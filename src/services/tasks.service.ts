@@ -11,6 +11,7 @@ import type { TaskPatch, TaskQuery } from "../schemas/task.schemas.js";
 import type { NewTask, Role, Status, Task } from "../types.js";
 import { buildMeta } from "./pagination.js";
 import { isPastDate } from "./dates.js";
+import type { StatsInvalidator } from "./stats.service.js";
 
 function validateDate(value: string): string {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || Number.isNaN(Date.parse(value))) {
@@ -26,9 +27,9 @@ function csvEscape(value: string): string {
 const isCreator = (task: Task, actor: Actor) =>
   actor.kind === "system" || task.createdById === actor.id;
 
-type Deps = { tasks: TaskRepository; members: MemberRepository };
+type Deps = { tasks: TaskRepository; members: MemberRepository; stats: StatsInvalidator };
 
-export function createTaskService({ tasks, members }: Deps) {
+export function createTaskService({ tasks, members, stats }: Deps) {
   const access = createAccess(members);
 
   // A task you may not see is reported exactly like one that does not exist
@@ -58,6 +59,13 @@ export function createTaskService({ tasks, members }: Deps) {
     }
   }
 
+  // Called after a write has committed. Unique ids only: a move changes two projects.
+  async function invalidateStats(...projectIds: Array<number | undefined>) {
+    for (const id of new Set(projectIds)) {
+      if (id !== undefined) await stats.invalidateProject(id);
+    }
+  }
+
   async function getTask(id: number, actor: Actor): Promise<Task> {
     return (await loadTask(id, actor)).task;
   }
@@ -71,7 +79,7 @@ export function createTaskService({ tasks, members }: Deps) {
       throw new UserError("Due date cannot be in the past.");
     }
 
-    return withProjectCheck(input.projectId, () =>
+    const created = await withProjectCheck(input.projectId, () =>
       tasks.insert({
         title,
         status: "todo",
@@ -82,6 +90,8 @@ export function createTaskService({ tasks, members }: Deps) {
         createdById: creatorOf(actor),
       }),
     );
+    await invalidateStats(created.projectId);
+    return created;
   }
 
   async function queryTasks(q: TaskQuery, actor: Actor) {
@@ -116,6 +126,7 @@ export function createTaskService({ tasks, members }: Deps) {
       tasks.update(id, changes),
     );
     if (!updated) throw new NotFoundError(`No task with id ${id}.`);
+    await invalidateStats(task.projectId, updated.projectId);
     return updated;
   }
 
@@ -130,6 +141,7 @@ export function createTaskService({ tasks, members }: Deps) {
     }
     const removed = await tasks.remove(id);
     if (!removed) throw new NotFoundError(`No task with id ${id}.`);
+    await invalidateStats(task.projectId);
     return removed;
   }
 

@@ -36,8 +36,17 @@ function fakeRedis() {
 const schema = z.object({ n: z.number() });
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+type Entry = { n: number };
+
+// Builds the options for getOrCompute, with the value type fixed to { n: number }
 function options(
-  overrides: Partial<Parameters<ReturnType<typeof createCache>["getOrCompute"]>[0]> = {},
+  overrides: {
+    namespace?: string;
+    scope?: string;
+    variant?: string;
+    ttlSeconds?: number;
+    compute?: () => Promise<Entry>;
+  } = {},
 ) {
   return {
     namespace: "demo",
@@ -45,9 +54,9 @@ function options(
     variant: "2026-01-01",
     ttlSeconds: 60,
     schema,
-    compute: async () => ({ n: 1 }),
+    compute: async (): Promise<Entry> => ({ n: 1 }),
     ...overrides,
-  } as Parameters<ReturnType<typeof createCache>["getOrCompute"]>[0] & { schema: typeof schema };
+  };
 }
 
 describe("without Redis", () => {
@@ -174,7 +183,7 @@ describe("stampedes", () => {
   it("runs one computation for many simultaneous misses", async () => {
     const { client } = fakeRedis();
     const cache = createCache(client);
-    const compute = vi.fn(async () => {
+    const compute = vi.fn<() => Promise<Entry>>(async () => {
       await sleep(30);
       return { n: 9 };
     });
@@ -190,7 +199,7 @@ describe("stampedes", () => {
   it("does not share a computation between different keys", async () => {
     const { client } = fakeRedis();
     const cache = createCache(client);
-    const compute = vi.fn(async () => {
+    const compute = vi.fn<() => Promise<Entry>>(async () => {
       await sleep(10);
       return { n: 1 };
     });
@@ -207,7 +216,7 @@ describe("stampedes", () => {
     const { client } = fakeRedis();
     const cache = createCache(client);
     const compute = vi
-      .fn<() => Promise<{ n: number }>>()
+      .fn<() => Promise<Entry>>()
       .mockImplementationOnce(async () => {
         await sleep(20);
         throw new Error("database exploded");

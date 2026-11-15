@@ -21,15 +21,17 @@ import type { TaskQuery } from "../schemas/task.schemas.js";
 import type { Project, Role } from "../types.js";
 import { buildMeta } from "./pagination.js";
 import { makeSlug } from "./slug.js";
+import type { StatsInvalidator } from "./stats.service.js";
 
 type Deps = {
   projects: ProjectRepository;
   tasks: TaskRepository;
   members: MemberRepository;
   uow: UnitOfWork;
+  stats: StatsInvalidator;
 };
 
-export function createProjectService({ projects, tasks, members, uow }: Deps) {
+export function createProjectService({ projects, tasks, members, uow, stats }: Deps) {
   const access = createAccess(members);
 
   async function getProject(id: number, actor: Actor): Promise<Project> {
@@ -70,6 +72,7 @@ export function createProjectService({ projects, tasks, members, uow }: Deps) {
     try {
       const removed = await projects.remove(id);
       if (!removed) throw new NotFoundError(`No project with id ${id}.`);
+      await stats.invalidateProject(id);
     } catch (err) {
       if (err instanceof InUseError) {
         throw new ConflictError(`Project ${id} still has tasks. Move or delete them first.`);
@@ -120,7 +123,7 @@ export function createProjectService({ projects, tasks, members, uow }: Deps) {
     if (sourceId === targetId) throw new UserError("A project cannot be merged into itself.");
 
     try {
-      return await uow.run(async (tx) => {
+      const result = await uow.run(async (tx) => {
         const txAccess = createAccess(tx.members);
         await txAccess.requireProjectRole(actor, sourceId, "owner"); // 404 stranger, 403 member
 
@@ -137,6 +140,9 @@ export function createProjectService({ projects, tasks, members, uow }: Deps) {
         await tx.projects.remove(sourceId); // the source's memberships are removed with it (cascade)
         return { project: target, movedTasks };
       });
+      await stats.invalidateProject(targetId);
+      await stats.invalidateProject(sourceId);
+      return result;
     } catch (err) {
       if (err instanceof InUseError) {
         throw new ConflictError("Tasks were added to the project during the merge. Please retry.");

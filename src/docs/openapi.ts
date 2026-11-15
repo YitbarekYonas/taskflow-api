@@ -8,6 +8,7 @@ import {
   addMemberSchema,
   changeRoleSchema,
 } from "../schemas/project.schemas.js";
+import { projectStatsSchema } from "../schemas/stats.schemas.js";
 import { SORT_FIELDS, createTaskSchema, updateTaskSchema } from "../schemas/task.schemas.js";
 import {
   PRIORITIES,
@@ -249,6 +250,28 @@ export const baseSpec = {
               type: "object",
               properties: { data: { type: "array", items: ref("Task") }, meta: ref("PageMeta") },
             }),
+          },
+          400: errorRef("BadRequest"),
+          404: errorRef("NotFound"),
+        },
+      },
+    },
+
+    "/projects/{id}/stats": {
+      parameters: [{ $ref: "#/components/parameters/Id" }],
+      get: {
+        tags: ["Projects"],
+        summary: "Dashboard statistics for a project",
+        description:
+          "Counts by status and priority, overdue and due-soon tasks. Answers are cached for up to 60 seconds " +
+          "and refreshed immediately when a task in the project changes. `X-Cache` says whether the answer came " +
+          "from the cache (`hit`), was computed (`miss`) or the cache was unavailable (`bypass`). " +
+          "Strangers get 404, exactly as for a missing project.",
+        responses: {
+          200: {
+            description: "Statistics",
+            headers: { "X-Cache": { schema: { type: "string", enum: ["hit", "miss", "bypass"] } } },
+            content: json(envelope("ProjectStats")),
           },
           400: errorRef("BadRequest"),
           404: errorRef("NotFound"),
@@ -559,6 +582,7 @@ export const baseSpec = {
         ],
       },
       Comment: schemaOf(commentSchema, "output"),
+      ProjectStats: schemaOf(projectStatsSchema, "output"),
       PageMeta: {
         type: "object",
         properties: {
