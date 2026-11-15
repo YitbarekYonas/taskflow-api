@@ -44,7 +44,8 @@
     "ci": "npm run precheck && npm run test:coverage",
     "dev": "tsx watch src/server.ts | pino-pretty",
     "dev:json": "tsx watch src/server.ts",
-    "lint:openapi": "tsx scripts/export-openapi.ts && redocly lint .tmp/openapi.json"
+    "lint:openapi": "tsx scripts/export-openapi.ts && redocly lint .tmp/openapi.json",
+    "bench:stats": "tsx scripts/bench-stats.ts"
   },
   "lint-staged": {
     "*.ts": [

@@ -53,3 +53,51 @@ export async function workspace() {
   const newcomer = await createUser({ name: "Nina" });
   return { ...t, ownersTask, membersTask, personalTask, ownersComment, membersComment, newcomer };
 }
+
+const day = (offset: number) =>
+  new Date(Date.now() + offset * 86_400_000).toISOString().slice(0, 10);
+export { day };
+
+// Five tasks with known numbers. Dates are relative to now, so the data never goes stale.
+export async function statsDataset() {
+  const t = await team();
+  const base = { project: t.project, createdBy: t.owner };
+  const overdueTodo = await createTask({
+    ...base,
+    title: "overdue todo",
+    status: "todo",
+    priority: "high",
+    dueDate: day(-1),
+  });
+  const soon = await createTask({
+    ...base,
+    title: "due soon",
+    status: "in_progress",
+    priority: "medium",
+    dueDate: day(2),
+  });
+  const doneLate = await createTask({
+    ...base,
+    title: "done late",
+    status: "done",
+    priority: "low",
+    dueDate: day(-1),
+  });
+  await createTask({
+    ...base,
+    title: "far away",
+    status: "todo",
+    priority: "medium",
+    dueDate: day(30),
+  });
+  await createTask({ ...base, title: "no date", status: "todo", priority: "low" });
+  return { ...t, overdueTodo, soon, doneLate };
+}
+
+export const BASELINE_STATS = {
+  total: 5,
+  byStatus: { todo: 3, in_progress: 1, done: 1 },
+  byPriority: { low: 2, medium: 2, high: 1 },
+  overdue: 1,
+  dueSoon: 1,
+};
