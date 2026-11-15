@@ -8,15 +8,15 @@ A team task-management API built with Node.js, Express, TypeScript, and Prisma.
 
 ## Features
 - **CLI:** Add, list, start, complete, delete, filter, and export tasks (CSV).
-- **HTTP API:** Full CRUD for tasks, projects, and comments, with SQL-powered pagination, sorting, searching, and filtering.
+- **HTTP API:** Full CRUD for tasks, projects, and comments, with SQL-powered pagination, sorting, searching, and filtering. Dashboard statistics at `GET /projects/:id/stats`, cached in Redis.
 - **Auth & Access Control:** User registration, login (JWT), refresh tokens (rotation + reuse detection), logout, role-based access control, and **rate limiting** (counters shared across instances via Redis).
 - **Core:** Repository pattern, Unit of Work for transactions, Zod validation, strict TypeScript, and centralized error handling.
 - **Database:** PostgreSQL with Prisma ORM, enforcing referential integrity, cascading deletes, and composite indexes for fast queries.
 - **Testing:** Vitest unit tests for pure logic, integration tests against a real, isolated test database via Supertest, and a small post-build smoke test of the compiled server. Coverage thresholds ratchet both suites.
 - **Code quality:** ESLint (flat config, type-aware rules, architecture enforcement), Prettier, Husky pre-commit/pre-push hooks, Redocly OpenAPI linting, and `npm run ci` for the exact pipeline CI will run.
-- **Observability:** Structured JSON logging with pino, request-scoped correlation via `AsyncLocalStorage`, secret redaction by field name, and a Prisma-safe error serializer. `/ready` reports dependency state (database required, Redis optional-but-visible).
+- **Observability:** Structured JSON logging with pino, request-scoped correlation via `AsyncLocalStorage`, secret redaction by field name, and a Prisma-safe error serializer. `/ready` reports dependency state (database required, Redis optional-but-visible). `X-Cache: hit|miss|bypass` on cached endpoints makes the cache observable from the client.
 - **Production Middleware:** Security headers (Helmet), CORS, Request IDs, body size limits, and **rate limits**.
-- **Infrastructure:** PostgreSQL and Redis run via `docker compose`, both bound to `127.0.0.1` (not every interface). Redis holds shared rate-limit counters; if it is down, the limiters fall back to per-instance in-memory counters and `/ready` reports `degraded`.
+- **Infrastructure:** PostgreSQL and Redis run via `docker compose`, both bound to `127.0.0.1` (not every interface). Redis holds shared rate-limit counters; if it is down, the limiters fall back to per-instance in-memory counters and `/ready` reports `degraded`. Redis also holds cached dashboard statistics (60 s TTL with jitter).
 
 ## Setup
 
@@ -135,6 +135,8 @@ Unit tests cover pure logic that needs no I/O:
 - Date helpers (`isPastDate`, `todayUtc` with an injected clock)
 - Zod schemas (ids, NUL characters, mass-assignment, query params)
 - **Logger format, level filtering, redaction (7 paths), Prisma error serialization, non-Error thrown values, request context propagation across `await`/timers/overlapping requests, `setContextUser`, explicit-field-wins-vs-mixin** (`logger.test.ts`, 21 tests)
+- **Cache-aside helper** (`tests/unit/cache/cache.test.ts`, 17 tests): hit/miss/bypass, generation-based invalidation, the stale-write race, single-flight stampedes, TTL jitter within ±10%, and fail-soft behavior when Redis is down
+- **Stats service** (`tests/unit/services/stats.service.test.ts`, 8 tests): group rollups, UTC-date key, access-before-cache, and `invalidateProject` scope
 - **Readiness logic** (`tests/unit/health.test.ts`): `ok` / `degraded` / `unavailable` table, `disabled` for no Redis, and a hanging dependency treated as `down` within `timeoutMs`
 - **ResilientStore fallback** (`tests/unit/middleware/resilientStore.test.ts`): primary used when healthy, fallback on error (with the operation name passed to `onFallback`), automatic return to the primary on the next call, `decrement`/`resetKey` covered, `init` forwarded to both
 
@@ -150,7 +152,7 @@ Integration tests run the real HTTP stack — validation, controllers, services,
 
 - **Prerequisites:** PostgreSQL **and** Redis must be running (`npm run db:up`).
 - **The test database is created and migrated automatically** on the first run (`prisma migrate deploy`).
-- **Wiped before every test** (`TRUNCATE ... RESTART IDENTITY CASCADE`), so tests are independent and IDs are predictable.
+- **Wiped before every test** (`TRUNCATE ... RESTART IDENTITY CASCADE`), so tests are independent and IDs are predictable. The **cache is flushed before every test** too (`flushTestRedis()`), so ids restarting at 1 cannot collide with a previous test's cached answer.
 - **Two layers of protection** against wiping the wrong database:
   1. `globalSetup.ts` refuses any URL whose database name doesn't match `/^[a-z0-9_]+_test$/`.
   2. `truncateAll()` runs `SELECT current_database()` and refuses if the name doesn't end in `_test`.
@@ -188,6 +190,17 @@ Integration tests cover seven areas:
 - **Members:** owner adds by email (case-insensitive, immediate access), can add as `owner`; 409 for an existing member (role unchanged), 404 for unknown email; promote/demote validation, **last-owner cannot demote or leave** (`409`), removing a member leaves their tasks in the project but strips their access at once. Includes a **10-round race** where two owners demote each other simultaneously — never zero owners, never both succeed.
 - **Comments:** author comes from the token (client-supplied `author`/`authorId`/`taskId` rejected), the author edits their own words, **even a project owner cannot edit another user's comment** (403, unchanged), the author or project owner deletes, a stranger gets `404`, comments vanish with their task, **a comment cannot be reached through the wrong task's URL** (IDOR), and on a deleted account the comment keeps its `author` name but loses `authorId` and can only be moderated.
 - **Access matrix:** 24 actions × 3 personas (stranger/member/owner) = **72 cells**, each asserting the exact status and — for every denied request — that a **fingerprint of every table is unchanged before and after**. The matrix is the executable version of the roles table below; a missing cell is visible, a wrong cell fails a test with a readable name.
+
+**Stats (Day 37)**
+- `GET /projects/:id/stats` computes correct totals from a known dataset (5 tasks with relative due dates) and serves the same answer from the cache on the second call (`X-Cache: miss` then `hit`, identical `computedAt`).
+- Response carries `Cache-Control: private, no-cache` — a personalised response is not stored by shared proxies.
+- Any member of the project gets the same entry; **strangers get `404` even while the entry is warm**, identical to a missing project, and the cached body never appears.
+- A member removed from the project stops seeing the stats immediately (the access check runs before the cache).
+- Different projects never share an entry (different scope in the key), and the cache stores **aggregate numbers only** — a dedicated test asserts the 8-field shape and that no task title, user name or email address appears anywhere in the cached JSON.
+- A write through the API invalidates on the **very next read** — every case in an `it.each` table (create, status, priority, due date into the past, clear due date, move out of the project, delete, move between two projects, merge) shows `X-Cache: miss` and a changed answer.
+- A duplicated project gets its own statistics with every task reset to `todo`.
+- **A stampede is single-flighted:** 20 simultaneous requests on a cold cache all return `200` with the same `computedAt`.
+- **Outage:** with `REDIS_URL` unreachable, `GET /projects/:id/stats` still answers `200` from PostgreSQL with `X-Cache: bypass`, writes still succeed (never fail because invalidation could not run), and the next read is correct; strangers are still refused.
 
 **Logging & observability**
 - **One structured line per request**, with `event: "http.request"` and a `requestId` matching the `X-Request-Id` response header.
@@ -256,7 +269,7 @@ npm run smoke       # 13 checks against the COMPILED server
 ### Test Scripts
 | Script | What it proves |
 |---|---|
-| `npm run test:unit` | Pure functions (pagination, slugs, access rules, tokens, config, schemas, dates, logger, readiness, resilient store) |
+| `npm run test:unit` | Pure functions (pagination, slugs, access rules, tokens, config, schemas, dates, logger, readiness, resilient store, cache helper, stats service) |
 | `npm run test:watch` | Re-runs affected tests on save |
 | `npm run test:integration` | API tests against a real, isolated test database (`taskflow_test`) and Redis database 15 |
 | `npm test` | Unit tests, then integration tests |
@@ -271,6 +284,20 @@ npm run smoke       # 13 checks against the COMPILED server
 - Updates may still set a past date (people correct dates after the fact).
 - The CLI (`SYSTEM` actor) is exempt — imports and data fixes are unaffected.
 
+## Caching
+
+`GET /projects/:id/stats` is cached in Redis with **cache-aside**:
+
+- **Key = format version + namespace + project + generation + UTC date** (`cache:v1:project-stats:project:<id>:<ver>:<YYYY-MM-DD>`). The date is part of the key because `overdue` and `dueSoon` change at midnight UTC.
+- **Authorization runs before the cache.** A stranger gets `404` identical to a missing project, and never reaches the cached entry. The same stats are shared by every member of the project, which is safe *because* the access check comes first.
+- **Writes through the API invalidate immediately.** Every `TaskService` / `ProjectService` mutation that can change the numbers `INCR`s a per-project generation counter after the database commit (`cache:ver:project-stats:project:<id>`). Old entries become unreachable and expire by TTL — no `KEYS`/`SCAN`+`DEL` sweep.
+- **TTL is 60 s ±10%** (jitter). It is the safety net for writes that bypass the service layer (scripts, direct SQL, the benchmark seed) and for an invalidation that failed because Redis was down; it is not the mechanism.
+- **If Redis is down, answers come from PostgreSQL.** The endpoint still returns `200` with `X-Cache: bypass`. A write never fails because invalidation failed.
+- **Stampedes are single-flighted** within one process: concurrent misses on the same key share one computation. Across instances, a cross-instance lock is a future improvement (see Known Limitations).
+- **`X-Cache: hit|miss|bypass`** on every response is a debugging aid, and a test hook — the integration suite asserts the hit/miss/bypass sequence, not just the numbers.
+
+Measured on a 10,000-task project (median of 15 iterations, each pair after an explicit invalidation): **cold 17.3 ms**, **warm 8.2 ms**. The cache roughly halves the latency; the saving is modest on this data and grows with the number of rows, which is why the key includes the project and the write path invalidates immediately.
+
 ## Logging
 
 Output is **one JSON object per line on stdout**. The platform (Docker, systemd, cloud) collects and rotates; the app does not.
@@ -283,11 +310,12 @@ Output is **one JSON object per line on stdout**. The platform (Docker, systemd,
 | `time` | every line | ISO 8601 timestamp |
 | `service` | every line | Always `"taskflow"` |
 | `msg` | every line | Short, constant, human-readable |
-| `event` | business events | Stable name, e.g. `http.request`, `auth.refresh_reuse`, `redis.ready`, `redis.error`, `redis.unavailable`, `rate_limit.store_fallback` |
+| `event` | business events | Stable name, e.g. `http.request`, `auth.refresh_reuse`, `redis.ready`, `redis.error`, `redis.unavailable`, `rate_limit.store_fallback`, `cache.error` |
 | `requestId` | inside a request's async context | Matches the `X-Request-Id` response header |
 | `userId` | authenticated requests | The user making the request |
 | `method`, `path`, `status`, `durationMs`, `ip` | `event: "http.request"` | Standard request fields |
 | `limiter`, `operation` | `event: "rate_limit.store_fallback"` | Which limiter fell back to memory, and which store operation failed |
+| `operation`, `err` | `event: "cache.error"` | Which cache operation failed (`read`, `write`, `invalidate`) and why; throttled to once per 30 s |
 
 **Reading them:**
 
@@ -297,17 +325,18 @@ npm run dev:json             # raw JSON lines
 npm run dev:json | jq 'select(.status >= 400)'                   # only failures
 npm run dev:json | jq 'select(.event == "auth.refresh_reuse")'   # security events
 npm run dev:json | jq 'select(.event == "rate_limit.store_fallback")'  # limiter degraded
+npm run dev:json | jq 'select(.event == "cache.error")'          # cache unavailable
 ```
 
 If a user reports a bug, find their `X-Request-Id` in the response header and grep the logs for `"requestId":"<that id>"` — every line written while serving that request will match.
 
-**Security:** secrets are redacted by field name (`password`, `passwordHash`, `accessToken`, `refreshToken`, `authorization`, `cookie`, `jwtSecret`, `databaseUrl` at three depths). Query strings, request bodies and email addresses are never logged. Prisma errors are trimmed to their final line and `meta` is dropped. **A test sends real passwords, hashes, tokens and an email through the API and fails if any appear in the output.** Redis rate-limit keys contain a **hashed** email, not the raw address.
+**Security:** secrets are redacted by field name (`password`, `passwordHash`, `accessToken`, `refreshToken`, `authorization`, `cookie`, `jwtSecret`, `databaseUrl` at three depths). Query strings, request bodies and email addresses are never logged. Prisma errors are trimmed to their final line and `meta` is dropped. **A test sends real passwords, hashes, tokens and an email through the API and fails if any appear in the output.** Redis rate-limit keys contain a **hashed** email, not the raw address; cache keys contain only the project id, a generation counter and the UTC date.
 
 **Known limits of redaction:** it works by key name only. A secret inside a message string, under an unlisted key (`pwd`, `rawToken`), or nested deeper than the configured paths is not redacted. Defense #1 is **not putting the secret in the log call**; the leak test is the second line.
 
 **Operation IDs in the OpenAPI spec** are auto-generated from method + path (`op.operationId ??= operationIdFor(method, path)` inside `withSecurity()`) so they are unique by construction and stable across runs. A hand-written `operationId` is preserved; a missing one gets generated. `npm run lint:openapi` runs Redocly against the exported spec, and a unit test asserts existence and uniqueness — because a linter only catches what someone remembers to run, and a test catches every push.
 
-**Redis log throttling:** `redis.error` is logged at most once per 30 s (ioredis emits an `error` on every failed retry; without the throttle an outage would flood stdout). `rate_limit.store_fallback` is logged at most once per 30 s **per limiter** (an outage would otherwise produce one warning per request per limiter).
+**Redis log throttling:** `redis.error` is logged at most once per 30 s (ioredis emits an `error` on every failed retry; without the throttle an outage would flood stdout). `rate_limit.store_fallback` is logged at most once per 30 s **per limiter** (an outage would otherwise produce one warning per request per limiter). `cache.error` is likewise throttled to once per 30 s, so a Redis outage produces one cache warning, not one per request.
 
 ## Security
 
@@ -351,6 +380,7 @@ See [docs/THREAT_MODEL.md](./docs/THREAT_MODEL.md) for the threat model and what
 | PATCH | `/projects/:id` | Update a project (owner only) | 200 |
 | DELETE | `/projects/:id` | Delete a project (owner only, fails with 409 if it has tasks) | 204 |
 | GET | `/projects/:id/tasks` | List the tasks of one project (requires membership) | 200 |
+| GET | `/projects/:id/stats` | Dashboard statistics, cached 60 s (requires membership; `X-Cache` header) | 200 |
 | POST | `/projects/:id/duplicate` | Duplicate a project (requires membership) | 201 |
 | POST | `/projects/:id/merge` | Merge this project (owner only) | 200 |
 
@@ -392,6 +422,23 @@ See [docs/THREAT_MODEL.md](./docs/THREAT_MODEL.md) for the threat model and what
 }
 ```
 
+### Sample Response (`GET /projects/:id/stats`)
+```json
+{
+  "data": {
+    "projectId": 1,
+    "total": 5,
+    "byStatus": { "todo": 3, "in_progress": 1, "done": 1 },
+    "byPriority": { "low": 1, "medium": 1, "high": 3 },
+    "overdue": 1,
+    "dueSoon": 1,
+    "asOf": "2026-11-15",
+    "computedAt": "2026-11-15T08:09:52.358Z"
+  }
+}
+```
+`X-Cache: hit|miss|bypass` says whether the answer came from Redis, was computed, or Redis was unavailable. `Cache-Control: private, no-cache` stops shared proxies from storing the response.
+
 ### Sample Response (`GET /ready`)
 ```json
 {
@@ -421,7 +468,7 @@ Rate limits are applied to protect sensitive endpoints. **Counters live in Redis
 
 A `429 Too Many Requests` response includes `Retry-After` and `RateLimit` headers. The error body includes `retryAfterSeconds`. The per-account key contains a **hashed** email address, so Redis operators cannot enumerate login targets via `KEYS` or `MONITOR`.
 
-**Mount discipline:** each limiter is attached **once**, either in `app.ts` (only `globalLimiter`) or on the route handlers (the auth limiters in `auth.routes.ts`, `inviteLimiter` in `projects.routes.ts`). Mounting the same limiter in both places runs it twice per request and halves its effective limit — this exact bug was fixed on Day 32 (see Known Limitations #25). Any new limiter must follow the same rule: **one mount, one place** — `grep -rn "Limiter" src/` is the fast check. Every limiter also carries a unique `name` (used as the Redis key prefix `rl:<name>:`) — two limiters sharing a name would share a counter, and the redis variant of `ratelimit.test.ts` is the test that catches it.
+**Mount discipline:** each limiter is attached **once**, either in `app.ts` (only `globalLimiter`) or on the route handlers (the auth limiters in `auth.routes.ts`, `inviteLimiter` in `projects.routes.ts`). Mounting the same limiter in both places runs it twice per request and halves its effective limit — this exact bug was fixed on Day 32 (see Known Limitations #32). Any new limiter must follow the same rule: **one mount, one place** — `grep -rn "Limiter" src/` is the fast check. Every limiter also carries a unique `name` (used as the Redis key prefix `rl:<name>:`) — two limiters sharing a name would share a counter, and the redis variant of `ratelimit.test.ts` is the test that catches it.
 
 ## Authentication & Authorization
 
@@ -445,7 +492,7 @@ curl http://localhost:3000/tasks \
 
 | | Stranger | Member | Owner |
 |---|---|---|---|
-| See project, tasks, comments | `404` | yes | yes |
+| See project, tasks, comments, stats | `404` | yes | yes |
 | Create tasks and comments | `404` | yes | yes |
 | Edit any task | `404` | yes | yes |
 | Delete a task | `404` | own only | any |
@@ -454,7 +501,7 @@ curl http://localhost:3000/tasks \
 | Rename/delete/merge/manage members | `404` | `403` | yes |
 | Leave the project | `404` | yes | if not last owner |
 
-**Rule:** Strangers get `404` (so they can't tell if a project exists). A member without rights gets `403`. Roles are looked up on every request. The table is **executable** — `tests/integration/access.matrix.test.ts` runs all 24 actions against all three personas (72 cells) and, for every denied request, asserts that a fingerprint of every table is identical before and after.
+**Rule:** Strangers get `404` (so they can't tell if a project exists). A member without rights gets `403`. Roles are looked up on every request. The table is **executable** — `tests/integration/access.matrix.test.ts` runs all 24 actions against all three personas (72 cells) and, for every denied request, asserts that a fingerprint of every table is identical before and after. The **stats** row is enforced by the same access check before the cache is touched, and a dedicated test asserts that a stranger gets `404` even when the entry is warm.
 
 ### Refresh Tokens
 Access tokens expire after 15 minutes. Use the refresh token to get a new pair:
@@ -514,6 +561,8 @@ HTTP request
 
 The repository pattern decouples business logic from data storage. Services depend on a `Repository<T>` interface, not a specific implementation. Listing, filtering, sorting, and pagination are handled directly by PostgreSQL. Multi-step operations (like `duplicate` and `merge`) run through a `UnitOfWork`. Role checks happen in the service layer, using a dedicated `Access` helper. Rate limiting runs before body parsing to avoid resource exhaustion.
 
+The **cache** sits in front of `GET /projects/:id/stats`: `StatsService` checks access, then hands a `compute` function to the cache-aside helper (`src/cache/cache.ts`), which reads a per-project generation counter from Redis, looks up the data key, and on a miss computes and stores the answer with a jittered TTL. Writes call `invalidateProject(projectId)` after the database commit, which simply `INCR`s the generation counter — old entries become unreachable and expire by TTL.
+
 `requestContext` sits **after** the body parser deliberately: `express.json()` calls `next()` from a stream event, and a listener runs in the context of whoever calls `emit` — so a context store created before the parser would be lost for POST requests. Running it after means every downstream handler — including code inside a service that never received a `requestId` argument — logs with the correct request's id.
 
 The layering above is **enforced by ESLint**, not just documented. `no-restricted-imports` blocks `src/controllers/**`, `src/routes/**`, `src/services/**`, `src/auth/**`, `src/middleware/**`, and `src/schemas/**` from importing Prisma or `src/repositories/prisma/**`. Only `src/container.ts`, `src/server.ts`, and `src/cli.ts` may — the composition root, the shutdown hook, and the CLI.
@@ -531,6 +580,15 @@ Moving list queries from JavaScript to SQL drastically reduced response times, e
 
 *(Run `npm run db:bench-seed` to seed data, and `npm run bench` to run the benchmark).*
 
+The `GET /projects/:id/stats` endpoint was measured separately on a **10,000-task project** (`npm run bench:stats`, median of 15 iterations, each pair measured after an explicit invalidation):
+
+| Case | Latency |
+|------|---------|
+| Cold (computed from PostgreSQL) | 17.3 ms |
+| Warm (served from Redis) | 8.2 ms |
+
+The cache roughly halves the latency on this data; the absolute saving is modest and grows with the number of rows, which is why the endpoint is cached with a 60 s TTL and invalidated on every write through the API.
+
 ## Configuration
 | Variable | Description | Default |
 |----------|-------------|---------|
@@ -546,7 +604,7 @@ Moving list queries from JavaScript to SQL drastically reduced response times, e
 | `RATE_LIMIT_ENABLED` | Enable rate limiting (must be `true` in production) | `false` (dev) |
 | `TRUST_PROXY_HOPS` | Number of reverse proxies in front of the app | `0` |
 | `DOCS_ENABLED` | Serve Swagger docs at `/docs` | `true` |
-| `REDIS_URL` | Redis connection string for shared rate-limit counters. Empty means in-memory (per-process) counters. | `redis://localhost:6379` (dev); **required in production** |
+| `REDIS_URL` | Redis connection string for shared rate-limit counters **and the stats cache**. Empty means in-memory (per-process) counters and a cache that is always a `bypass`. | `redis://localhost:6379` (dev); **required in production** |
 
 ## Database & Redis
 
@@ -607,12 +665,12 @@ erDiagram
   }
 ```
 
-**Redis layout (development):** single instance, `appendonly yes`, `maxmemory 256mb`, `maxmemory-policy noeviction`, bound to `127.0.0.1:6379`. Rate-limit keys are `rl:<limiter-name>:<key>`, where `<key>` is `ip:<subnet>` (IPv6 normalized to a `/56` by `ipKeyGenerator`), `email:<32-hex>` (SHA-256, truncated), or `user:<id>`. Every key has a `PEXPIRE ... NX`-set TTL, so nothing lives forever. Database **15** is reserved for the test suite; `assertTestRedis` refuses any other.
+**Redis layout (development):** single instance, `appendonly yes`, `maxmemory 256mb`, `maxmemory-policy noeviction`, bound to `127.0.0.1:6379`. Rate-limit keys are `rl:<limiter-name>:<key>`, where `<key>` is `ip:<subnet>` (IPv6 normalized to a `/56` by `ipKeyGenerator`), `email:<32-hex>` (SHA-256, truncated), or `user:<id>`. **Cache keys** are `cache:v1:project-stats:project:<id>:<generation>:<YYYY-MM-DD>`, with a companion generation counter at `cache:ver:project-stats:project:<id>` (1-day TTL). Every key has a `PEXPIRE ... NX`-set TTL, so nothing lives forever. Database **15** is reserved for the test suite; `assertTestRedis` refuses any other.
 
 ## Production Middleware
 
 - **Helmet:** Sets security-related HTTP headers (e.g., `X-Content-Type-Options`, `Content-Security-Policy`).
-- **CORS:** Restricts browser requests to allowed origins (`CORS_ORIGIN` in `.env`).
+- **CORS:** Restricts browser requests to allowed origins (`CORS_ORIGIN` in `.env`). `X-Cache` is in `exposedHeaders` so browser code can read it.
 - **Request IDs:** Each request gets an `X-Request-Id` header, echoed back and included in logs for tracing.
 - **Body Limit:** JSON payloads are capped at 100kb to prevent abuse (returns `413 Payload Too Large`).
 - **Rate Limiter:** Throttles brute-force and enumeration attacks. Returns `429` with `Retry-After` and `RateLimit` headers. Counters live in Redis and are shared across instances; if Redis is down, each instance falls back to in-memory counters and `/ready` reports `degraded`.
@@ -633,12 +691,19 @@ docs/
 
 tests/
 ├── unit/                 # Vitest unit tests (mirrors src/)
+│   ├── cache/            # Cache-aside helper (Day 37)
+│   └── ...
 ├── integration/          # Supertest tests against a real test database + Redis db 15
-└── support/              # Shared helpers: env, app, auth, factories, scenarios, sessions, truncate, globalSetup, redis
+│   ├── cache.redis.test.ts   # Cache against real Redis (Day 37)
+│   ├── stats.test.ts         # Stats endpoint, invalidation, authorization (Day 37)
+│   ├── stats.outage.test.ts  # Stats with Redis unreachable (Day 37)
+│   └── ...
+└── support/              # Shared helpers: env, app, auth, factories, scenarios, sessions, truncate, globalSetup, redis, buildApp
 
 src/
 ├── app.ts, server.ts, cli.ts
 ├── auth/                 # Password hashing, JWT utilities, refresh token helpers, policy (Actor), access (roles)
+├── cache/                # Cache-aside helper with generations, single-flight, jitter, fail-soft (Day 37)
 ├── container.ts          # Composition root
 ├── db.ts                 # Prisma Client instance
 ├── redis.ts              # ioredis client: lazy connect, fail-fast, throttled error log, connectRedis/closeRedis
@@ -647,10 +712,10 @@ src/
 ├── config.ts, logger.ts, errors.ts, types.ts, utils.ts
 ├── docs/                 # OpenAPI spec
 ├── generated/prisma/     # Auto-generated Prisma Client (gitignored)
-├── schemas/              # Zod validation
-├── services/             # Business logic: tasks, projects, comments, auth, dates
+├── schemas/              # Zod validation (including `stats.schemas.ts`, Day 37)
+├── services/             # Business logic: tasks, projects, comments, auth, dates, stats (Day 37)
 ├── middleware/           # Logger, request context, validation, error handling, request IDs, authenticate, rate limiters, rateLimitStores
-├── controllers/          # HTTP logic
+├── controllers/          # HTTP logic (including `stats` in projects.controller.ts, Day 37)
 └── routes/               # Express routes
 ```
 
@@ -681,7 +746,7 @@ Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Redis (ioredis), Zod, dotenv
   - [x] Documentation drift tests and Week 5 wrap-up and v0.5.0
 - [ ] Week 6 — Real-world features (Redis, jobs, email, uploads, real-time)
   - [x] Redis in Docker Compose; shared rate-limit counters via `RedisCounterStore` + `ResilientStore`; `GET /ready`; graceful Redis shutdown
-  - [ ] Cache-aside dashboard stats (Day 37)
+  - [x] Cache-aside dashboard stats (Day 37)
   - [ ] Background jobs with BullMQ (Day 38)
   - [ ] Email verification + password reset (Day 39)
   - [ ] File attachments with MinIO (Day 40)
@@ -719,7 +784,7 @@ Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Redis (ioredis), Zod, dotenv
 27. **`listComments` still loads every comment before filtering:** It uses `findAll()` instead of a `WHERE taskId = ?` query. Week 5 fixes this.
 28. **Unit tests don't cover HTTP or SQL:** Controllers, repositories, and routes show 0% unit coverage by design. Integration tests (Week 5, Days 30–32) cover them.
 29. **Integration tests run serially:** The test database is shared across files, so `fileParallelism: false` is required. Per-worker databases would allow parallelism at the cost of setup complexity.
-30. **Test database is wiped on every `beforeEach`:** Correct for the current suite (a few ms per wipe), but slower than transaction rollback isolation.
+30. **Test database is wiped on every `beforeEach`:** Correct for the current suite (a few ms per wipe), but slower than transaction rollback isolation. The Redis cache is flushed in the same `beforeEach` (Day 37), because ids restart at 1 and the cache cannot know that "project 1" is a different project.
 31. **Rate-limit tests build their own app copy:** `tests/integration/ratelimit.test.ts` uses `vi.stubEnv` + `vi.resetModules()` + dynamic import to build a fresh app with `RATE_LIMIT_ENABLED=true`. The shared test app still runs with limits off, so ordinary tests can send as many requests as they like. **Window expiry is now tested** against real Redis in `rateLimitStores.test.ts` (short `windowMs` + `sleep`).
 32. **Rate limiters must be mounted exactly once:** A limiter attached both in `app.ts` by path **and** on the route handler runs twice per request and halves its effective limit. This bug existed for `registerLimiter`, `loginIpLimiter`, and `refreshLimiter` and was fixed on Day 32. Any new limiter must follow the same rule: **one mount, one place** — `grep -rn "Limiter" src/` is the fast check.
 33. **Every limiter needs a unique `name`:** The Redis key is `rl:<name>:<key>`, so two limiters sharing a name share a counter. Mutation row 2 of the Day 36 table (giving `refresh` the name `register`) is caught **only** by the redis variant of `ratelimit.test.ts` — the memory variant cannot see the collision because its `MemoryStore` is per-limiter. This is why the suite runs both.
@@ -741,5 +806,5 @@ Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Redis (ioredis), Zod, dotenv
 49. **`/ready` is not checked by `precheck` at runtime:** `lint:openapi` is a build-time check. The `/docs` endpoint serves whatever the current `openApiSpec` says. `precheck` is the gate.
 50. **No load testing:** Nothing measures the API under concurrency or sustained load. Week 7 adds a minimal load check against the deployed build.
 51. **No contract test between the OpenAPI document and real responses:** Redocly lints the spec and `docs.and.auth.test.ts` checks `operationId`/401 coverage, but no test validates a real response body against the spec's schema. A future Ajv-based test closes this.
-
-
+52. **The stats cache can lag after a write that bypasses the service layer:** A direct database write (a script, `prisma/seed.ts`, the benchmark seed, a `psql` session) does not `INCR` the generation counter, so a cached answer can survive up to the 60 s TTL. Writes through the API invalidate immediately. This is the documented trade-off of a TTL as the safety net rather than the mechanism — a script that mutates the database should also flush `cache:*` (or accept the lag).
+53. **Single-flight works within one process, not across instances:** Two Node processes can miss the same key and both compute. A cross-instance `SET lock:key token NX PX 5000` around the computation would make the stampede defense global; it is listed as a challenge in Day 37 and not implemented today. On a single instance the current behavior is sufficient, and a `miss` is bounded by the same TTL as any stale entry.

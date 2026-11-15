@@ -8,6 +8,7 @@ import {
   listMembers,
   remove,
   removeMember,
+  stats,
   update,
 } from "../controllers/projects.controller.js";
 import { validate } from "../middleware/validate.js";
@@ -45,6 +46,7 @@ projectsRouter.post(
 projectsRouter.get("/", list);
 projectsRouter.post("/", validate({ body: createProjectSchema }), create);
 projectsRouter.get("/:id", validate({ params: idParamSchema }), getById);
+projectsRouter.get("/:id/stats", validate({ params: idParamSchema }), stats);
 projectsRouter.patch(
   "/:id",
   validate({ params: idParamSchema, body: updateProjectSchema }),

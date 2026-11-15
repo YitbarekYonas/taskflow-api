@@ -191,4 +191,29 @@ export class PrismaTaskRepository implements TaskRepository {
       throw mapWriteError(err);
     }
   }
+
+  async projectStats(projectId: number, today: string) {
+    const start = new Date(today);
+    const soonEnd = new Date(start.getTime() + 7 * 86_400_000);
+
+    const [groups, overdue, dueSoon] = await Promise.all([
+      this.prisma.task.groupBy({
+        by: ["status", "priority"],
+        where: { projectId },
+        _count: { _all: true },
+      }),
+      this.prisma.task.count({
+        where: { projectId, status: { not: "done" }, dueDate: { lt: start } },
+      }),
+      this.prisma.task.count({
+        where: { projectId, status: { not: "done" }, dueDate: { gte: start, lte: soonEnd } },
+      }),
+    ]);
+
+    return {
+      groups: groups.map((g) => ({ status: g.status, priority: g.priority, count: g._count._all })),
+      overdue,
+      dueSoon,
+    };
+  }
 }

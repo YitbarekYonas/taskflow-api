@@ -1,6 +1,6 @@
 import type { Project } from "../types.js";
 import type { TaskQuery } from "../schemas/task.schemas.js";
-import type { Status, Task } from "../types.js";
+import type { Priority, Status, Task } from "../types.js";
 
 export interface TaskRepository extends Repository<Task> {
   // filter + sort + one page, plus the total number of matches
@@ -10,6 +10,14 @@ export interface TaskRepository extends Repository<Task> {
   findByProject(projectId: number): Promise<Task[]>;
   moveAll(fromProjectId: number, toProjectId: number): Promise<number>;
   insertMany(items: Array<Omit<Task, "id">>): Promise<number>;
+  projectStats(
+    projectId: number,
+    today: string,
+  ): Promise<{
+    groups: Array<{ status: Status; priority: Priority; count: number }>;
+    overdue: number;
+    dueSoon: number;
+  }>;
 }
 export interface ProjectRepository extends Repository<Project> {
   findAllWithTaskCount(scope?: { userId: number }): Promise<Array<Project & { taskCount: number }>>;
