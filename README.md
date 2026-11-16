@@ -8,21 +8,21 @@ A team task-management API built with Node.js, Express, TypeScript, and Prisma.
 
 ## Features
 - **CLI:** Add, list, start, complete, delete, filter, and export tasks (CSV).
-- **HTTP API:** Full CRUD for tasks, projects, and comments, with SQL-powered pagination, sorting, searching, and filtering. Dashboard statistics at `GET /projects/:id/stats`, cached in Redis.
+- **HTTP API:** Full CRUD for tasks, projects, and comments, with SQL-powered pagination, sorting, searching, and filtering. Dashboard statistics at `GET /projects/:id/stats`, cached in Redis. Assigning a task to a project member (`assigneeId`) enqueues a notification email.
 - **Auth & Access Control:** User registration, login (JWT), refresh tokens (rotation + reuse detection), logout, role-based access control, and **rate limiting** (counters shared across instances via Redis).
 - **Core:** Repository pattern, Unit of Work for transactions, Zod validation, strict TypeScript, and centralized error handling.
 - **Database:** PostgreSQL with Prisma ORM, enforcing referential integrity, cascading deletes, and composite indexes for fast queries.
-- **Testing:** Vitest unit tests for pure logic, integration tests against a real, isolated test database via Supertest, and a small post-build smoke test of the compiled server. Coverage thresholds ratchet both suites.
+- **Testing:** Vitest unit tests for pure logic, integration tests against a real, isolated test database via Supertest, and a small post-build smoke test of the compiled server. Coverage thresholds ratchet both suites. Task assignment, the queue + worker, and SMTP delivery are covered by their own integration tests.
 - **Code quality:** ESLint (flat config, type-aware rules, architecture enforcement), Prettier, Husky pre-commit/pre-push hooks, Redocly OpenAPI linting, and `npm run ci` for the exact pipeline CI will run.
-- **Observability:** Structured JSON logging with pino, request-scoped correlation via `AsyncLocalStorage`, secret redaction by field name, and a Prisma-safe error serializer. `/ready` reports dependency state (database required, Redis optional-but-visible). `X-Cache: hit|miss|bypass` on cached endpoints makes the cache observable from the client.
+- **Observability:** Structured JSON logging with pino, request-scoped correlation via `AsyncLocalStorage`, secret redaction by field name, and a Prisma-safe error serializer. `/ready` reports dependency state (database required, Redis optional-but-visible). `X-Cache: hit|miss|bypass` on cached endpoints makes the cache observable from the client. Job and worker events (`job.completed`, `job.will_retry`, `job.failed_permanently`, `job.inline_failed`, `job.enqueue_failed`, `queue.error`, `worker.error`) are structured lines like every other event.
 - **Production Middleware:** Security headers (Helmet), CORS, Request IDs, body size limits, and **rate limits**.
-- **Infrastructure:** PostgreSQL and Redis run via `docker compose`, both bound to `127.0.0.1` (not every interface). Redis holds shared rate-limit counters; if it is down, the limiters fall back to per-instance in-memory counters and `/ready` reports `degraded`. Redis also holds cached dashboard statistics (60 s TTL with jitter).
+- **Infrastructure:** PostgreSQL, Redis and Mailpit run via `docker compose`, all bound to `127.0.0.1` (not every interface). Redis holds shared rate-limit counters and the stats cache, and BullMQ's job data (it must run with `noeviction`, or a job could be silently evicted). Mailpit catches every outgoing email in development. If Redis is down, the limiters fall back to per-instance in-memory counters, the stats cache degrades to `bypass`, and `/ready` reports `degraded`.
 
 ## Setup
 
 ### Prerequisites
 - Node.js 20+
-- Docker (for PostgreSQL **and** Redis)
+- Docker (for PostgreSQL, Redis **and** Mailpit)
 
 ### Install
 ```bash
@@ -44,19 +44,21 @@ npm run typecheck
 ```bash
 npm run dev     # Run API with auto-restart (http://localhost:3000), pretty logs via pino-pretty
 npm run dev:json # Same, but raw JSON on stdout (no pretty pipe)
+npm run worker  # Run the background-jobs worker (needs Redis; prints job.completed and friends)
 npm run cli -- list  # Run CLI
 npm run build   # Build for production
 npm start       # Run compiled JS
+npm run start:worker  # Run the compiled worker
 ```
 
-`npm run db:up` starts **PostgreSQL and Redis** in one command (`docker compose up -d`), both bound to `127.0.0.1` so they are not reachable from the network. `npm run db:down` stops both.
+`npm run db:up` starts **PostgreSQL, Redis and Mailpit** in one command (`docker compose up -d`), all bound to `127.0.0.1` so they are not reachable from the network. `npm run db:down` stops all three.
 
 ## Database & Infrastructure Workflow
 
 | Task | Command |
 |---|---|
-| Start PostgreSQL and Redis | `npm run db:up` |
-| Stop both | `npm run db:down` |
+| Start PostgreSQL, Redis and Mailpit | `npm run db:up` |
+| Stop all three | `npm run db:down` |
 | Apply migrations and create new ones (dev) | `npm run db:migrate` |
 | Apply migrations only (CI, production) | `npm run db:deploy` |
 | Rebuild the dev database with sample data | `npm run db:fresh` |
@@ -65,7 +67,7 @@ npm start       # Run compiled JS
 
 **Development Seed Credentials:** `sam@example.com` / `dev-password-123` (only available in development, never in production).
 
-**Redis (development):** an unauthenticated instance on `127.0.0.1:6379`, `appendonly yes`, `maxmemory 256mb`, `maxmemory-policy noeviction` (Day 38 adds BullMQ jobs here; nothing may be silently evicted). `REDIS_URL` in `.env` points at it.
+**Redis (development):** an unauthenticated instance on `127.0.0.1:6379`, `appendonly yes`, `maxmemory 256mb`, `maxmemory-policy noeviction` (Day 38 stores BullMQ jobs here; nothing may be silently evicted). `REDIS_URL` in `.env` points at it.
 
 **Mailpit (development):** an SMTP catch-all at `127.0.0.1:1025` with a web UI at `http://localhost:8025`. It accepts every message and shows it; nothing is ever delivered to a real address during development. `SMTP_URL` in `.env` points at it.
 
@@ -80,6 +82,7 @@ npm start       # Run compiled JS
 | `npm run lint:openapi` | Export the spec to `.tmp/openapi.json` and run Redocly against it |
 | `npm run verify` | Build and run everything against the compiled server |
 | `npm run test:coverage` | Combined unit + integration with ratcheted thresholds |
+| `npm run jobs` | Inspect the BullMQ queue: `npm run jobs -- stats`, `failed`, `retry <id>` |
 
 **Git hooks (installed by `npm install`):**
 - **`pre-commit`** runs `lint-staged` on staged files (`eslint --fix --max-warnings 0` + `prettier --write` for `.ts`; `prettier --write` for `.json`, `.yml`, `.yaml`, `.mjs`). Takes ~2 seconds because it only touches staged files.
@@ -139,6 +142,9 @@ Unit tests cover pure logic that needs no I/O:
 - **Logger format, level filtering, redaction (7 paths), Prisma error serialization, non-Error thrown values, request context propagation across `await`/timers/overlapping requests, `setContextUser`, explicit-field-wins-vs-mixin** (`logger.test.ts`, 21 tests)
 - **Cache-aside helper** (`tests/unit/cache/cache.test.ts`, 17 tests): hit/miss/bypass, generation-based invalidation, the stale-write race, single-flight stampedes, TTL jitter within ±10%, and fail-soft behavior when Redis is down
 - **Stats service** (`tests/unit/services/stats.service.test.ts`, 8 tests): group rollups, UTC-date key, access-before-cache, and `invalidateProject` scope
+- **Mail templates** (`tests/unit/mail/templates.test.ts`, 8 tests): plain-text body, optional fields omitted, header-injection flattening (title, assigner name, project name), long-title cap, `<script>` shown literally
+- **Job handlers** (`tests/unit/jobs/handlers.test.ts`, 7 tests): sent with the right recipient and subject, skipped when the task is gone / reassigned / unassigned / the assignee's account is gone, still sent when the assigner has left, mail failures escape so the queue can retry
+- **Redis connection options** (`tests/unit/redisOptions.test.ts`, 6 tests): parses `redis://`, `rediss://`, credentials, db paths, default port 6379
 - **Readiness logic** (`tests/unit/health.test.ts`): `ok` / `degraded` / `unavailable` table, `disabled` for no Redis, and a hanging dependency treated as `down` within `timeoutMs`
 - **ResilientStore fallback** (`tests/unit/middleware/resilientStore.test.ts`): primary used when healthy, fallback on error (with the operation name passed to `onFallback`), automatic return to the primary on the next call, `decrement`/`resetKey` covered, `init` forwarded to both
 
@@ -152,7 +158,7 @@ npm test                   # unit tests, then integration tests
 
 Integration tests run the real HTTP stack — validation, controllers, services, Prisma, and PostgreSQL — against a **separate** database (`taskflow_test` by default). They use **Supertest**, which calls `createApp()` directly; no `npm run dev`, no port conflicts. The rate-limiter tests additionally run against **Redis database 15**, which `assertTestRedis` enforces.
 
-- **Prerequisites:** PostgreSQL **and** Redis must be running (`npm run db:up`).
+- **Prerequisites:** PostgreSQL **and** Redis must be running (`npm run db:up`). Mailpit must be reachable for `mail.smtp.test.ts` (it is part of `npm run db:up`).
 - **The test database is created and migrated automatically** on the first run (`prisma migrate deploy`).
 - **Wiped before every test** (`TRUNCATE ... RESTART IDENTITY CASCADE`), so tests are independent and IDs are predictable. The **cache is flushed before every test** too (`flushTestRedis()`), so ids restarting at 1 cannot collide with a previous test's cached answer.
 - **Two layers of protection** against wiping the wrong database:
@@ -180,6 +186,7 @@ Integration tests cover seven areas:
 - Sorting: `createdAt`, `title`, `priority`, `dueDate`, with `id` as tie-breaker, and `nulls: "last"` honored in both `asc` and `desc`.
 - Pagination: page/limit table with correct `meta`, and **"walk every page"** — 25 tasks with heavy `priority` ties split across 3 pages, all 25 distinct, rank order never goes back up (Day 18's bug class, made permanent).
 - Due dates: a past date on creation returns `400 "Due date cannot be in the past."`; updates may still set past dates; the CLI (`SYSTEM` actor) is exempt.
+- **Assignment (Day 38):** `assigneeId` on create and update; the email goes to the assignee (not the requester); no email on self-assignment; no email when the assignee is unchanged; only the new assignee on reassignment; no email on unassign; title read at send time, not enqueue time; a non-member and an unknown user both get the same `400`; a personal task refuses assignment; assigning on create refuses a bad `assigneeId` and stores nothing; four `it.each` rows for non-numeric / zero / huge / negative ids; moving a task clears the assignee if they're not in the target project and keeps it if they are; removing a member unassigns their tasks in that project only; a queue failure and a mail failure both leave the assignment saved.
 
 **Projects**
 - Create: `201` with slug, `Location`, creator's `owner` membership created; validation table (empty name, client-chosen slug/`createdById`, NUL) → 400.
@@ -203,6 +210,11 @@ Integration tests cover seven areas:
 - A duplicated project gets its own statistics with every task reset to `todo`.
 - **A stampede is single-flighted:** 20 simultaneous requests on a cold cache all return `200` with the same `computedAt`.
 - **Outage:** with `REDIS_URL` unreachable, `GET /projects/:id/stats` still answers `200` from PostgreSQL with `X-Cache: bypass`, writes still succeed (never fail because invalidation could not run), and the next read is correct; strangers are still refused.
+
+**Jobs (Day 38)**
+- **`tests/integration/tasks.assignment.test.ts`** — the assignment rules through the HTTP API, in `inline` mode with the in-memory mailbox. Covers: email on create, email on patch, no email when assigning to yourself, no email when reassigning to the same person, only the new assignee gets an email on reassign, no email on unassign, title read at send time, refusal of non-members with the same message as unknown users, refusal on personal tasks, refusal on creation, four invalid-assignee 400s, move-keeps-assignee-if-still-a-member, member-leave-removes-assignment-only-in-that-project, queue failure does not fail the request, mail failure does not fail the request, header-injection flattening end-to-end.
+- **`tests/integration/jobs.queue.test.ts`** — the real queue and a real worker, against Redis database 15. Covers: handler receives the payload; a job survives while no worker is running and runs when one starts; the producer refuses a bad payload; retries with backoff on temporary failures; an SMTP 4xx treated as temporary; exhaustion after the configured attempts plus the job stays in the failed list; an SMTP 5xx not retried; a malformed payload / unknown job type not retried and the handler not called; worker shutdown lets the active job finish.
+- **`tests/integration/mail.smtp.test.ts`** — real SMTP against Mailpit, using Mailpit's REST API to inspect the inbox. Covers: a real delivery through SMTP; header-injection defeat (a `\r\nBcc:` in the subject cannot add a recipient); a connection refused when nothing is listening on the SMTP port.
 
 **Logging & observability**
 - **One structured line per request**, with `event: "http.request"` and a `requestId` matching the `X-Request-Id` response header.
@@ -271,7 +283,7 @@ npm run smoke       # 13 checks against the COMPILED server
 ### Test Scripts
 | Script | What it proves |
 |---|---|
-| `npm run test:unit` | Pure functions (pagination, slugs, access rules, tokens, config, schemas, dates, logger, readiness, resilient store, cache helper, stats service) |
+| `npm run test:unit` | Pure functions (pagination, slugs, access rules, tokens, config, schemas, dates, logger, readiness, resilient store, cache helper, stats service, mail templates, job handlers, redis connection options) |
 | `npm run test:watch` | Re-runs affected tests on save |
 | `npm run test:integration` | API tests against a real, isolated test database (`taskflow_test`) and Redis database 15 |
 | `npm test` | Unit tests, then integration tests |
@@ -330,6 +342,7 @@ Output is **one JSON object per line on stdout**. The platform (Docker, systemd,
 | `method`, `path`, `status`, `durationMs`, `ip` | `event: "http.request"` | Standard request fields |
 | `limiter`, `operation` | `event: "rate_limit.store_fallback"` | Which limiter fell back to memory, and which store operation failed |
 | `operation`, `err` | `event: "cache.error"` | Which cache operation failed (`read`, `write`, `invalidate`) and why; throttled to once per 30 s |
+| `job`, `jobId`, `attempt`, `result` | `event: "job.*"` | Which job, its BullMQ id, which attempt failed, and the handler's outcome (`{ outcome: "sent" }` / `{ outcome: "skipped", reason }`) |
 
 **Reading them:**
 
@@ -340,6 +353,7 @@ npm run dev:json | jq 'select(.status >= 400)'                   # only failures
 npm run dev:json | jq 'select(.event == "auth.refresh_reuse")'   # security events
 npm run dev:json | jq 'select(.event == "rate_limit.store_fallback")'  # limiter degraded
 npm run dev:json | jq 'select(.event == "cache.error")'          # cache unavailable
+npm run dev:json | jq 'select(.event | startswith("job."))'      # job lifecycle
 ```
 
 If a user reports a bug, find their `X-Request-Id` in the response header and grep the logs for `"requestId":"<that id>"` — every line written while serving that request will match.
@@ -774,7 +788,7 @@ Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Redis (ioredis), BullMQ, nod
 - [ ] Week 6 — Real-world features (Redis, jobs, email, uploads, real-time)
   - [x] Redis in Docker Compose; shared rate-limit counters via `RedisCounterStore` + `ResilientStore`; `GET /ready`; graceful Redis shutdown
   - [x] Cache-aside dashboard stats (Day 37)
-  - [ ] Background jobs with BullMQ (Day 38)
+  - [x] Background jobs with BullMQ (Day 38)
   - [ ] Email verification + password reset (Day 39)
   - [ ] File attachments with MinIO (Day 40)
   - [ ] Real-time notifications with WebSockets (Day 41)
