@@ -213,6 +213,7 @@ export function createProjectService({ projects, tasks, members, uow, stats }: D
         );
       }
       await tx.members.remove(projectId, userId);
+      await tx.tasks.unassignUser(projectId, userId);
     });
   }
 

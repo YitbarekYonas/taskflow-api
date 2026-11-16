@@ -27,6 +27,7 @@ export const createTaskSchema = z
     priority: z.enum(PRIORITIES).optional(),
     dueDate: dateString.optional(),
     projectId: dbIdBody.optional(),
+    assigneeId: dbIdBody.optional(),
   })
   .strict();
 
@@ -37,6 +38,7 @@ export const updateTaskSchema = z
     priority: z.enum(PRIORITIES),
     dueDate: dateString.nullable(),
     projectId: dbIdBody.nullable(),
+    assigneeId: dbIdBody.nullable(),
   })
   .partial()
   .strict()

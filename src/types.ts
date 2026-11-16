@@ -18,6 +18,7 @@ export const taskSchema = z.object({
   createdAt: z.string(),
   projectId: z.number().int().positive().optional(),
   createdById: z.number().int().positive().optional(),
+  assigneeId: z.number().int().positive().optional(),
 });
 
 export const commentSchema = z.object({
@@ -34,7 +35,7 @@ export type Comment = z.infer<typeof commentSchema>;
 export type Task = z.infer<typeof taskSchema>;
 
 export type NewTask = Pick<Task, "title"> &
-  Partial<Pick<Task, "priority" | "dueDate" | "projectId">>;
+  Partial<Pick<Task, "priority" | "dueDate" | "projectId" | "assigneeId">>;
 
 export const projectSchema = z.object({
   id: z.number().int().positive(),

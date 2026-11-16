@@ -18,6 +18,8 @@ export interface TaskRepository extends Repository<Task> {
     overdue: number;
     dueSoon: number;
   }>;
+  // Used when a member leaves a project: their tasks there become unassigned
+  unassignUser(projectId: number, userId: number): Promise<number>;
 }
 export interface ProjectRepository extends Repository<Project> {
   findAllWithTaskCount(scope?: { userId: number }): Promise<Array<Project & { taskCount: number }>>;
