@@ -67,6 +67,8 @@ npm start       # Run compiled JS
 
 **Redis (development):** an unauthenticated instance on `127.0.0.1:6379`, `appendonly yes`, `maxmemory 256mb`, `maxmemory-policy noeviction` (Day 38 adds BullMQ jobs here; nothing may be silently evicted). `REDIS_URL` in `.env` points at it.
 
+**Mailpit (development):** an SMTP catch-all at `127.0.0.1:1025` with a web UI at `http://localhost:8025`. It accepts every message and shows it; nothing is ever delivered to a real address during development. `SMTP_URL` in `.env` points at it.
+
 ## Development Workflow
 
 | Command | What it does |
@@ -284,6 +286,18 @@ npm run smoke       # 13 checks against the COMPILED server
 - Updates may still set a past date (people correct dates after the fact).
 - The CLI (`SYSTEM` actor) is exempt — imports and data fixes are unaffected.
 
+## Background jobs
+
+Some work should not happen inside a request: an email takes hundreds of milliseconds when SMTP is healthy and seconds — or nothing — when it isn't. `POST /tasks` and `PATCH /tasks/:id` **record the assignment in PostgreSQL, then enqueue a job** (`task-assigned`) in Redis. A separate worker process (`npm run worker`) reads the job, loads the task, users and project from the database, renders the message from the current state, and sends it.
+
+- **Delivery is at-least-once.** A job is never lost, but it may run twice (a worker that crashed after sending, before acknowledging). The handler decides from the database at run time ("is this task still assigned to this person?"), so running it twice sends at most one extra email and never notifies about an assignment that no longer exists.
+- **The payload carries ids only** (`taskId`, `assigneeId`, `assignedById`). Titles, names and email addresses never travel through Redis.
+- **Retries:** 5 attempts, exponential backoff from 5 s (5, 10, 20, 40). Permanent failures — an SMTP 5xx answer, a malformed payload, an unknown job — throw `UnrecoverableError` and fail at once. Failed jobs are kept for 7 days in Redis's **failed** list.
+- **The request never fails because a notification couldn't be queued or sent.** A queue or mail failure is logged (`job.enqueue_failed`, `job.inline_failed`) and the assignment itself is already saved.
+- **`npm run jobs -- stats | failed | retry <id>`** inspects and recovers the failed list.
+- **Modes:** `JOBS_MODE=queue` (production behaviour; requires Redis and a running worker), `JOBS_MODE=inline` (run the handler in-process — for tests, and handy without a worker), `JOBS_MODE=off` (do nothing; no email is sent).
+- **Mailpit** captures every message in development and shows it at `http://localhost:8025`; the SMTP endpoint is `localhost:1025`. Both bound to `127.0.0.1`.
+
 ## Caching
 
 `GET /projects/:id/stats` is cached in Redis with **cache-aside**:
@@ -310,7 +324,7 @@ Output is **one JSON object per line on stdout**. The platform (Docker, systemd,
 | `time` | every line | ISO 8601 timestamp |
 | `service` | every line | Always `"taskflow"` |
 | `msg` | every line | Short, constant, human-readable |
-| `event` | business events | Stable name, e.g. `http.request`, `auth.refresh_reuse`, `redis.ready`, `redis.error`, `redis.unavailable`, `rate_limit.store_fallback`, `cache.error` |
+| `event` | business events | Stable name, e.g. `http.request`, `auth.refresh_reuse`, `redis.ready`, `redis.error`, `redis.unavailable`, `rate_limit.store_fallback`, `cache.error`, `queue.error`, `worker.started`, `worker.error`, `job.completed`, `job.will_retry`, `job.failed_permanently`, `job.inline_failed`, `job.enqueue_failed`, `mail.logged` |
 | `requestId` | inside a request's async context | Matches the `X-Request-Id` response header |
 | `userId` | authenticated requests | The user making the request |
 | `method`, `path`, `status`, `durationMs`, `ip` | `event: "http.request"` | Standard request fields |
@@ -367,8 +381,8 @@ See [docs/THREAT_MODEL.md](./docs/THREAT_MODEL.md) for the threat model and what
 |--------|------|-------------|---------|
 | GET | `/tasks` | List tasks you can see (see params below) | 200 |
 | GET | `/tasks/:id` | Get one task (requires membership) | 200 |
-| POST | `/tasks` | Create a task (past `dueDate` rejected with 400) | 201 |
-| PATCH | `/tasks/:id` | Update fields (creator, owner, or member) | 200 |
+| POST | `/tasks` | Create a task (past `dueDate` rejected with 400; `assigneeId` triggers an email) | 201 |
+| PATCH | `/tasks/:id` | Update fields (creator, owner, or member; `assigneeId` triggers an email; `null` unassigns) | 200 |
 | DELETE | `/tasks/:id` | Delete a task (creator or project owner only) | 204 |
 
 **Projects** (login required)
@@ -563,6 +577,8 @@ The repository pattern decouples business logic from data storage. Services depe
 
 The **cache** sits in front of `GET /projects/:id/stats`: `StatsService` checks access, then hands a `compute` function to the cache-aside helper (`src/cache/cache.ts`), which reads a per-project generation counter from Redis, looks up the data key, and on a miss computes and stores the answer with a jittered TTL. Writes call `invalidateProject(projectId)` after the database commit, which simply `INCR`s the generation counter — old entries become unreachable and expire by TTL.
 
+The **queue** sits beside the API: `TaskService` enqueues a `task-assigned` job after the database commit, and a separate worker process (`src/worker.ts`, `npm run worker`) consumes it, reads the current state from the database, and sends the email. A queue failure is logged and never fails the user's request — the assignment is already saved.
+
 `requestContext` sits **after** the body parser deliberately: `express.json()` calls `next()` from a stream event, and a listener runs in the context of whoever calls `emit` — so a context store created before the parser would be lost for POST requests. Running it after means every downstream handler — including code inside a service that never received a `requestId` argument — logs with the correct request's id.
 
 The layering above is **enforced by ESLint**, not just documented. `no-restricted-imports` blocks `src/controllers/**`, `src/routes/**`, `src/services/**`, `src/auth/**`, `src/middleware/**`, and `src/schemas/**` from importing Prisma or `src/repositories/prisma/**`. Only `src/container.ts`, `src/server.ts`, and `src/cli.ts` may — the composition root, the shutdown hook, and the CLI.
@@ -605,6 +621,10 @@ The cache roughly halves the latency on this data; the absolute saving is modest
 | `TRUST_PROXY_HOPS` | Number of reverse proxies in front of the app | `0` |
 | `DOCS_ENABLED` | Serve Swagger docs at `/docs` | `true` |
 | `REDIS_URL` | Redis connection string for shared rate-limit counters **and the stats cache**. Empty means in-memory (per-process) counters and a cache that is always a `bypass`. | `redis://localhost:6379` (dev); **required in production** |
+| `JOBS_MODE` | How background jobs run: `queue` (Redis + a separate worker process), `inline` (run the handler right away — for tests, or development without a worker), or `off`. `queue` requires `REDIS_URL`; production requires `queue`. | `queue` (dev); **must be `queue` in production** |
+| `MAIL_TRANSPORT` | How outgoing mail is sent: `smtp` (real delivery over `SMTP_URL` — Mailpit in development), `memory` (kept in memory — for tests), or `log` (a log line only, no delivery). `smtp` requires `SMTP_URL`; production requires `smtp`. | `log` (dev); **must be `smtp` in production** |
+| `SMTP_URL` | SMTP connection string used when `MAIL_TRANSPORT=smtp`. Development points at Mailpit (`smtp://localhost:1025`). Optional otherwise. | (unset unless `MAIL_TRANSPORT=smtp`) |
+| `MAIL_FROM` | The From address on every outgoing email. | `TaskFlow <noreply@taskflow.local>` |
 
 ## Database & Redis
 
@@ -665,7 +685,7 @@ erDiagram
   }
 ```
 
-**Redis layout (development):** single instance, `appendonly yes`, `maxmemory 256mb`, `maxmemory-policy noeviction`, bound to `127.0.0.1:6379`. Rate-limit keys are `rl:<limiter-name>:<key>`, where `<key>` is `ip:<subnet>` (IPv6 normalized to a `/56` by `ipKeyGenerator`), `email:<32-hex>` (SHA-256, truncated), or `user:<id>`. **Cache keys** are `cache:v1:project-stats:project:<id>:<generation>:<YYYY-MM-DD>`, with a companion generation counter at `cache:ver:project-stats:project:<id>` (1-day TTL). Every key has a `PEXPIRE ... NX`-set TTL, so nothing lives forever. Database **15** is reserved for the test suite; `assertTestRedis` refuses any other.
+**Redis layout (development):** single instance, `appendonly yes`, `maxmemory 256mb`, `maxmemory-policy noeviction`, bound to `127.0.0.1:6379`. Rate-limit keys are `rl:<limiter-name>:<key>`, where `<key>` is `ip:<subnet>` (IPv6 normalized to a `/56` by `ipKeyGenerator`), `email:<32-hex>` (SHA-256, truncated), or `user:<id>`. **Cache keys** are `cache:v1:project-stats:project:<id>:<generation>:<YYYY-MM-DD>`, with a companion generation counter at `cache:ver:project-stats:project:<id>` (1-day TTL). **Queue keys** live under BullMQ's `bull:notifications:*` namespace — job data holds ids only, and failed jobs are kept for 7 days. Every key has a `PEXPIRE ... NX`-set TTL or a bounded `removeOn*` policy, so nothing lives forever. Database **15** is reserved for the test suite; `assertTestRedis` refuses any other.
 
 ## Production Middleware
 
@@ -692,21 +712,28 @@ docs/
 tests/
 ├── unit/                 # Vitest unit tests (mirrors src/)
 │   ├── cache/            # Cache-aside helper (Day 37)
+│   ├── mail/             # Mail templates (Day 38)
+│   ├── jobs/             # Job handlers (Day 38)
 │   └── ...
 ├── integration/          # Supertest tests against a real test database + Redis db 15
 │   ├── cache.redis.test.ts   # Cache against real Redis (Day 37)
 │   ├── stats.test.ts         # Stats endpoint, invalidation, authorization (Day 37)
 │   ├── stats.outage.test.ts  # Stats with Redis unreachable (Day 37)
+│   ├── tasks.assignment.test.ts  # Assignment rules, emails (Day 38)
+│   ├── jobs.queue.test.ts    # Queue + worker against Redis (Day 38)
+│   ├── mail.smtp.test.ts     # SMTP against Mailpit (Day 38)
 │   └── ...
-└── support/              # Shared helpers: env, app, auth, factories, scenarios, sessions, truncate, globalSetup, redis, buildApp
+└── support/              # Shared helpers: env, app, auth, factories, scenarios, sessions, truncate, globalSetup, redis, buildApp, waitFor, mail
 
 src/
-├── app.ts, server.ts, cli.ts
+├── app.ts, server.ts, cli.ts, worker.ts
 ├── auth/                 # Password hashing, JWT utilities, refresh token helpers, policy (Actor), access (roles)
 ├── cache/                # Cache-aside helper with generations, single-flight, jitter, fail-soft (Day 37)
+├── jobs/                 # Job definitions, handlers, queue producer, worker (Day 38)
+├── mail/                 # Mailer (SMTP / memory / log) and templates (Day 38)
 ├── container.ts          # Composition root
 ├── db.ts                 # Prisma Client instance
-├── redis.ts              # ioredis client: lazy connect, fail-fast, throttled error log, connectRedis/closeRedis
+├── redis.ts              # ioredis client: lazy connect, fail-fast, throttled error log, connectRedis/closeRedis, redisConnectionOptions
 ├── health.ts             # checkReadiness: parallel probes with a deadline
 ├── requestContext.ts     # AsyncLocalStorage store + setContextUser
 ├── config.ts, logger.ts, errors.ts, types.ts, utils.ts
@@ -720,7 +747,7 @@ src/
 ```
 
 ## Tech Stack
-Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Redis (ioredis), Zod, dotenv, tsx, Helmet, CORS, Swagger UI, Argon2, jose, express-rate-limit, pino, pino-pretty, Vitest, Supertest, ESLint (flat config, typescript-eslint), Prettier, Husky, lint-staged, Redocly.
+Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Redis (ioredis), BullMQ, nodemailer, Zod, dotenv, tsx, Helmet, CORS, Swagger UI, Argon2, jose, express-rate-limit, pino, pino-pretty, Vitest, Supertest, ESLint (flat config, typescript-eslint), Prettier, Husky, lint-staged, Redocly.
 
 ## Roadmap
 - [x] Week 1 — CLI core

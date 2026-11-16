@@ -13,6 +13,10 @@ const BASELINE: Record<string, string> = {
   TRUST_PROXY_HOPS: "0",
   DOCS_ENABLED: "true",
   REDIS_URL: "redis://localhost:6379/15",
+  JOBS_MODE: "queue",
+  MAIL_TRANSPORT: "log",
+  SMTP_URL: "",
+  MAIL_FROM: "TaskFlow <noreply@taskflow.local>",
 };
 
 // Loads a fresh copy of the config module under a complete, controlled environment
@@ -51,7 +55,7 @@ describe("config", () => {
   });
 
   it("treats an empty REDIS_URL as no Redis", async () => {
-    const config = await loadConfig({ REDIS_URL: "" });
+    const config = await loadConfig({ REDIS_URL: "", JOBS_MODE: "inline" });
     expect(config.redisUrl).toBeUndefined();
   });
 
@@ -63,38 +67,43 @@ describe("config", () => {
     ["a non-postgres DATABASE_URL", { DATABASE_URL: "mysql://u:p@h/db" }, "DATABASE_URL"],
     ["an unknown LOG_LEVEL", { LOG_LEVEL: "banana" }, "LOG_LEVEL"],
     ["a REDIS_URL that is not a Redis URL", { REDIS_URL: "http://localhost:6379" }, "REDIS_URL"],
+    ["an unknown JOBS_MODE", { JOBS_MODE: "sometimes" }, "JOBS_MODE"],
+    ["queue mode without Redis", { JOBS_MODE: "queue", REDIS_URL: "" }, "JOBS_MODE"],
+    ["smtp mail without an SMTP_URL", { MAIL_TRANSPORT: "smtp", SMTP_URL: "" }, "SMTP_URL"],
+    ["an SMTP_URL that is not smtp", { SMTP_URL: "http://localhost:1025" }, "SMTP_URL"],
   ])("refuses to start with %s and names the variable", async (_name, overrides, variable) => {
     const errors = trapExit();
     await expect(loadConfig(overrides)).rejects.toThrow("exit 1");
     expect(errors.mock.calls.flat().join("\n")).toContain(variable);
   });
 
+  // An otherwise valid production environment: each guard test breaks exactly ONE thing in it
+  const PRODUCTION = {
+    NODE_ENV: "production",
+    MAIL_TRANSPORT: "smtp",
+    SMTP_URL: "smtp://mail.example.com:587",
+  };
+
   describe("production guards", () => {
-    it("refuses the public placeholder secret", async () => {
-      trapExit();
-      await expect(
-        loadConfig({
-          NODE_ENV: "production",
-          JWT_SECRET: "replace-me-with-a-long-random-string-at-least-32-chars",
-        }),
-      ).rejects.toThrow("exit 1");
-    });
-
-    it("refuses to run without rate limiting", async () => {
-      trapExit();
-      await expect(
-        loadConfig({ NODE_ENV: "production", RATE_LIMIT_ENABLED: "false" }),
-      ).rejects.toThrow("exit 1");
-    });
-
-    it("refuses to run without Redis", async () => {
-      trapExit();
-      await expect(loadConfig({ NODE_ENV: "production", REDIS_URL: "" })).rejects.toThrow("exit 1");
-    });
-
     it("accepts a properly configured production environment", async () => {
-      const config = await loadConfig({ NODE_ENV: "production" });
+      const config = await loadConfig(PRODUCTION);
       expect(config.rateLimitEnabled).toBe(true);
+    });
+
+    it.each([
+      [
+        "the public placeholder secret",
+        { JWT_SECRET: "replace-me-with-a-long-random-string-at-least-32-chars" },
+        "JWT_SECRET",
+      ],
+      ["disabled rate limiting", { RATE_LIMIT_ENABLED: "false" }, "RATE_LIMIT_ENABLED"],
+      ["no Redis", { REDIS_URL: "" }, "REDIS_URL"],
+      ["inline jobs", { JOBS_MODE: "inline" }, "JOBS_MODE"],
+      ["mail that is only logged", { MAIL_TRANSPORT: "log" }, "MAIL_TRANSPORT"],
+    ])("refuses %s", async (_name, change, variable) => {
+      const errors = trapExit();
+      await expect(loadConfig({ ...PRODUCTION, ...change })).rejects.toThrow("exit 1");
+      expect(errors.mock.calls.flat().join("\n")).toContain(variable);
     });
   });
 });

@@ -20,5 +20,9 @@ export const TEST_ENV: Record<string, string> = {
   TRUST_PROXY_HOPS: "0",
   DOCS_ENABLED: "true",
   REDIS_URL: "", // empty on purpose: dotenv never overrides an existing variable, even an empty one
+  JOBS_MODE: "inline",
+  MAIL_TRANSPORT: "memory",
+  SMTP_URL: "",
+  MAIL_FROM: "TaskFlow <noreply@taskflow.local>",
   DOTENV_CONFIG_QUIET: "true",
 };
