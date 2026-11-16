@@ -14,6 +14,8 @@ const SENSITIVE_KEYS = [
   "cookie",
   "jwtSecret",
   "databaseUrl",
+  "smtpUrl",
+  "redisUrl",
 ];
 // Each key at the top level, one level down and two levels down
 export const REDACT_PATHS = SENSITIVE_KEYS.flatMap((key) => [key, `*.${key}`, `*.*.${key}`]);

@@ -1,4 +1,5 @@
 import { Redis } from "ioredis";
+import type { RedisOptions } from "ioredis";
 import { config } from "./config.js";
 import { logger } from "./logger.js";
 
@@ -28,6 +29,19 @@ export function createRedisClient(url: string): Redis {
   client.on("ready", () => logger.info({ event: "redis.ready" }, "redis connected"));
 
   return client;
+}
+
+/** Turns a redis:// URL into connection options, so BullMQ can open its own connections. */
+export function redisConnectionOptions(url: string): RedisOptions {
+  const parsed = new URL(url);
+  return {
+    host: parsed.hostname,
+    port: parsed.port ? Number(parsed.port) : 6379,
+    username: parsed.username ? decodeURIComponent(parsed.username) : undefined,
+    password: parsed.password ? decodeURIComponent(parsed.password) : undefined,
+    db: parsed.pathname.length > 1 ? Number(parsed.pathname.slice(1)) : 0,
+    ...(parsed.protocol === "rediss:" ? { tls: {} } : {}),
+  };
 }
 
 /** The shared client, or undefined when REDIS_URL is empty. */

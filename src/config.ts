@@ -32,6 +32,15 @@ export const envSchema = z.object({
     (value) => (value === "" ? undefined : value),
     z.string().startsWith("redis").optional(),
   ),
+  // queue = Redis + a worker process; inline = run the handler right away; off = do nothing
+  JOBS_MODE: z.enum(["queue", "inline", "off"]).default("queue"),
+  // smtp = real delivery (Mailpit in development); memory = tests; log = write a log line only
+  MAIL_TRANSPORT: z.enum(["smtp", "memory", "log"]).default("log"),
+  SMTP_URL: z.preprocess(
+    (value) => (value === "" ? undefined : value),
+    z.string().startsWith("smtp").optional(),
+  ),
+  MAIL_FROM: z.string().min(3).default("TaskFlow <noreply@taskflow.local>"),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -56,6 +65,23 @@ if (parsed.data.NODE_ENV === "production" && !parsed.data.REDIS_URL) {
   );
   process.exit(1);
 }
+
+function refuse(message: string): never {
+  console.error(`Refusing to start: ${message}`);
+  process.exit(1);
+}
+
+if (parsed.data.JOBS_MODE === "queue" && !parsed.data.REDIS_URL) {
+  refuse("JOBS_MODE=queue requires REDIS_URL (use JOBS_MODE=inline or off without Redis).");
+}
+if (parsed.data.MAIL_TRANSPORT === "smtp" && !parsed.data.SMTP_URL) {
+  refuse("MAIL_TRANSPORT=smtp requires SMTP_URL.");
+}
+if (parsed.data.NODE_ENV === "production") {
+  if (parsed.data.JOBS_MODE !== "queue") refuse("JOBS_MODE must be queue in production.");
+  if (parsed.data.MAIL_TRANSPORT !== "smtp") refuse("MAIL_TRANSPORT must be smtp in production.");
+}
+
 export const config = {
   env: parsed.data.NODE_ENV,
   logLevel: parsed.data.LOG_LEVEL,
@@ -69,4 +95,8 @@ export const config = {
   trustProxyHops: parsed.data.TRUST_PROXY_HOPS,
   docsEnabled: parsed.data.DOCS_ENABLED,
   redisUrl: parsed.data.REDIS_URL,
+  jobsMode: parsed.data.JOBS_MODE,
+  mailTransport: parsed.data.MAIL_TRANSPORT,
+  smtpUrl: parsed.data.SMTP_URL,
+  mailFrom: parsed.data.MAIL_FROM,
 };

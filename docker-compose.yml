@@ -43,6 +43,19 @@ services:
       timeout: 3s
       retries: 20
 
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: taskflow-mailpit
+    environment:
+      MP_DATABASE: /data/mailpit.db
+      MP_MAX_MESSAGES: "500"
+    ports:
+      - "127.0.0.1:1025:1025" # SMTP: where the app sends mail
+      - "127.0.0.1:8025:8025" # web UI and REST API
+    volumes:
+      - mailpitdata:/data
+
 volumes:
   pgdata:
   redisdata:
+  mailpitdata:

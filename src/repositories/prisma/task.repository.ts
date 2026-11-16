@@ -15,6 +15,7 @@ type TaskColumns = {
   createdAt?: Date;
   projectId?: number | null;
   createdById?: number;
+  assigneeId?: number | null;
 };
 
 // Database row -> domain object
@@ -28,6 +29,7 @@ function toTask(row: TaskRow): Task {
     createdAt: row.createdAt.toISOString(),
     projectId: row.projectId ?? undefined,
     createdById: row.createdById ?? undefined,
+    assigneeId: row.assigneeId ?? undefined,
   };
 }
 
@@ -42,6 +44,7 @@ function toColumns(d: Partial<TaskData>): TaskColumns {
   if ("dueDate" in d) c.dueDate = d.dueDate ? new Date(d.dueDate) : null;
   if ("projectId" in d) c.projectId = d.projectId ?? null;
   if (d.createdById !== undefined) c.createdById = d.createdById;
+  if ("assigneeId" in d) c.assigneeId = d.assigneeId ?? null;
   return c;
 }
 
@@ -215,5 +218,13 @@ export class PrismaTaskRepository implements TaskRepository {
       overdue,
       dueSoon,
     };
+  }
+
+  async unassignUser(projectId: number, userId: number) {
+    const result = await this.prisma.task.updateMany({
+      where: { projectId, assigneeId: userId },
+      data: { assigneeId: null },
+    });
+    return result.count;
   }
 }

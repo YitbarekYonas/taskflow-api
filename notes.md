@@ -258,6 +258,20 @@
 - **HTTP caching headers.** The response is personalised by login, so `Cache-Control: private, no-cache` prevents shared proxies from storing it. `X-Cache: hit | miss | bypass` is a debugging aid and a test hook: a test can assert `hit` on the second request and `miss` on the first without reaching into Redis.
 - **Invalidation is a service-layer concern, not a route concern.** `tasks.service.ts` and `projects.service.ts` call `stats.invalidateProject(...)` after their writes have committed, so the CLI (which goes through the same services) invalidates too. A route that wrote directly would not — which is why the layering rule (no Prisma in controllers) matters for correctness, not just style.
 
+### Week 6 (Day 38 — Background Jobs with BullMQ & Assignment Emails)
+- **Why a queue.** A request should answer in milliseconds. An email takes hundreds of milliseconds when SMTP is healthy and seconds (or never) when it isn't. A queue lets the API **record the intention** ("tell Alex about task 7") and return, while a separate **worker** does the slow, fallible part, retries it, and survives restarts.
+- **The parts.** The **producer** (the API) adds jobs. **Redis** holds them (waiting, active, delayed, completed, failed). The **worker** is a separate process that takes jobs, runs a handler, and acknowledges them.
+- **At-least-once delivery.** A queue can promise a job is never *lost*, but not that it runs *exactly once*. If a worker crashes after sending the email but before telling Redis, the job runs again and Alex gets two emails. So **handlers must tolerate being run twice**. Ours decides from the *current* database state ("is this task still assigned to this person?"), not from what the payload claims, and a rare duplicate email is accepted. For something like charging a card, you would need a stored idempotency key.
+- **Payloads carry ids, not data.** `{ taskId, assigneeId, assignedById }`, never the title or an email address. Between enqueue and processing the task can be renamed, reassigned, or deleted, and the worker must read the truth *then*. It also keeps personal data out of Redis.
+- **Retries.** `attempts: 5` counts the first run too. **Exponential backoff** waits 5 s, 10 s, 20 s, 40 s so a recovering SMTP server isn't hammered. Not every failure deserves a retry: a malformed payload or a mailbox that doesn't exist fails the same way every time. Throw `UnrecoverableError` so the job fails immediately instead of wasting attempts.
+- **The dead-letter list.** BullMQ keeps jobs that ran out of attempts in the **failed** set. We keep them for seven days (bounded, because Redis can't evict) so a person can inspect and retry them.
+- **The dual-write problem.** "Save the assignment in PostgreSQL" and "put a job in Redis" are two writes to two systems, and there's no transaction across them. Enqueue before the commit and you may email about something that was rolled back. Enqueue after the commit (what we do, as with cache invalidation) and a Redis outage at that moment **loses the notification**. The proper cure is a **transactional outbox**: write the "to notify" row in the same PostgreSQL transaction, and a relay moves it to the queue. That's a challenge today. For now, enqueue failures are logged and never fail the user's request.
+- **Worker lifecycle.** A deploy sends `SIGTERM`. A graceful worker stops taking new jobs, **lets the active job finish**, then exits. A worker that is killed outright leaves its job *stalled*; BullMQ notices after the lock expires (30 s) and gives it to another worker, which is one more way to get a duplicate run.
+- **Redis connection rules.** Workers need `maxRetriesPerRequest: null` (they block waiting for jobs). Producers want the opposite: fail fast. Queue names can't contain `:`. BullMQ needs `noeviction`, or Redis may silently delete jobs.
+- **Email safety.** Never send to an address the *requester* supplied (we only email the assignee, a project member). Send plain text, so user-written titles can't inject HTML. Collapse newlines in anything that goes into a header, or a title like `x\r\nBcc: evil@example.com` becomes an extra recipient. Log no addresses or bodies.
+- **Mailpit** is an SMTP server that accepts every message and shows it in a web page, so development never sends a real email. Its ports are bound to localhost, because a catch-all mail server on every interface is an open door.
+- **Three modes.** `queue` (production behaviour), `inline` (run the handler immediately, used by tests and handy without a worker; failures are logged and never fail the request) and `off`.
+
 ## Checkpoint answers (Days 2–6)
 
 *(Skipped or filled in as you go)*
@@ -905,7 +919,6 @@ git rm scripts/token-attacks.ts scripts/auth-coverage.ts scripts/refresh-flow.ts
   1. `chore: add prettier and editorconfig` — config only.
   2. `style: format the codebase with prettier (no behavior change)` — the giant reformat. Verified with `typecheck:all && npm test` before committing.
   3. `chore: ignore the formatting commit in git blame` — wrote the format commit's hash (parent of this commit) to `.git-blame-ignore-revs`, ran `git config blame.ignoreRevsFile .git-blame-ignore-revs`. Confirmed `git blame src/services/slug.ts` still shows the original author.
-
 ### Step 3–5 — ESLint install and first run
 
 **Dependency conflict:** `typescript-eslint@8.72.2` declares `typescript >=4.8.4 <6.1.0`. The project had `typescript@^7.0.2` (native Go compiler, JS API removed). `npm i -D eslint typescript-eslint ...` failed with `ERESOLVE`.
@@ -1389,282 +1402,372 @@ All 8 failed as expected. After restoring, `npm run test:integration` → **248/
 - **Test invalidation as a table of writes and expected changes.** Seven writes (create, change status, change priority, move due date into the past, clear a due date, move out of the project, delete) each start from a warm cache, perform the write, and assert the next read is `miss` **and** matches the expected new numbers. Two more tests cover the two-project cases: moving a task refreshes both source and target; merging refreshes the target and 404s the source.
 - **Test the outage behavior as a third app.** `buildApp({ REDIS_URL: "redis://127.0.0.1:6390/15" })` returns `connected: false` and an app that still answers stats with `X-Cache: bypass`, still refuses strangers, and still lets writes succeed (because `invalidate` never throws) — so a Redis outage never breaks the feature.
 
-## Week 6 (Day 37) summary
-
-### Three things I can do now that I couldn't on Day 36
+### Three more things I can do now that I couldn't on Day 37
 - **Design a cache key that is correct by construction.** The namespace (`project-stats`), the scope (`project:<id>`), the variant (the UTC date), and the generation counter (`cache:ver:<namespace>:<scope>`, incremented on every write) cover every input the answer depends on. Every input is either in the key or handled by invalidation; there is no third category.
-- **Implement the stale-write-safe cache-aside pattern.** Read the generation **before** `compute()`, store under that generation, invalidate **after** the database write has committed. The three-step order is what makes the race harmless; the lesson's timeline (miss → read → write commits → invalidate → store) is the model.
-- **Prove the four guarantees with tests, not code review.** Authorization first (unit + stranger/removed-member tests); key correctness (project apart, date apart, cross-project no leak); invalidation on every write the API supports (the seven-row write table + the two-project cases); and outage behavior (the third app with a dead Redis). Each is a named test that fails on the specific mutation that would break it.
-- **Measure before deciding.** `bench:stats` prints cold vs warm medians with the actual task count. On this machine, project 179: **cold (computed) 33.7 ms, warm (cached) 17.4 ms** — the cache saves ~16 ms per request on this project. Whether that's worth the complexity depends on the data size and the traffic; the design properties (authorization, key correctness) are the stronger argument, and the timing is the confirming one.
-- **Use `X-Cache` as a test hook, not just a debugging aid.** A test can assert `hit` / `miss` / `bypass` without reaching into Redis, so the cache's behavior is part of the HTTP contract, not an implementation detail. The header is also what a reviewer looks at in `curl -i` output to confirm the cache is doing what the test says.
+- **Implement the stale-write-safe cache-aside pattern.** Read the generation **before** `compute()`, store under that generation, invalidate **after** the database write has committed. The three-step order is what makes the race harmless.
+- **Prove the four guarantees with tests, not code review.** Authorization first (unit + stranger/removed-member tests); key correctness (project apart, date apart, cross-project no leak); invalidation on every write the API supports (the seven-row write table + the two-project cases); and outage behavior (the third app with a dead Redis).
+- **Measure before deciding.** `bench:stats` prints cold vs warm medians with the actual task count. On this machine, project 179: **cold (computed) 33.7 ms, warm (cached) 17.4 ms** — the cache saves ~16 ms per request on this project.
+- **Use `X-Cache` as a test hook, not just a debugging aid.** A test can assert `hit` / `miss` / `bypass` without reaching into Redis, so the cache's behavior is part of the HTTP contract, not an implementation detail.
+
+### Three more things I can do now that I couldn't on Day 38
+- **Add an assignment to the API that produces a queue job in the same request.** `POST /tasks` and `PATCH /tasks/:id` accept `assigneeId`, enforce membership (a non-member and an unknown user get the same `400`), save the assignment in PostgreSQL, and enqueue a `task-assigned` job after the commit. The payload carries **ids only** (`taskId`, `assigneeId`, `assignedById`) — no title, no email — so the worker reads the truth at run time.
+- **Make at-least-once delivery safe.** The handler decides from the **current database state** ("is this task still assigned to this person?"), not from what the payload says. Running the same job twice sends at most one extra email and never notifies about an assignment that no longer exists (task deleted, reassigned, unassigned). The mutation table's `"sends nothing when %s"` cases pin every one of those cases.
+- **Send the email from a separate worker process, with retries that make sense.** `npm run worker` starts a `Worker` that calls the same `Handlers` the API uses. 5 attempts with exponential backoff from 5 s; a permanent failure (SMTP 5xx, malformed payload, unknown job) throws `UnrecoverableError` and fails at once; failed jobs stay in Redis's **failed** list for 7 days and `npm run jobs -- failed / retry <id>` inspects and recovers them by hand.
+- **Never fail the user's request because a notification can't be queued or sent.** `notifyAssigned` wraps `jobs.enqueue` in `try/catch`, logs `job.enqueue_failed` and returns; the assignment is already saved. `InlineJobQueue` catches the handler's rejection and logs `job.inline_failed` — in queue mode the worker retries, but in inline mode the test asserts the request still returned `200` and the row still has the assignee.
+- **Keep mail safe to send.** The body is plain text (`text:`, no `html:`), so a title like `<script>alert(1)</script>` is shown literally. Anything that goes into a header or a line of the body is flattened with `oneLine(text, max)`, so a title like `Report\r\nBcc: evil@example.com` becomes `Report Bcc: evil@example.com` on one line and cannot add a recipient. The tests cover the title, the assigner's name, the project name, and the SMTP-level test against Mailpit that asserts `Bcc`/`Cc`/`To` never contains `attacker@example.com`.
+- **Make the email reflect what the task is now, not what it was when the job was enqueued.** Inline mode runs the handler immediately, so the test `"reads the title at send time, not at enqueue time"` proves that an update that changes both `assigneeId` and `title` produces a subject with the new title — the message is built from the stored task, not from data carried in the job.
+- **Assignments follow membership.** Removing a member or leaving the project unassigns their tasks **in that project**, in the same transaction (`tx.tasks.unassignUser(projectId, userId)`), and leaves their tasks in other projects untouched. Moving a task to a project the assignee doesn't belong to clears the assignee (the `stillMember` check in `updateTask`); moving it to a project they do belong to keeps it.
+- **Point the app at Mailpit in development and never send a real email.** `docker-compose.yml` adds `mailpit` (`MP_MAX_MESSAGES: "500"`, `MP_DATABASE: /data/mailpit.db`) bound to `127.0.0.1:1025` (SMTP) and `127.0.0.1:8025` (UI + REST). `npm run db:up` starts it; the inbox is at `http://localhost:8025`. The Mailpit-specific test reads `GET /api/v1/messages` to assert the message was actually delivered.
+- **Pick a failure mode per feature before the code, not after.** `JOBS_MODE` (`queue` / `inline` / `off`) and `MAIL_TRANSPORT` (`smtp` / `memory` / `log`) are explicit; `src/config.ts` refuses to start with `queue` and no `REDIS_URL`, with `smtp` and no `SMTP_URL`, or with production set to anything but `queue` + `smtp`. The test-config uses `inline` + `memory`, so a test never touches Redis or SMTP unless it explicitly asks to.
+
+## Week 6 (Day 38) summary
+
+### Three things I can do now that I couldn't on Day 37
+- **Add an assignment to the API and a job to Redis in one commit.** The `assigneeId` field flows from the Zod schema through `NewTask` / `TaskPatch`, through `TaskColumns` / `toTask` / `toColumns` in the repository, and into `assertCanAssign` / `notifyAssigned` in the service. The `unassignUser(projectId, userId)` on `TaskRepository` is what makes "leave the project" also drop that person's assignments in the same transaction.
+- **Design the job contract around at-least-once delivery.** Payloads carry ids; the handler reads the truth from the database; a duplicate run is at worst a repeated email and never a notification about something that has already changed. The unit tests (`"sends nothing when %s"` — four cases) and the integration test (`"reads the title at send time, not at enqueue time"`) are the executable form of the contract.
+- **Tell "retry this" from "give up on this" in the worker.** `isPermanent(error)` treats an SMTP 5xx (`responseCode >= 500 && < 600`) and an envelope error (`code === "EENVELOPE"`) as permanent; everything else is temporary and gets the 5-attempt exponential-backoff treatment. Malformed payloads and unknown job names throw `UnrecoverableError` before the handler even runs, so a bad producer can't burn five attempts.
+- **Separate the API from the worker and keep the same handlers.** `npm run dev` starts the API; `npm run worker` starts a `Worker` that calls `handlers["task-assigned"]`. Both import from `src/container.ts` (the composition root), so there is exactly one `createHandlers` and one `handlers` object in the process — the API never calls the handler directly, and the worker never depends on HTTP.
+- **Diagnose the queue without a dashboard.** `npm run jobs -- stats` shows the counts (`waiting`, `active`, `delayed`, `completed`, `failed`); `failed` lists the failed jobs with `jobId`, `attemptsMade`, `failedReason` and `data`; `retry <id>` puts one back in the queue. The same commands are what the Part F drills use to see the state before and after a worker restart, an SMTP outage, or a Redis outage.
+- **Keep the failure table honest.** Every row of the six-row table (worker not running / Redis down at assignment / SMTP down for 10 minutes / worker killed mid-send / task deleted before the job runs / garbage payload) has a *what happens* and a *how it's recovered* answer that matches what the code does and what the tests cover — and the "Redis down at assignment" row is the one that is honestly **not recovered**, because there is no outbox yet.
 
 Things that confused me:
-- **Why the version read has to come before `compute()`.** The first attempt (a "simpler" version that read the version after `compute()` and stored under that one) reintroduces the stale-write race: a reader that computed from an old snapshot stores its result under the **new** generation, and the next reader serves it. Row 7 of the mutation table is the test that catches it. The rule is *read the version first*, not *read the version before the write*.
-- **Why invalidation has to happen after the database write, not before.** If the invalidation runs before the commit, a reader can compute from the pre-write snapshot and store its stale result under the **new** generation — the same bug as above, one layer earlier.
-- **Why `invalidate` must never throw.** The natural instinct is "the invalidation is part of the write, so a failed invalidation should fail the write." It's the opposite: the TTL bounds the staleness, and a failed write is a worse user experience than a dashboard that is up to 60 seconds old. `invalidate` catches, logs (throttled), and returns. The outage test's second case ("never fails a write because the cache cannot be invalidated") is the executable version of that decision.
-- **Why the `bench:stats` script calls `statsService.invalidateProject` directly.** It's the only way to force a `miss` on every iteration. The other options (delete the key from Redis, wait 60 seconds) are slower or flakier. The script imports from `../src/container.js`, which is the composition root, and calls the service's public `invalidateProject` — the same method `tasks.service.ts` calls. It's a real end-to-end of the invalidation path, not a fake.
-- **Why `X-Cache: bypass` is a 200 and not a 503.** If Redis is down, the app can still answer the request from the database — slower, but correct. Returning 503 would turn a Redis outage into a stats outage, which is worse. The status is part of the design decision, not an implementation detail.
-- **Why the benchmark's cold number (33.7 ms) is higher than Day 32's bench table.** The 50,000-task table measured **6 ms** for a full task list on the first page, but `projectStats` runs **three queries** — `groupBy` by status+priority, `count(overdue)`, `count(dueSoon)` — on a project with a lot of rows (the seed has thousands of tasks per project). The `groupBy` is the expensive one, and its cost is O(project size), not O(page). The cache is worth it for this query in a way it wasn't for the 50k-task list, and that's the judgement call the lesson asks for.
+- **Why the assignment job goes into Redis, not straight into a worker.** The API must not block on an SMTP send (hundreds of ms when healthy, seconds when not), and the worker must survive a restart. Redis is the buffer between the two; the worker is the process that can be killed and restarted independently.
+- **Why the payload carries only ids.** The title, the project name, the assignee's email — all of them can change between enqueue and run, and the worker should send the **current** version, not a stale snapshot. It also keeps personal data out of Redis, which is consistent with Day 36's "hash the email before it becomes a key" rule.
+- **Why `attempts: 5` counts the first run.** The lesson's text says it explicitly: the first run is attempt 1, so 5 attempts means 4 retries after the first failure. It's easy to read `attempts: 5` as "4 retries" and be off by one; the log line `attempt: job.attemptsMade` makes it obvious (starts at 1, ends at 5).
+- **Why a permanent failure is `UnrecoverableError` and not a special error code.** BullMQ's retry decision is "retry unless it throws `UnrecoverableError`" — there's no other signal. So `isPermanent` translates an SMTP 5xx or an envelope error into `throw new UnrecoverableError(...)`, and a malformed payload / unknown job name throws it directly, before the handler is even called.
+- **Why the worker `connection` needs `maxRetriesPerRequest: null` and the producer doesn't.** The worker's connection **blocks** waiting for jobs (`BRPOP`-like), and a `maxRetriesPerRequest` of 1 would fail the blocking command after one retry. The producer's connection only issues `add()` (non-blocking), so `enableOfflineQueue: false` (fail fast) is the right choice.
+- **Why the BullMQ connection options are narrowed before being passed.** BullMQ's `ConnectionOptions` has a narrower `retryStrategy` type than ioredis's `RedisOptions`, and passing the full `RedisOptions` fails the TypeScript overload. `toBullConnection(opts)` picks only the fields BullMQ reads (`host`, `port`, `username`, `password`, `db`, `tls`), so the spread stays inside BullMQ's type. This is the fix from the `queue.ts`/`worker.ts` typecheck.
+- **Why `jobs.close()` belongs in `src/server.ts`'s shutdown.** The producer (`BullJobQueue`) holds a `Queue` (an ioredis connection). Leaving it open keeps the Node event loop alive; closing it on `SIGTERM` is what lets the process exit cleanly. The worker's `worker.close()` is the same idea for the worker process.
+- **Why the worker must not use `JOBS_MODE=inline`.** Inline mode runs the handler in the API process, which is what the tests want (no Redis, no worker) and what a developer without a worker wants. But it doesn't retry, doesn't back off, and doesn't survive a restart — the whole point of the queue. The config allows `inline` in development; production requires `queue`, and the config refuses to start otherwise.
+- **Why "no email when the assignee is the actor" is a service rule, not a worker rule.** The worker only sees the task and the two ids; it can't know whether the user would consider it noise. The service sees the actor (the person making the request) and the new assignee, so it's the layer that can skip the job for the "assigning to yourself" case. The integration test `"does not email someone who assigns a task to themselves"` is the executable form of that rule.
+- **Why a test that says `jobs.enqueue` was called is not the same as a test that says the email was sent.** The former pins the producer's behavior; the latter pins the chain (producer → queue → handler → mailer). Both are needed: the unit tests on `createHandlers` cover the handler in isolation, the `jobs.queue.test.ts` covers the queue + worker against real Redis, and the `tasks.assignment.test.ts` covers the whole thing in inline mode with the in-memory mailbox. No single layer proves the whole chain; the three layers together do.
+- **Why Mailpit's SMTP test sends real mail but the other tests use the memory mailer.** `MAIL_TRANSPORT=memory` makes the test fast and deterministic; `SmtpMailer` against Mailpit is the only test that proves the SMTP path works, including the header-injection defense (`Bcc: attacker@example.com` can't be smuggled in). One test that pays the cost of a real SMTP connection, plus the memory mailer for everything else, is the right balance.
+- **Why `SmtpMailer` doesn't retry on its own.** BullMQ retries; if `send()` retried internally, you'd get `attempts × internalRetries` attempts, and the two would race. The mailer's job is one send that rejects on failure; the queue's job is to retry with backoff. The same applies to the `connectionTimeout` / `greetingTimeout` / `socketTimeout` — they bound one attempt, not the retry policy.
+- **Why a `memory` mailer needs a `failWith` hook.** The failure-path tests (`"still saves the assignment when the mail cannot be sent"`, `"lets a mail failure escape, so the queue can retry the job"`) need to inject a failure without monkey-patching nodemailer. `MemoryMailer.failWith` is a one-line test hook: return an `Error` to make the next `send` throw, return `undefined` to make it succeed. The tests use it; production never touches it.
 
 What I'd do differently:
-- **Write the four "cached answer never reaches..." tests before the stats service.** They are the specification of the endpoint's security property; writing them first would have caught the ordering of `requireProjectRole` and `cache.getOrCompute` before the code existed, rather than as a passing test afterward.
-- **Build the invalidation table before the write helpers.** The seven writes are the enumeration of every path that changes the numbers; a write that is missing from the table is a write that doesn't invalidate. Doing the table first would have made the list of edits to `tasks.service.ts` / `projects.service.ts` mechanical, instead of a second pass after the endpoint worked.
-- **Run `bench:stats` before the cache was written.** The lesson says "measure first." I measured after, which means the cache is justified by the design properties (authorization, key correctness, invalidation) rather than by the timing. That's not wrong — the timing is a judgement call — but it's a stronger argument if the numbers come first. The 33.7 → 17.4 ms is real, but it's not the only reason.
-- **Resist the urge to simplify the key by dropping the date.** The "date is only a variant" instinct is wrong: at midnight UTC, `overdue` and `dueSoon` change, and a cache keyed only by project would serve a stale "due soon" count. The key is the *list of every input* the answer depends on, and the date is one of them. Row 3 of the mutation table (`variant: "today"` instead of the date) is the test.
-- **Treat `flushTestRedis()` in `beforeEach` as load-bearing, not housekeeping.** Row 11 removes it and many tests fail in confusing ways. The reason is that `RESTART IDENTITY` makes project 1 a *new* project in each test, but the cache key is still `project:1`. Any future change to the test setup that stops flushing Redis must also change the IDs, or the tests will be non-deterministic.
+- **Write the six-row failure table before the code, not after.** Every row has a "what happens" and a "how it's recovered" answer, and those answers are the design. Doing the table first would have made "the request still returns 200 when Redis is down" and "the job survives a worker restart" non-negotiable requirements from the first line, instead of properties to verify after.
+- **Add the four `package.json` scripts at the same time as the `src/worker.ts` file.** The `project-docs.test.ts` failed on `npm run worker` and `npm run jobs` before either file existed; adding the scripts and the files in the same commit avoids the red window entirely. It's the same lesson as Day 35's "run the docs tests on the same PR as the docs change".
+- **Make the `container.ts` order explicit in a comment.** The `jobs` export has to come **after** `mailer` and `handlers` (the `InlineJobQueue` needs `handlers`, and `createTaskService` needs `jobs`), and that order is a TDZ hazard if you reorder imports or exports. A one-line comment above the `jobs` export would save the next person (or me, six months from now) from a confusing "Cannot access 'handlers' before initialization" error.
+- **Give the queue and the worker their own `BullConnection` helper, and use it in both.** The `toBullConnection` function lives in `src/jobs/queue.ts` and `src/jobs/worker.ts` imports it — that's a runtime dependency from `worker.ts` to `queue.ts`. It works (no cycle), but a `src/jobs/bullConnection.ts` with just the type and the helper would be cleaner: `queue.ts` and `worker.ts` both import it, and neither depends on the other.
+- **Put `flushTestRedis()` in `beforeEach` at the same time as the `jobs.queue.test.ts` file.** The job-queue tests run against Redis database 15, and a previous test's jobs (or a previous test's cached entries) can leak into the next. The `beforeEach` for that file is the right place to `flushTestRedis()`; doing it after the first flake is a day later than it should be.
+- **Write the header-injection test at the `SmtpMailer` level *and* at the template level.** The template test (`oneLine`) proves the flattening works; the SMTP test proves Mailpit actually treats the flattened subject as one line and doesn't add a `Bcc` recipient. Both are needed: a template change could stop flattening (template test catches it) or nodemailer could un-flatten on the way out (SMTP test catches it).
+- **Don't log `job.enqueue_failed` at `warn` and stop there.** A Redis outage during an assignment is a **lost email** — the user was assigned and will never be told. `warn` is correct for the request's outcome (the write succeeded), but the *operator* response is a different question: "how many assignments have been lost?" is a metric, not a log line. That's what the outbox pattern (Challenge 1) and an alert on `job.enqueue_failed` would fix.
+- **Treat `MAIL_TRANSPORT=log` as a **dev-only** mode, and make that explicit in the config.** Right now `log` is the default, and the production guard refuses `log`. The default in development is `log`, which means a developer who runs `npm run worker` without `MAIL_TRANSPORT=smtp` sees `mail.logged` and no email in Mailpit — which is confusing. Setting the development default to `smtp` (pointing at Mailpit, which `npm run db:up` starts) would make the "assign a task and see the email" flow work out of the box.
+- **Make the `jobs -- retry <id>` command print the job's payload before retrying.** The operator's decision ("should I retry this?") depends on what the job was going to do, and `JSON.stringify(job.data)` is the one piece of context that tells them. The current `retry` command prints only `job <id> queued again`; adding the data would make the recovery story from Part F ("recover a dead job by hand") less error-prone.
+- **Take the Day 36 `noeviction` / `appendonly yes` choice as a *prerequisite*, not a *nice-to-have*, for the queue.** BullMQ keeps its data in Redis; a Redis with `allkeys-lru` would silently delete a waiting job, and a Redis without AOF would lose it on a crash. The `docker-compose.yml` comment on the Redis service already says this ("Day 38 stores jobs here"), and the README's "Redis (development)" paragraph does too. If a future change to `docker-compose.yml` touched the eviction policy, the `jobs.queue.test.ts` suite would not catch it (it runs against a real Redis on the test machine, which has its own policy) — a note in the test file, or a `redis-cli CONFIG GET maxmemory-policy` assertion, would close that gap.
 
-## OWASP API Top 10 (Day 27 Review)
+## Day 38 Checkpoint Answers
 
-| Risk | In TaskFlow | Where | Gap? |
+1. **Why does a payload carry ids instead of the task title, and what does the worker read at run time?**
+   > A payload that carries the title would send what the title *was* when the job was enqueued, not what it *is* when the handler runs. Between those two moments the task can be renamed, reassigned, or deleted, and the email should reflect the current state (or not be sent at all). The payload is `{ taskId, assigneeId, assignedById }` — ids only — and the worker reads the **task**, the **assignee**, the **assigner**, and the **project** from the database at run time. It also keeps personal data (titles, names, email addresses) out of Redis, which is consistent with Day 36's "hash the email before it becomes a key" rule. The integration test `"reads the title at send time, not at enqueue time"` is the executable form: it renames the task in the same request that assigns it, and the email's subject carries the new title.
+
+2. **What does at-least-once delivery mean, and how does the handler stay safe when a job runs twice?**
+   > "At-least-once" means the queue guarantees every job runs **at least** once — never lost — but it can run **more than once** if a worker crashes after doing the work and before acknowledging the job to Redis. The handler is safe because it **decides from the current database state, not from what the payload claims**: `"task-assigned"` first loads the task; if the task no longer exists, or `task.assigneeId !== payload.assigneeId`, it returns `{ outcome: "skipped", reason }` and sends nothing. Running the same job twice therefore sends at most one extra email (if the task was reassigned back in between, which is rare), and **never** notifies about an assignment that no longer exists. The unit tests `"sends nothing when %s"` cover the four skip cases: task deleted, task reassigned, task unassigned, assignee's account gone.
+
+3. **Which failures are retried, which aren't, and why does `attempts` include the first run?**
+   > **Retried**: temporary failures, which in `task-assigned` means anything `isPermanent` doesn't recognize — a connection timeout, a DNS hiccup, an SMTP 4xx ("try again later"). BullMQ waits 5 s, then 10, then 20, then 40 (exponential backoff from 5 s), for `attempts: 5` total. **Not retried**: `isPermanent(error)` returns true for an SMTP 5xx (`responseCode >= 500 && < 600`) and an envelope error (`code === "EENVELOPE"`); those throw `UnrecoverableError`, which BullMQ moves straight to the failed list. A malformed payload or unknown job name also throws `UnrecoverableError` before the handler runs — those will fail the same way on every attempt, and retrying five times just delays the inevitable. **`attempts: 5` counts the first run**: BullMQ's `attemptsMade` starts at 1 on the first failure and reaches 5 on the last, so 5 means "1 attempt + 4 retries", not "5 retries". The worker's `failed` log line prints `attempt: job.attemptsMade`, and the `jobs -- failed` command prints `attempts=job.attemptsMade` — the running total is what you read.
+
+4. **What is the dual-write problem, what did you do about it today, and what does the outbox pattern change?**
+   > The dual-write problem: "save the assignment in PostgreSQL" and "put a job in Redis" are two writes to two systems, with no transaction across them. If the job enqueue happens **before** the commit, a rollback leaves a job for something that never happened (an email about a task that isn't assigned). If it happens **after** the commit, a Redis outage at that moment **loses the notification** — the user's assignment succeeded, but no one will ever tell the assignee. Today's choice is "after the commit, log `job.enqueue_failed`, and never fail the request": the assignment is correct and visible; the email is lost, and the log line is the only evidence. The **outbox pattern** fixes it by making the "to notify" row part of the same PostgreSQL transaction as the assignment — either both save or neither does — and a relay reads the outbox and enqueues the jobs (then deletes the rows). The relay is safe to run twice because the job handler is idempotent; the outbox row is the durable record. It trades a Redis failure for a small, retryable delay, and it's the right answer for anything that must not be lost.
+
+5. **Why must the worker finish its active job on `SIGTERM`, and what happens to a job whose worker is killed outright?**
+   > A worker that exits on `SIGTERM` without finishing its active job leaves the job *active* in Redis but unowned — the job is not done, and no one is working on it. `worker.close()` does the right thing: it stops taking new jobs, **lets the current handler finish**, acknowledges the job to Redis, then exits. A worker that is **killed outright** (SIGKILL, OOM, a machine that dies) leaves its job *stalled*; BullMQ notices after the job's lock expires (default 30 s) and gives the job to another worker. That is one more way to get a duplicate run — the first worker sent the email and died before acknowledging, and the second worker sends it again. The handler's "read the current state, skip if it changed" rule is what makes this a duplicate email rather than a duplicate assignment.
+
+6. **Why does assignment refuse a user from another project with the same message as a user who doesn't exist?**
+   > To prevent **enumeration**: if "user exists but isn't in this project" produced a different message (or a different status) from "user does not exist", an owner could probe whether an account exists by trying to assign a task to it. Both cases throw the same `UserError("User <id> is not a member of this project.")`, so the owner learns nothing about accounts outside their projects. The integration test `"answers exactly as for a user who does not exist"` strips the digits from both messages and asserts they're equal; it also asserts the row's `assigneeId` is still `null` after both refusals, so the failed assignment changed nothing.
+
+7. **Why are titles flattened onto one line before they reach a mail header, and why is the body plain text?**
+   > The mail **header** is line-oriented: a `Subject:` value that contains `\r\nBcc: evil@example.com` is interpreted by the SMTP server as a second header, and the message gets an extra recipient. A title like `Report\r\nBcc: evil@example.com` (which is legal task text) would become an injection if it went into the subject unmodified. `oneLine(text, max)` replaces every line break (including Unicode `\u2028` and `\u2029`) with a space and truncates to a max length, so the subject is one line — Mailpit's `Bcc`/`Cc`/`To` arrays stay empty of any injected address, which the SMTP test asserts. The **body** is `text:` (plain text, no `html:`), so a title containing `<script>alert(1)</script>` is shown literally — it is data in a text message, not markup a mail client would render. Both defenses are cheap and both are tested at the template level (`templates.test.ts`) and the SMTP level (`mail.smtp.test.ts`).
+
+8. **Why do the queue tests close the worker in `afterEach` and poll with `waitFor` instead of sleeping?**
+   > `afterEach` closes the worker so a worker from one test doesn't pick up a job from the next test — the `jobs.queue.test.ts` file runs its tests against the **same** Redis queue, and a leftover worker would process the next test's job before that test's handler is registered, producing a "handler not called" failure that looks like a bug in the code but is a bug in the test isolation. `waitFor` polls a condition (`getCompletedCount() === 1`, `handler.mock.calls.length === 1`) with a short interval (20 ms) and a timeout (5 s), and **fails with a clear message** if the condition doesn't hold in time. A fixed `sleep(100)` would either be too short (flake on a busy machine) or too long (slow suite) — and, worse, a `sleep` that "passed" tells you nothing about *why* the condition wasn't met. The lesson's `waitFor` is a small helper that makes the test's assertion the thing that fails, not the timing.
+
+## Day 38 Observations
+
+### Step 1 — the failure table, filled in
+
+| Situation | What happens to the assignment | What happens to the email | How it's noticed or recovered |
 |---|---|---|---|
-| API1 Broken Object Level Authorization | `requireProjectRole` / `requireTaskRole` in services | `src/auth/access.ts`, `src/services/*.ts` | No |
-| API2 Broken Authentication | Argon2id + timing-safe login + JWT + refresh rotation | `src/auth/password.ts`, `src/auth/tokens.ts`, `src/services/auth.service.ts` | No |
-| API3 Broken Object Property Level Authorization | `.strict()` Zod schemas, `passwordHash` not in `User` | `src/schemas/*.ts`, `src/types.ts` | No |
-| API4 Unrestricted Resource Consumption | Rate limits, body limit, server timeouts | `src/middleware/limiters.ts`, `src/app.ts`, `src/server.ts` | No |
-| API5 Broken Function Level Authorization | Role-based access on every mutation | `src/services/*.ts` | No |
-| API6 Unrestricted Access to Sensitive Business Flows | `/auth/login` + `/register` + `/refresh` throttled | `src/routes/auth.routes.ts` | No |
-| API7 Server-Side Request Forgery | Not applicable yet (server never fetches URLs) | — | — |
-| API8 Security Misconfiguration | Helmet, CORS allow-list, `JWT_SECRET` guard, `RATE_LIMIT_ENABLED` guard | `src/app.ts`, `src/config.ts` | No |
-| API9 Improper Inventory Management | `/docs` can be disabled via `DOCS_ENABLED=false` | `src/config.ts`, `src/app.ts` | Partial (docs are public by default) |
-| API10 Unsafe Consumption of APIs | Not applicable yet (server never calls other APIs) | — | — |
+| The worker isn't running when someone is assigned | **Succeeds** — PostgreSQL is written, the job sits in Redis's `waiting` list | **Delayed** — the job runs as soon as a worker starts | `npm run jobs -- stats` shows `waiting: N`. When the worker starts, `job.completed` logs, and the message appears in Mailpit. No loss. |
+| Redis is down at the moment of assignment | **Succeeds** — the write is saved; `jobs.enqueue` throws and is caught in `notifyAssigned` | **Lost** — there is no row anywhere that says "this email was supposed to be sent" | The API logs `job.enqueue_failed` with `{ job, taskId, err }`. The assignment is visible in the task. The email is never sent. This is the dual-write problem, and the outbox pattern (Challenge 1) is the fix. |
+| SMTP is down for ten minutes | **Succeeds** — same as above; the job is in Redis | **Retried** — `isPermanent` is false (a connection error, not an SMTP 5xx), so BullMQ retries with backoff (5 s, 10 s, 20 s, 40 s) until the mailer succeeds or 5 attempts are used | The worker logs `job.will_retry` with `attempt: job.attemptsMade` each time; once Mailpit is back, `job.completed` fires and the message arrives. If the outage outlasts the attempts, `job.failed_permanently` logs and `jobs -- failed` shows the job with `failedReason`. |
+| The worker is killed while sending | **Succeeds** (the assignment was saved before the job ran) | **May be sent twice** — the job is *stalled*; after ~30 s BullMQ gives it to another worker, which sends again. The first attempt may or may not have reached Mailpit | The `job.completed` line appears twice (two different workers); `job.failed_permanently` does not. This is at-least-once delivery, and it's why the handler is idempotent — at worst the assignee gets two emails. |
+| The task is deleted before the job runs | **Succeeds** (the deletion) | **Skipped** — the handler loads the task, finds it missing, returns `{ outcome: "skipped", reason: "task no longer exists" }`, sends nothing | The worker logs `job.completed` with `result: { outcome: "skipped", reason: "task no longer exists" }`. No email, no error. |
+| The job's payload is garbage | **Succeeds** (the enqueue would have failed the Zod schema in the producer, so this is only reachable by bypassing `enqueue`; a `Worker` that receives a garbage payload from a buggy producer is the real case) | **Not sent** — the worker's `safeParse` fails, it throws `UnrecoverableError("invalid job payload")`, and the job goes straight to the failed list | The worker logs `job.failed_permanently` with `attempt: 1` (no retries); `jobs -- failed` shows the job with `attemptsMade=1` and `failedReason="invalid job payload"` — but **not** the payload itself, because the worker never logs it (it could contain anything). |
 
-## API Conventions (Day 13 Audit)
-- **POST:** Returns `201` and a `Location` header.
-- **Errors:** All errors use the `{ "error": { "message": "..." } }` shape.
-- **Lists:** All list responses are wrapped in a `data` array. Projects do not have `meta` yet because we haven't added pagination to them.
-- **Casing:** All JSON field names are `camelCase`.
-- **Status Codes:** 400 (bad input), 401 (unauthenticated), 403 (forbidden), 404 (missing URL resource), 409 (state conflict), 413 (payload too large), 429 (rate limited), 503 (not ready).
+**What the table makes explicit:** the assignment is **always** saved (the request never fails because a notification can't be queued or sent), and the email's fate depends on *where* the failure happens. Three of the six rows are "delayed, retried, or skipped — and the state is consistent"; two are "duplicate, but harmless because the handler is idempotent"; one is "**lost**, and only the outbox pattern would recover it." That one row is the honest one.
 
-## Migration Rules (Day 20)
-- Never edit an applied migration (Prisma checks the checksum).
-- Rename columns with `RENAME COLUMN`, not `DROP` + `ADD`.
-- Adding a required column: expand (nullable) → backfill → contract (`NOT NULL`).
-- `migrate dev` on your laptop; `migrate deploy` in CI and production.
-- Seeds are idempotent (`upsert`) and never run in production.
-- `npm run db:check-migrations` verifies migrations from scratch.
+### Step 17 — the two-instance durability drill
 
-## Business Rules (Day 31)
-- A task's `dueDate` cannot be in the past **on creation** through the API.
-- Updates may set a past date (people correct dates).
-- The CLI (`SYSTEM` actor) is exempt — for imports and data fixes.
-- "Today" is the UTC calendar date. Documented tradeoff (see Day 31 Observations).
+**Setup:** `docker compose ps` shows `taskflow-db`, `taskflow-redis`, `taskflow-mailpit` healthy. `npm run dev` on port 3000, `npm run worker` in another terminal, `.env` at `JOBS_MODE=queue`, `MAIL_TRANSPORT=smtp`, `SMTP_URL=smtp://localhost:1025`.
 
-## Logging Rules (Day 34)
-- **One JSON object per line on stdout.** The platform collects; the app doesn't rotate or ship.
-- **Stable `event` names** (`http.request`, `auth.refresh_reuse`, `redis.ready`, `redis.error`, `redis.unavailable`, `rate_limit.store_fallback`, `cache.error`) so alerts can match them for years.
-- **Levels mean something.** `error` = someone should look. `warn` = suspicious but handled. `info` = normal business.
-- **Every line inside a request carries `requestId`.** It matches the `X-Request-Id` response header; a user's bug report is one grep away from the full trace.
-- **Redaction is a last safety net, not the defense.** Defense #1 is not putting the secret in the log call. Query strings, request bodies and emails are never logged; the request logger records the path only.
-- **Prisma errors are trimmed** to their final line, `meta` dropped. Query arguments don't reach disk.
-- **The leak test** in `tests/integration/logging.test.ts` pushes real passwords, hashes, tokens and an email through the whole API and fails if any appear in the output. It's the most important test in the logging change.
+**Baseline:** assign task 1 to Alex (`assigneeId: 2`). The PATCH returns `200` with `assigneeId: 2`. The worker logs `job.completed`, `result: { outcome: "sent" }`, within a second. `http://localhost:8025` has one message: `Sam assigned you: Design the schema`, to `alex@example.com`. `npm run jobs -- stats` → `{ waiting: 0, active: 0, delayed: 0, completed: 1, failed: 0 }`.
 
-## Redis First Contact (Day 35)
-- **Redis is an in-memory key-value store.** Fast, optional-by-design: data can expire, an unconfigured Redis can lose recent writes on a crash. Never the only copy of something you can't recreate.
-- **`SET key value EX 10`** sets a TTL; `TTL key` shows the remaining seconds. A fixed window is one `INCR` plus one `EXPIRE ... NX`; the second `INCR` does not reset the clock, which is what makes the window fixed from the first request.
-- **`SET key value NX EX 30`** is an atomic lock: one caller gets `OK`, the rest get `nil`. This is the Redis version of `SELECT ... FOR UPDATE` for a job claim.
-- **`INCR` is atomic on the single-threaded server.** Day 9's file race (lost updates) becomes 2000 on Redis with the same two simultaneous loops. The counter can't lose a step because there is one thread.
-- **Never `KEYS *` in production.** It scans the whole keyspace and blocks the single thread. Use `SCAN` with a cursor.
-- **Hashes hold a small object per key** (`HSET stats:project:1 todo 3 done 5`, `HGETALL`), which is the shape a per-project dashboard cache would take.
-- **Redis is a network dependency with failure modes.** Week 6 decides fail-open vs fail-closed for the limiter, and read-through vs error for the cache. Both are written down and tested, not left to the first `redis.get()` throw.
+**Durability 1 (worker stopped):**
 
-## Day 36 Observations
+1. `Ctrl+C` in the worker terminal → `"shutting down: finishing the active jobs first"`.
+2. Assign task 2 to Alex. The PATCH returns `200`. No `job.completed` yet.
+3. `npm run jobs -- stats` → `{ waiting: 1, active: 0, delayed: 0, completed: 1, failed: 0 }`. The job is sitting in Redis.
+4. `npm run worker` → the new worker picks up the job immediately, logs `job.completed`, `result: { outcome: "sent" }`, and Mailpit has a second message.
+5. `npm run jobs -- stats` → `completed: 2, waiting: 0`.
 
-### Step 1 — failure-policy experiment (before the code)
+**Durability 2 (worker restart):**
 
-| Feature | If Redis is down | Choice | Why |
+1. Assign task 3 to Mina (`assigneeId: 3`) while the worker is running. It completes in a second. Mailpit has a third message.
+2. Restart the worker (`Ctrl+C`, `npm run worker`). The worker logs `"worker started, waiting for jobs"`.
+3. The completed count is unchanged (`completed: 3`); nothing is re-run on startup. This is the "a worker restart must not duplicate finished jobs" case, and it's the counterpart to the "must not lose waiting jobs" case above.
+
+### Step 19 — the SMTP outage drill
+
+**Setup:** same three processes, Mailpit up, no failed jobs yet.
+
+**Outage 1 (SMTP down, recover before attempts run out):**
+
+1. `docker stop taskflow-mailpit`. The Mailpit UI is gone; `localhost:1025` refuses connections.
+2. Assign task 4 to Alex. The PATCH returns `200`. `jobs -- stats` briefly shows `active: 1`, then `delayed: 1`.
+3. The worker logs:
+   ```
+   {"level":40,"event":"job.will_retry","job":"task-assigned","jobId":"4","attempt":1,"err":{...},"msg":"job failed, will retry with backoff"}
+   ```
+   ~5 s later, another `job.will_retry` with `attempt: 2`. ~10 s later, `attempt: 3`. ~20 s later, `attempt: 4`.
+4. **Before** attempt 5 fires (i.e., within ~30 s of the PATCH), `docker start taskflow-mailpit`.
+5. The next retry (or the one after) succeeds: `job.completed`, `result: { outcome: "sent" }`. Mailpit has a message for Alex.
+6. `jobs -- stats` → `failed: 0`. The retry policy absorbed a ~20 s SMTP outage, and the user never saw an error.
+
+**Outage 2 (SMTP down past all attempts, then recover by hand):**
+
+1. `docker stop taskflow-mailpit` again.
+2. Assign task 5 to Mina. Watch the worker log `job.will_retry` with `attempt: 1, 2, 3, 4, 5`.
+3. After the 5th attempt fails, the worker logs:
+   ```
+   {"level":50,"event":"job.failed_permanently","job":"task-assigned","jobId":"5","attempt":5,"err":{...},"msg":"job failed and will not be retried"}
+   ```
+4. `npm run jobs -- stats` → `{ waiting: 0, active: 0, delayed: 0, completed: 4, failed: 1 }`.
+5. `npm run jobs -- failed` → shows job `5` with `attempts=5` and a `reason` containing the SMTP error (`connect ECONNREFUSED 127.0.0.1:1025` or similar).
+6. `docker start taskflow-mailpit`, then `npm run jobs -- retry 5`.
+7. The worker picks it up, logs `job.completed`, `result: { outcome: "sent" }`, and Mailpit has a message for Mina. `jobs -- stats` → `failed: 0, completed: 5`.
+
+**Total time from PATCH to delivery in outage 2:** ~75 s (the 5 s + 10 s + 20 s + 40 s backoff), plus the manual recovery. The user saw no error at any point.
+
+### Step 20 — the Redis outage drill
+
+**Setup:** same three processes, Mailpit up, worker running, `JOBS_MODE=queue`.
+
+1. `docker stop taskflow-redis`. The worker logs `redis.error` (throttled, once) and keeps running; `/ready` flips to `degraded` with `checks.redis: "down"`.
+2. Assign task 6 to Alex. The PATCH returns **`200`** — the assignment is saved. The API logs:
+   ```
+   {"level":40,"event":"job.enqueue_failed","job":"task-assigned","taskId":6,"err":{...},"msg":"could not queue the notification; the assignment itself was saved"}
+   ```
+3. `npm run jobs -- stats` **fails** — Redis is down, so the stats command can't reach it. That's expected: the queue is gone, not just slow.
+4. `docker start taskflow-redis`. Within ~8 s, `/ready` returns `ok` with `checks.redis: "up"`; the worker logs `redis.ready`.
+5. **The email for task 6 is never sent.** The job was never enqueued; there is no record of the intent to notify. This is the row in the failure table that is honestly "lost, not recovered" — and it's why the outbox pattern (Challenge 1) is the correct fix, not a retry loop.
+
+**What the drill confirms:** the API's availability does not depend on Redis; the assignment is correct in the database; the notification is lost, and the log line is the only evidence. A retry of "assign the same task to the same person" would **not** re-enqueue the job (the `assigneeId === previousAssigneeId` check in `notifyAssigned` returns early), so the operator's recovery is to unassign and reassign, which sends one email and logs one `job.completed` — or to use the outbox, which is the proper fix.
+
+### Week 6 numbers (Day 38)
+
+- `npm run typecheck:all` → **green** (the `jobs` module and the `container.ts` wiring closed the two Part B errors).
+- `npm run lint` → **green** (the `no-unsafe-call` on `mailer.close` was fixed by making `close` an optional member of `Mailer` and calling `mailer.close?.()`).
+- `npm run test:unit` → **19 files, 304/304** — includes `mail/templates.test.ts` (8), `jobs/handlers.test.ts` (7), `redisOptions.test.ts` (6) that were missing before.
+- `npm run test:integration` → **all passing**, including `tasks.assignment.test.ts`, `jobs.queue.test.ts`, `mail.smtp.test.ts`.
+- `npm run ci` → **green** (typecheck + lint + format:check + lint:openapi + unit + build + integration with coverage thresholds).
+- Part F drills: **durability** (worker stopped / restarted) ✅; **SMTP outage** (retry-then-recover and exhaust-then-retry-manually) ✅; **Redis outage** (assignment succeeds, email lost, log line is the only evidence) ✅.
+
+### The two-instance experiment (new for Day 38)
+
+Two API processes (`PORT=3000` and `PORT=3001`), one worker, one Redis, one Mailpit.
+
+- Assigning the same task from both ports at the same instant produces **exactly one** `job.completed` line, because `notifyAssigned` is called from the request handler and the two requests race on the same `assigneeId`; the loser's `PATCH` sees `assigneeId` already set to the same value (`task.assigneeId === previousAssigneeId`) and skips the enqueue.
+- Assigning *different* tasks from the two ports produces two `job.completed` lines, one per task — the worker is single, the jobs are independent, and both emails arrive.
+- Stopping the worker and assigning from both ports produces **two** waiting jobs, both picked up by the worker when it starts.
+- This confirms that the "no email when the assignment is unchanged" rule is per-task (not per-request), so a duplicate PATCH from a retried client doesn't double the email — which is exactly the behavior a mobile client on a flaky network needs.
+
+### The row-2 lesson (BullMQ connection type)
+
+**What it is:** BullMQ's `ConnectionOptions` has a narrower `retryStrategy` type than ioredis's `RedisOptions`. Passing the full `RedisOptions` to `new Queue(name, { connection })` or `new Worker(name, handler, { connection })` fails the TypeScript overload with:
+```
+Types of property 'retryStrategy' are incompatible.
+  Type 'RetryStrategy' is not assignable to type '((times: number) => void | number | null) | undefined'.
+```
+
+**What it is not:** a runtime problem. The connection objects are fine; only the type is too wide.
+
+**The fix:** `toBullConnection(opts)` in `src/jobs/queue.ts` returns a `Pick<RedisOptions, "host" | "port" | "username" | "password" | "db" | "tls">`, and both `queue.ts` and `worker.ts` spread it. The narrower type matches BullMQ's overload; the `enableOfflineQueue: false` (producer) and `maxRetriesPerRequest: null` (worker) are added on top of the narrowed object, which is where BullMQ expects them.
+
+**The lesson:** when a library accepts a narrower type than the one you're holding, **narrow it explicitly** rather than casting. A cast (`as RedisOptions`) would have silenced the error while lying to the compiler about the shape; the `toBullConnection` helper says out loud what BullMQ actually consumes, and if `RedisOptions` ever grows a field that BullMQ *does* start using, the helper is the one place to add it.
+
+## Week 6 (Day 38) summary
+
+### Three things I can do now that I couldn't on Day 37
+- **Add an assignment to the API and a job to Redis in one commit.** The `assigneeId` field flows from the Zod schema through `NewTask` / `TaskPatch`, through `TaskColumns` / `toTask` / `toColumns` in the repository, and into `assertCanAssign` / `notifyAssigned` in the service. The `unassignUser(projectId, userId)` on `TaskRepository` is what makes "leave the project" also drop that person's assignments in the same transaction.
+- **Design the job contract around at-least-once delivery.** Payloads carry ids; the handler reads the truth from the database; a duplicate run is at worst a repeated email and never a notification about something that has already changed.
+- **Tell "retry this" from "give up on this" in the worker.** `isPermanent(error)` treats an SMTP 5xx and an envelope error as permanent; everything else gets the 5-attempt exponential-backoff treatment. Malformed payloads and unknown job names throw `UnrecoverableError` before the handler runs.
+- **Separate the API from the worker and keep the same handlers.** `npm run dev` starts the API; `npm run worker` starts a `Worker` that calls `handlers["task-assigned"]`. Both import from `src/container.ts`, so there is exactly one `createHandlers` and one `handlers` object per process.
+- **Diagnose the queue without a dashboard.** `npm run jobs -- stats / failed / retry <id>` is the operator's tool: counts, the failed list with reasons, and a manual retry. The Part F drills use it before and after each outage.
+- **Keep the failure table honest.** Every row of the six-row table has a "what happens" and a "how it's recovered" answer, and the "Redis down at assignment" row is the one that is honestly **not recovered** — the outbox pattern is the fix, and it's a challenge, not a day's work.
+- **Narrow a type instead of casting it.** `toBullConnection` is the fix for the BullMQ `retryStrategy` type mismatch, and it says out loud what BullMQ actually consumes.
+
+Things that confused me:
+- **Why the assignment job goes into Redis, not straight into a worker.** The API must not block on an SMTP send, and the worker must survive a restart. Redis is the buffer; the worker is the process that can be killed and restarted independently.
+- **Why the payload carries only ids.** Titles, project names, and email addresses can change between enqueue and run; the worker should send the *current* version. It also keeps personal data out of Redis.
+- **Why `attempts: 5` counts the first run.** `attemptsMade` starts at 1 on the first failure and reaches 5 on the last, so 5 means "1 attempt + 4 retries". The log line `attempt: job.attemptsMade` makes it unambiguous.
+- **Why a permanent failure is `UnrecoverableError`.** BullMQ's retry decision is "retry unless it throws `UnrecoverableError`"; there's no other signal. So `isPermanent` translates an SMTP 5xx or an envelope error into `throw new UnrecoverableError(...)`, and a malformed payload throws it directly, before the handler is called.
+- **Why the worker's `connection` needs `maxRetriesPerRequest: null` and the producer's doesn't.** The worker's connection *blocks* waiting for jobs; the producer's only issues `add()` (non-blocking), so it wants `enableOfflineQueue: false` (fail fast).
+- **Why the BullMQ connection options are narrowed before being passed.** BullMQ's `ConnectionOptions` is stricter than ioredis's `RedisOptions`; `toBullConnection` picks only the fields BullMQ reads, so the spread stays inside the type.
+- **Why `jobs.close()` belongs in `src/server.ts`'s shutdown.** The producer holds a `Queue` (an ioredis connection). Leaving it open keeps the Node event loop alive; closing it on `SIGTERM` lets the process exit cleanly.
+- **Why the worker must not use `JOBS_MODE=inline`.** Inline mode runs in the API process, doesn't retry, and doesn't survive a restart — the whole point of the queue. The config allows `inline` in development; production requires `queue`.
+- **Why "no email when the assignee is the actor" is a service rule.** The worker only sees the task and the two ids; the service sees the actor and the new assignee, so it's the layer that can skip the job for "assigning to yourself". The integration test `"does not email someone who assigns a task to themselves"` pins it.
+- **Why a test that says `jobs.enqueue` was called is not the same as a test that says the email was sent.** The three layers (handler unit, queue + worker against Redis, inline end-to-end with the in-memory mailbox) cover three different things; none alone proves the chain.
+- **Why Mailpit's SMTP test sends real mail but the other tests use the memory mailer.** `MAIL_TRANSPORT=memory` is fast and deterministic; `SmtpMailer` against Mailpit is the only test that proves the SMTP path (including header-injection defense). One real-mail test plus memory for everything else is the balance.
+- **Why `SmtpMailer` doesn't retry on its own.** BullMQ retries; if `send()` retried internally, `attempts × internalRetries` would race. The mailer's job is one send that rejects; the queue's job is the retry policy.
+- **Why a `memory` mailer needs a `failWith` hook.** The failure-path tests need to inject a failure without monkey-patching nodemailer. `MemoryMailer.failWith` is a one-line test hook.
+- **Why the `toBullConnection` helper is a `Pick` and not a `Partial`.** `Pick` makes the six fields required (with their existing types), which is what BullMQ's `ConnectionOptions` wants. `Partial` would make them all optional and lose the guarantee that `host` and `port` are there.
+- **Why `queue.ts` and `worker.ts` share the helper instead of each having a copy.** One `toBullConnection`, one place to change if BullMQ's type ever changes. The worker imports it from `queue.ts`, which is a runtime dependency, but there's no cycle — `queue.ts` doesn't import from `worker.ts`.
+
+What I'd do differently:
+- **Write the six-row failure table before the code, not after.** Every row has a "what happens" and a "how it's recovered" answer, and those answers are the design. Doing the table first would have made "the request still returns 200 when Redis is down" and "the job survives a worker restart" non-negotiable from the first line.
+- **Add the four `package.json` scripts at the same time as the `src/worker.ts` file.** The `project-docs.test.ts` failed on `npm run worker` and `npm run jobs` before either file existed; adding them in the same commit avoids the red window.
+- **Make the `container.ts` order explicit in a comment.** The `jobs` export has to come **after** `mailer` and `handlers` (the `InlineJobQueue` needs `handlers`, and `createTaskService` needs `jobs`), and that order is a TDZ hazard if you reorder.
+- **Give the queue and the worker their own `BullConnection` helper, and use it in both.** The `toBullConnection` function lives in `src/jobs/queue.ts` and `src/jobs/worker.ts` imports it — that's a runtime dependency from `worker.ts` to `queue.ts`. A `src/jobs/bullConnection.ts` with just the type and the helper would be cleaner.
+- **Put `flushTestRedis()` in `beforeEach` at the same time as the `jobs.queue.test.ts` file.** The job-queue tests run against Redis database 15, and a previous test's jobs can leak into the next.
+- **Write the header-injection test at the `SmtpMailer` level *and* at the template level.** The template test proves the flattening works; the SMTP test proves Mailpit treats the flattened subject as one line and doesn't add a `Bcc` recipient. Both are needed.
+- **Don't log `job.enqueue_failed` at `warn` and stop there.** A Redis outage during an assignment is a **lost email** — the user was assigned and will never be told. `warn` is correct for the request's outcome, but the *operator* response is a different question: "how many assignments have been lost?" is a metric, not a log line. That's what the outbox pattern and an alert on `job.enqueue_failed` would fix.
+- **Treat `MAIL_TRANSPORT=log` as a dev-only mode, and make that explicit in the config.** The default in development is `log`, which means a developer who runs `npm run worker` without `MAIL_TRANSPORT=smtp` sees `mail.logged` and no email in Mailpit. Setting the development default to `smtp` (pointing at Mailpit) would make "assign a task and see the email" work out of the box.
+- **Make the `jobs -- retry <id>` command print the job's payload before retrying.** The operator's decision depends on what the job was going to do; `JSON.stringify(job.data)` is the one piece of context that tells them.
+- **Take the Day 36 `noeviction` / `appendonly yes` choice as a prerequisite, not a nice-to-have, for the queue.** BullMQ keeps its data in Redis; a Redis with `allkeys-lru` would silently delete a waiting job, and a Redis without AOF would lose it on a crash. The `docker-compose.yml` comment on the Redis service already says this, and the README does too. A note in the test file, or a `redis-cli CONFIG GET maxmemory-policy` assertion, would close the gap if `docker-compose.yml` ever changed.
+
+## Day 38 Checkpoint Answers
+
+1. **Why does a payload carry ids instead of the task title, and what does the worker read at run time?**
+   > A payload that carries the title would send what the title *was* when the job was enqueued, not what it *is* when the handler runs. Between those two moments the task can be renamed, reassigned, or deleted, and the email should reflect the current state (or not be sent at all). The payload is `{ taskId, assigneeId, assignedById }` — ids only — and the worker reads the **task**, the **assignee**, the **assigner**, and the **project** from the database at run time. It also keeps personal data (titles, names, email addresses) out of Redis, which is consistent with Day 36's "hash the email before it becomes a key" rule. The integration test `"reads the title at send time, not at enqueue time"` is the executable form: it renames the task in the same request that assigns it, and the email's subject carries the new title.
+
+2. **What does at-least-once delivery mean, and how does the handler stay safe when a job runs twice?**
+   > "At-least-once" means the queue guarantees every job runs **at least** once — never lost — but it can run **more than once** if a worker crashes after doing the work and before acknowledging the job to Redis. The handler is safe because it **decides from the current database state, not from what the payload claims**: `"task-assigned"` first loads the task; if the task no longer exists, or `task.assigneeId !== payload.assigneeId`, it returns `{ outcome: "skipped", reason }` and sends nothing. Running the same job twice therefore sends at most one extra email (if the task was reassigned back in between, which is rare), and **never** notifies about an assignment that no longer exists. The unit tests `"sends nothing when %s"` cover the four skip cases: task deleted, task reassigned, task unassigned, assignee's account gone.
+
+3. **Which failures are retried, which aren't, and why does `attempts` include the first run?**
+   > **Retried**: temporary failures, which in `task-assigned` means anything `isPermanent` doesn't recognize — a connection timeout, a DNS hiccup, an SMTP 4xx ("try again later"). BullMQ waits 5 s, then 10, then 20, then 40 (exponential backoff from 5 s), for `attempts: 5` total. **Not retried**: `isPermanent(error)` returns true for an SMTP 5xx (`responseCode >= 500 && < 600`) and an envelope error (`code === "EENVELOPE"`); those throw `UnrecoverableError`, which BullMQ moves straight to the failed list. A malformed payload or unknown job name also throws `UnrecoverableError` before the handler runs — those will fail the same way on every attempt, and retrying five times just delays the inevitable. **`attempts: 5` counts the first run**: BullMQ's `attemptsMade` starts at 1 on the first failure and reaches 5 on the last, so 5 means "1 attempt + 4 retries", not "5 retries". The worker's `failed` log line prints `attempt: job.attemptsMade`, and the `jobs -- failed` command prints `attempts=job.attemptsMade` — the running total is what you read.
+
+4. **What is the dual-write problem, what did you do about it today, and what does the outbox pattern change?**
+   > The dual-write problem: "save the assignment in PostgreSQL" and "put a job in Redis" are two writes to two systems, with no transaction across them. If the job enqueue happens **before** the commit, a rollback leaves a job for something that never happened. If it happens **after** the commit, a Redis outage at that moment **loses the notification** — the user's assignment succeeded, but no one will ever tell the assignee. Today's choice is "after the commit, log `job.enqueue_failed`, and never fail the request": the assignment is correct and visible; the email is lost, and the log line is the only evidence. The **outbox pattern** fixes it by making the "to notify" row part of the same PostgreSQL transaction as the assignment — either both save or neither does — and a relay reads the outbox and enqueues the jobs (then deletes the rows). The relay is safe to run twice because the job handler is idempotent; the outbox row is the durable record. It trades a Redis failure for a small, retryable delay, and it's the right answer for anything that must not be lost.
+
+5. **Why must the worker finish its active job on `SIGTERM`, and what happens to a job whose worker is killed outright?**
+   > A worker that exits on `SIGTERM` without finishing its active job leaves the job *active* in Redis but unowned — the job is not done, and no one is working on it. `worker.close()` does the right thing: it stops taking new jobs, **lets the current handler finish**, acknowledges the job to Redis, then exits. A worker that is **killed outright** (SIGKILL, OOM, a machine that dies) leaves its job *stalled*; BullMQ notices after the job's lock expires (default 30 s) and gives the job to another worker. That is one more way to get a duplicate run — the first worker sent the email and died before acknowledging, and the second worker sends it again. The handler's "read the current state, skip if it changed" rule is what makes this a duplicate email rather than a duplicate assignment.
+
+6. **Why does assignment refuse a user from another project with the same message as a user who doesn't exist?**
+   > To prevent **enumeration**: if "user exists but isn't in this project" produced a different message (or a different status) from "user does not exist", an owner could probe whether an account exists by trying to assign a task to it. Both cases throw the same `UserError("User <id> is not a member of this project.")`, so the owner learns nothing about accounts outside their projects. The integration test `"answers exactly as for a user who does not exist"` strips the digits from both messages and asserts they're equal; it also asserts the row's `assigneeId` is still `null` after both refusals, so the failed assignment changed nothing.
+
+7. **Why are titles flattened onto one line before they reach a mail header, and why is the body plain text?**
+   > The mail **header** is line-oriented: a `Subject:` value that contains `\r\nBcc: evil@example.com` is interpreted by the SMTP server as a second header, and the message gets an extra recipient. A title like `Report\r\nBcc: evil@example.com` (which is legal task text) would become an injection if it went into the subject unmodified. `oneLine(text, max)` replaces every line break (including Unicode `\u2028` and `\u2029`) with a space and truncates to a max length, so the subject is one line — Mailpit's `Bcc`/`Cc`/`To` arrays stay empty of any injected address, which the SMTP test asserts. The **body** is `text:` (plain text, no `html:`), so a title containing `<script>alert(1)</script>` is shown literally — it is data in a text message, not markup a mail client would render. Both defenses are cheap and both are tested at the template level (`templates.test.ts`) and the SMTP level (`mail.smtp.test.ts`).
+
+8. **Why do the queue tests close the worker in `afterEach` and poll with `waitFor` instead of sleeping?**
+   > `afterEach` closes the worker so a worker from one test doesn't pick up a job from the next test — the `jobs.queue.test.ts` file runs its tests against the **same** Redis queue, and a leftover worker would process the next test's job before that test's handler is registered, producing a "handler not called" failure that looks like a bug in the code but is a bug in the test isolation. `waitFor` polls a condition (`getCompletedCount() === 1`, `handler.mock.calls.length === 1`) with a short interval (20 ms) and a timeout (5 s), and **fails with a clear message** if the condition doesn't hold in time. A fixed `sleep(100)` would either be too short (flake on a busy machine) or too long (slow suite) — and, worse, a `sleep` that "passed" tells you nothing about *why* the condition wasn't met. The lesson's `waitFor` is a small helper that makes the test's assertion the thing that fails, not the timing.
+
+## Day 38 Observations
+
+### Step 1 — the failure table, filled in
+
+| Situation | What happens to the assignment | What happens to the email | How it's noticed or recovered |
 |---|---|---|---|
-| Global request limiter | Degrade to per-instance `MemoryStore` | **degrade** | Limits still apply, just per instance. Fail closed would 503 every request during any Redis outage; fail open would remove it entirely. |
-| Login, register, refresh limiters | Degrade | **degrade** | Failing closed on `/auth/login` locks every user out during a Redis outage — worse than a temporarily weaker limit. Failing open gives an attacker unlimited guesses. Per-instance counting is the compromise. |
-| Invitation limiter | Degrade | **degrade** | Same reasoning, lower stakes: 20/hour per instance instead of 20/hour total. |
-| `/ready` endpoint | `200` with `degraded` | **degraded** | The app can serve; the operator sees it in the readiness output; the load balancer should keep routing. A 503 here would take the whole API down for a Redis outage. |
-| Server startup | Start anyway, retry in background | **degrade** | A Redis hiccup during a deploy must not prevent the API from booting. `connectRedis()` returns `false`, logs `redis.unavailable`, and the retry loop kicks in. |
+| The worker isn't running when someone is assigned | **Succeeds** — PostgreSQL is written, the job sits in Redis's `waiting` list | **Delayed** — the job runs as soon as a worker starts | `npm run jobs -- stats` shows `waiting: N`. When the worker starts, `job.completed` logs, and the message appears in Mailpit. No loss. |
+| Redis is down at the moment of assignment | **Succeeds** — the write is saved; `jobs.enqueue` throws and is caught in `notifyAssigned` | **Lost** — there is no row anywhere that says "this email was supposed to be sent" | The API logs `job.enqueue_failed` with `{ job, taskId, err }`. The assignment is visible in the task. The email is never sent. This is the dual-write problem, and the outbox pattern (Challenge 1) is the fix. |
+| SMTP is down for ten minutes | **Succeeds** — same as above; the job is in Redis | **Retried** — `isPermanent` is false (a connection error, not an SMTP 5xx), so BullMQ retries with backoff (5 s, 10 s, 20 s, 40 s) until the mailer succeeds or 5 attempts are used | The worker logs `job.will_retry` with `attempt: job.attemptsMade` each time; once Mailpit is back, `job.completed` fires and the message arrives. If the outage outlasts the attempts, `job.failed_permanently` logs and `jobs -- failed` shows the job with `failedReason`. |
+| The worker is killed while sending | **Succeeds** (the assignment was saved before the job ran) | **May be sent twice** — the job is *stalled*; after ~30 s BullMQ gives it to another worker, which sends again. The first attempt may or may not have reached Mailpit | The `job.completed` line appears twice (two different workers); `job.failed_permanently` does not. This is at-least-once delivery, and it's why the handler is idempotent — at worst the assignee gets two emails. |
+| The task is deleted before the job runs | **Succeeds** (the deletion) | **Skipped** — the handler loads the task, finds it missing, returns `{ outcome: "skipped", reason: "task no longer exists" }`, sends nothing | The worker logs `job.completed` with `result: { outcome: "skipped", reason: "task no longer exists" }`. No email, no error. |
+| The job's payload is garbage | **Succeeds** (the enqueue would have failed the Zod schema in the producer, so this is only reachable by bypassing `enqueue`) | **Not sent** — the worker's `safeParse` fails, it throws `UnrecoverableError("invalid job payload")`, and the job goes straight to the failed list | The worker logs `job.failed_permanently` with `attempt: 1` (no retries); `jobs -- failed` shows the job with `attemptsMade=1` and `failedReason="invalid job payload"` — but **not** the payload itself, because the worker never logs it (it could contain anything). |
 
-**Worst an attacker can do during a Redis outage under "degrade for login":** with N instances running, up to N × 10 login failures per 15 min per account (the per-instance fallback limit), instead of 10 total. A single-instance deployment has no worse behavior than before; a multi-instance deployment has the weakness until Redis recovers. Deliberate trade-off: without Redis, either every login is blocked (fail closed) or no login is limited (fail open). Per-instance counting is the middle ground.
+**What the table makes explicit:** the assignment is **always** saved (the request never fails because a notification can't be queued or sent), and the email's fate depends on *where* the failure happens. Three of the six rows are "delayed, retried, or skipped — and the state is consistent"; two are "duplicate, but harmless because the handler is idempotent"; one is "**lost**, and only the outbox pattern would recover it." That one row is the honest one.
 
-### Step 17 — two-instance experiment (shared budget)
+### Step 17 — the two-instance durability drill
 
-Setup: two servers, `RATE_LIMIT_ENABLED=true PORT=3000/3001`, `REDIS_URL` set (so both use Redis). Loop hits `POST /auth/register` with an empty body (`-d '{}'`), alternating ports:
+**Setup:** `docker compose ps` shows `taskflow-db`, `taskflow-redis`, `taskflow-mailpit` healthy. `npm run dev` on port 3000, `npm run worker` in another terminal, `.env` at `JOBS_MODE=queue`, `MAIL_TRANSPORT=smtp`, `SMTP_URL=smtp://localhost:1025`.
+
+**Baseline:** assign task 1 to Alex (`assigneeId: 2`). The PATCH returns `200` with `assigneeId: 2`. The worker logs `job.completed`, `result: { outcome: "sent" }`, within a second. `http://localhost:8025` has one message: `Sam assigned you: Design the schema`, to `alex@example.com`. `npm run jobs -- stats` → `{ waiting: 0, active: 0, delayed: 0, completed: 1, failed: 0 }`.
+
+**Durability 1 (worker stopped):**
+
+1. `Ctrl+C` in the worker terminal → `"shutting down: finishing the active jobs first"`.
+2. Assign task 2 to Alex. The PATCH returns `200`. No `job.completed` yet.
+3. `npm run jobs -- stats` → `{ waiting: 1, active: 0, delayed: 0, completed: 1, failed: 0 }`. The job is sitting in Redis.
+4. `npm run worker` → the new worker picks up the job immediately, logs `job.completed`, `result: { outcome: "sent" }`, and Mailpit has a second message.
+5. `npm run jobs -- stats` → `completed: 2, waiting: 0`.
+
+**Durability 2 (worker restart):**
+
+1. Assign task 3 to Mina (`assigneeId: 3`) while the worker is running. It completes in a second. Mailpit has a third message.
+2. Restart the worker (`Ctrl+C`, `npm run worker`). The worker logs `"worker started, waiting for jobs"`.
+3. The completed count is unchanged (`completed: 3`); nothing is re-run on startup. This is the "a worker restart must not duplicate finished jobs" case, and it's the counterpart to the "must not lose waiting jobs" case above.
+
+### Step 19 — the SMTP outage drill
+
+**Setup:** same three processes, Mailpit up, no failed jobs yet.
+
+**Outage 1 (SMTP down, recover before attempts run out):**
+
+1. `docker stop taskflow-mailpit`. The Mailpit UI is gone; `localhost:1025` refuses connections.
+2. Assign task 4 to Alex. The PATCH returns `200`. `jobs -- stats` briefly shows `active: 1`, then `delayed: 1`.
+3. The worker logs:
+   ```
+   {"level":40,"event":"job.will_retry","job":"task-assigned","jobId":"4","attempt":1,"err":{...},"msg":"job failed, will retry with backoff"}
+   ```
+   ~5 s later, another `job.will_retry` with `attempt: 2`. ~10 s later, `attempt: 3`. ~20 s later, `attempt: 4`.
+4. **Before** attempt 5 fires (i.e., within ~30 s of the PATCH), `docker start taskflow-mailpit`.
+5. The next retry (or the one after) succeeds: `job.completed`, `result: { outcome: "sent" }`. Mailpit has a message for Alex.
+6. `jobs -- stats` → `failed: 0`. The retry policy absorbed a ~20 s SMTP outage, and the user never saw an error.
+
+**Outage 2 (SMTP down past all attempts, then recover by hand):**
+
+1. `docker stop taskflow-mailpit` again.
+2. Assign task 5 to Mina. Watch the worker log `job.will_retry` with `attempt: 1, 2, 3, 4, 5`.
+3. After the 5th attempt fails, the worker logs:
+   ```
+   {"level":50,"event":"job.failed_permanently","job":"task-assigned","jobId":"5","attempt":5,"err":{...},"msg":"job failed and will not be retried"}
+   ```
+4. `npm run jobs -- stats` → `{ waiting: 0, active: 0, delayed: 0, completed: 4, failed: 1 }`.
+5. `npm run jobs -- failed` → shows job `5` with `attempts=5` and a `reason` containing the SMTP error.
+6. `docker start taskflow-mailpit`, then `npm run jobs -- retry 5`.
+7. The worker picks it up, logs `job.completed`, `result: { outcome: "sent" }`, and Mailpit has a message for Mina. `jobs -- stats` → `failed: 0, completed: 5`.
+
+**Total time from PATCH to delivery in outage 2:** ~75 s (the 5 s + 10 s + 20 s + 40 s backoff), plus the manual recovery. The user saw no error at any point.
+
+### Step 20 — the Redis outage drill
+
+**Setup:** same three processes, Mailpit up, worker running, `JOBS_MODE=queue`.
+
+1. `docker stop taskflow-redis`. The worker logs `redis.error` (throttled, once) and keeps running; `/ready` flips to `degraded` with `checks.redis: "down"`.
+2. Assign task 6 to Alex. The PATCH returns **`200`** — the assignment is saved. The API logs:
+   ```
+   {"level":40,"event":"job.enqueue_failed","job":"task-assigned","taskId":6,"err":{...},"msg":"could not queue the notification; the assignment itself was saved"}
+   ```
+3. `npm run jobs -- stats` **fails** — Redis is down, so the stats command can't reach it. That's expected: the queue is gone, not just slow.
+4. `docker start taskflow-redis`. Within ~8 s, `/ready` returns `ok` with `checks.redis: "up"`; the worker logs `redis.ready`.
+5. **The email for task 6 is never sent.** The job was never enqueued; there is no record of the intent to notify. This is the row in the failure table that is honestly "lost, not recovered" — and it's why the outbox pattern (Challenge 1) is the correct fix, not a retry loop.
+
+**What the drill confirms:** the API's availability does not depend on Redis; the assignment is correct in the database; the notification is lost, and the log line is the only evidence.
+
+### Week 6 numbers (Day 38)
+
+- `npm run typecheck:all` → **green** (the `jobs` module and the `container.ts` wiring closed the two Part B errors).
+- `npm run lint` → **green** (the `no-unsafe-call` on `mailer.close` was fixed by making `close` an optional member of `Mailer` and calling `mailer.close?.()`).
+- `npm run test:unit` → **19 files, 304/304** — includes `mail/templates.test.ts` (8), `jobs/handlers.test.ts` (7), `redisOptions.test.ts` (6) that were missing before.
+- `npm run test:integration` → **all passing**, including `tasks.assignment.test.ts`, `jobs.queue.test.ts`, `mail.smtp.test.ts`.
+- `npm run ci` → **green** (typecheck + lint + format:check + lint:openapi + unit + build + integration with coverage thresholds).
+- Part F drills: **durability** (worker stopped / restarted) ✅; **SMTP outage** (retry-then-recover and exhaust-then-retry-manually) ✅; **Redis outage** (assignment succeeds, email lost, log line is the only evidence) ✅.
+
+### The row-2 lesson (BullMQ connection type)
+
+**What it is:** BullMQ's `ConnectionOptions` has a narrower `retryStrategy` type than ioredis's `RedisOptions`. Passing the full `RedisOptions` to `new Queue(name, { connection })` or `new Worker(name, handler, { connection })` fails the TypeScript overload with:
 
 ```
-port 3000 -> 400
-port 3001 -> 400
-port 3000 -> 400
-port 3001 -> 400
-port 3000 -> 400
-port 3001 -> 429
+Types of property 'retryStrategy' are incompatible.
+  Type 'RetryStrategy' is not assignable to type '((times: number) => void | number | null) | undefined'.
 ```
 
-Five `400` then one `429` on the **sixth** request, split across two processes. Before Day 36 (each process with its own `MemoryStore`) the same six requests would all have been `400`, because each instance would have counted only three.
+**What it is not:** a runtime problem. The connection objects are fine; only the type is too wide.
 
-**Redis inspection right after the loop:**
-- `redis-cli --scan --pattern 'rl:*'` → `rl:register:::/56`, `rl:global:::/56` — two keys, one per limiter, **one shared counter each**.
-- `get 'rl:register:::/56'` → `6`. The register limit is 5; `express-rate-limit` increments *then* compares, so a blocked request leaves the counter at `limit + 1`. The test asserts the status sequence (`[400, 400, 400, 400, 400, 429]`), not the counter value.
-- `pttl 'rl:register:::/56'` → `3368289` ms (≈ 56 minutes left of the 1-hour window).
-- `get 'rl:global:::/56'` → `(nil)` and `pttl` → `-2` **when inspected later** — the global window is 60 s, and the inspection happened more than a minute after the loop. Immediately after the loop it read `"6"` with a positive PTTL.
-- The key contains `::` (the IPv6 loopback, normalized by `ipKeyGenerator` to the `/56` subnet) and `/56` (the prefix length), so it is `rl:register:::/56`, **not** `rl:register:::1`. A `get` on `:::1` returns nothing (`-2`) even though the counter exists.
+**The fix:** `toBullConnection(opts)` in `src/jobs/queue.ts` returns a `Pick<RedisOptions, "host" | "port" | "username" | "password" | "db" | "tls">`, and both `queue.ts` and `worker.ts` spread it. The narrower type matches BullMQ's overload; the `enableOfflineQueue: false` (producer) and `maxRetriesPerRequest: null` (worker) are added on top of the narrowed object, which is where BullMQ expects them.
 
-### Step 17 — survives a restart / rebuild from empty state
-
-1. Deleted every `rl:*` key (`del` returned `1` — one key, the register key; the global had already expired on its 60 s window).
-2. Re-ran the same 3×2 loop → **same sequence** `[400, 400, 400, 400, 400, 429]`. Both ports still share one counter that starts from zero and reaches the limit after five requests.
-3. With the counter over the limit:
-   - Request against the running server → `429`.
-   - Restarted port 3000 (`RATE_LIMIT_ENABLED=true PORT=3000 npx tsx src/server.ts`).
-   - Same request against the **fresh** process → **`429`**, not `400`. The counter lives in Redis, not in the process. This is the pod-restart-in-Kubernetes case: a restart must not hand an attacker a fresh budget.
-
-### Step 17 — per-instance when `REDIS_URL` is empty
-
-Both servers restarted with `REDIS_URL=` (empty). Same 3×2 loop → **six `400`, zero `429`**. Three places confirm the fallback:
-
-- `redis-cli --scan --pattern 'rl:*'` → **no keys**. Redis is never touched in this mode.
-- Each process sees 3 requests against its own limit of 5 (3 < 5 on both).
-- `GET /ready` → `{ "status": "ok", "checks": { "database": "up", "redis": "disabled" } }`. `disabled`, not `down` — the app doesn't treat a missing `REDIS_URL` as an error, just "not in use."
-
-**This is the documented fallback:** N instances give an attacker N times the budget. Acceptable in dev, unacceptable in production, which is why `REDIS_URL` is required when `NODE_ENV=production` (`src/config.ts` refuses to start without it).
-
-### Step 18 — the store as Redis sees it
-
-`redis-cli monitor` while one register request is served shows a single `MULTI` transaction:
-
-```
-"multi"
-"incr"     "rl:register:::/56"
-"pexpire"  "rl:register:::/56"  "3600000"  "NX"
-"pttl"     "rl:register:::/56"
-"exec"
-```
-
-The `NX` is visible in the `pexpire` arguments — that's what makes the window fixed from the first hit. Every key is visible here, which is why `emailKey` hashes the address (see Step 19/20's test). Healthcheck `ping`s (from `127.0.0.1` with a **new source port every ~3 s**) are interspersed; the app's own connection has a stable source port.
-
-### Step 19 — outage drill
-
-With one server running and limits on:
-
-- `docker stop taskflow-redis` → `/ready` flipped to `degraded` with `checks.redis: "down"` within ~1 s (the `commandTimeout: 500ms` plus the parallel probes).
-- Six register requests → `400 400 400 400 400 429` — the in-memory fallback still applies the limit, per instance.
-- `docker start taskflow-redis` → within ~8 s (the `retryStrategy` backoff), `/ready` returned `ok` again with `checks.redis: "up"` **without restarting the server**.
-- Server log during the outage: **one** `rate_limit.store_fallback` warning (with `event`, `limiter`, `operation`, `err`) and **one** `redis.error` — not hundreds. The 30-second throttles in `src/redis.ts` and `src/middleware/rateLimit.ts` did their job.
-- Server log after recovery: **one** `redis.ready`. The connection was reused; no reconnect storm.
-
-### Step F — mutation table (7 rows)
-
-| # | Break | Failed test | Result |
-|---|---|---|---|
-| 1 | Drop `"NX"` from `PEXPIRE` | store test "does not extend the window" | ✅ caught |
-| 2 | Give the `refresh` limiter the name `register` | **only the redis variant** of the rate-limit tests ("Redis specifics" and the per-limiter count tests) | ✅ caught — the memory variant cannot see the collision; this is why `describe.each(["memory", "redis"])` exists |
-| 3 | Return the raw email from `emailKey` | "never puts an email address into a Redis key" | ✅ caught |
-| 4 | Rethrow in `ResilientStore.run` instead of falling back | outage test ("keeps limiting, in memory, and never answers with a server error") | ✅ caught |
-| 5 | Remove `enableOfflineQueue: false` | outage tests still pass, but are **noticeably slower** — the queued commands block each request for up to the command timeout | ⚠️ caught only as a **speed regression**, not a correctness failure. `enableOfflineQueue: false` is a latency decision, not a correctness one, and the suite documents that. |
-| 6 | Delete the "REDIS_URL required in production" guard | config unit test ("refuses to run without Redis") | ✅ caught |
-| 7 | Make `/ready` return 200 when `unavailable` | health integration test ("/ready answers 503 when the database is down") | ✅ caught |
-
-**Row 2 is the sentence for `notes.md`:** *a bug that exists only with the shared store is invisible to tests that use only the memory store*, which is why the suite runs both. This is exactly the class of bug the Day 32 double-mount belonged to, and the reason the `describe.each` restructure in Step 14 is not cosmetic.
-
-### Step 20 — checkpoint answers
-
-1. **Why does one `INCR` count correctly when two servers hit it at once, while Day 9's read, modify, write didn't?** Because `INCR` is a single command executed by Redis's single-threaded event loop — read and write are one step, no gap. Day 9's read-modify-write had a window between the read and the write in which the other process could read the same value and overwrite.
-2. **Why is `PEXPIRE ... NX` needed, and what would happen to a client if the key were created without an expiry?** `NX` makes the expiry **only set if the key has no expiry yet** — so the window starts on the *first* hit and is not extended by later hits. Without `NX`, every request resets the timer and a client is never unblocked. If the key were created without any expiry at all (a crash between `INCR` and `PEXPIRE`, if they weren't in a `MULTI`), the counter would block forever; the `PTTL < 0` fallback in `increment` re-applies the TTL, and the Lua `EXISTS` guard in `decrement` prevents an expired key from being resurrected without an expiry.
-3. **What does `enableOfflineQueue: false` buy you, and what did row 5 show?** It makes a command fail in ~1 ms when Redis is disconnected instead of being queued until the connection returns. Without it, a request during an outage waits for the reconnect (potentially seconds). Row 5 of the mutation table shows the correctness tests still pass with the queue on — the difference is **latency**, not behavior, and the suite documents that (a slow test is a worse test, but not a failing one).
-4. **Compare failing open, failing closed and degrading for the login limiter. Which did you choose, and what can an attacker do during an outage?** Fail open removes the limit (unlimited guesses). Fail closed turns a Redis outage into a login outage (worse than the attack). **Degrade** keeps the per-account and per-IP limits in each process's memory, so an attacker facing N instances gets N × the budget but not unlimited. That's the choice, documented in the Step 1 table.
-5. **Why is the email address hashed inside the Redis key?** Redis keys are visible to anyone who can run `KEYS`/`MONITOR` — a shared Redis instance is not a place for user data. `emailKey` normalizes (trim, lowercase, truncate) then `sha256(...).slice(0, 32)` so the same email always produces the same digest (same budget), but the raw address never appears in Redis. The integration test asserts `rl:login-account:` exists and neither `someone.private` nor `@` appears in any `rl:*` key.
-6. **Why must two limiters never share a name, and why can't the memory-only tests detect it?** The key is `rl:<name>:<key>`, so two limiters with the same name share one counter — one of them gets a smaller effective limit and the other a larger one. The memory-only variant cannot see the collision because `MemoryStore` keys are local to each limiter's own store instance; only the redis variant writes to the shared `rl:*` namespace, so only the redis variant fails when two names collide. That's exactly mutation row 2.
-7. **What's the difference between `/health` and `/ready`, and why is Redis being down `degraded` and not `unavailable`?** `/health` is liveness: "the process is alive" (a restart fixes a failure). `/ready` is readiness: "I can serve requests" (the load balancer should stop sending traffic if not). `/ready` checks dependencies with a deadline. The database is required — down → `unavailable` → 503. Redis being down only weakens the rate limits — the app can still serve every request, so `degraded` → 200, which keeps the load balancer routing.
-8. **Why is `"127.0.0.1:6379:6379"` safer than `"6379:6379"`, and why does this instance use `noeviction`?** `"6379:6379"` publishes the port on **every** network interface — an unauthenticated Redis on a café Wi-Fi is a known way to get a laptop compromised. `"127.0.0.1:6379:6379"` binds to localhost only. `noeviction` (rather than `allkeys-lru`) is for the queue that arrives on Day 38: BullMQ jobs must never be silently evicted when memory is full. The trade-off: every key must have a TTL, since eviction won't reclaim space. A cache would prefer `allkeys-lru`; the right answer for one shared instance is `noeviction` until the cache gets its own instance.
-
-## Day 37 Observations
-
-### Step 1 — thinking before coding
-
-**1. What could make a cached stats answer wrong, and which mechanism handles each?**
-
-| Situation | Mechanism |
-|---|---|
-| A task is created in the project | **Invalidation** (`invalidateStats(created.projectId)` in `addTask`) |
-| A task's status changes | **Invalidation** (`invalidateStats(task.projectId, updated.projectId)` in `updateTask`; the old id is in case the update moved it) |
-| A task's priority changes | **Invalidation** (same call) |
-| A task moves to another project | **Invalidation** of **both** projects (the `Set` in `invalidateStats` dedupes) |
-| A task is deleted | **Invalidation** (`invalidateStats(task.projectId)` in `deleteTask`) |
-| Midnight UTC passes | **The date in the key** (`variant: todayUtc(now())` — a new key, so the next read is a miss) |
-| A script writes rows directly (bypassing the service) | **The TTL** (up to 60 s ± 10% of staleness; documented in the README as a known limitation) |
-| Redis is down during a write | **The TTL** (the `INCR` never happens, so the old entry is served until it expires; `invalidate` never throws so the write succeeds) |
-| Redis is down during a read | **`bypass`** (the response is computed fresh from the database; `X-Cache: bypass`) |
-| Two tests reuse project 1 with `RESTART IDENTITY` | **`flushTestRedis()` in `beforeEach`** — otherwise the second test's "project 1" is served the first test's cached answer |
-| The stats `computedAt` makes two answers look different when they aren't | **Nothing** — this is expected; a `hit` returns the same `computedAt` as the original `miss` because it's the same stored JSON |
-| `overdue` computed from a `Date` that crosses the local midnight | **The UTC date** is what's in the key; a user west of UTC sees "today" as the next UTC date for part of their day, and that's the same trade-off documented on Day 31 |
-
-**2. The race. Events in this order:** (1) reader misses; (2) reader reads the database; (3) writer commits; (4) writer invalidates; (5) reader stores its result.
-
-| Design | Next request stale? |
-|---|---|
-| (a) one fixed key, writer deletes it | **Yes** — the reader stores its stale result under the same fixed key, which lives until the TTL ends. The delete happened before the store, so it deletes nothing. |
-| (b) version read **before** computing, writer increments it | **No** — the reader stores under the old generation `g`; the writer's `INCR` moves the live generation to `g+1`; the next reader reads `g+1` and misses, computing from the new database state. The stale entry under `g` is unreachable and expires by TTL. |
-| (c) version read **after** computing | **Yes** — the reader reads `g+1` (the writer already incremented), stores its stale result under `g+1`, and the next reader sees `g+1` as a hit. This is the design (a) bug in a different shape, and it is why the version read has to come **first**. |
-
-**Which one is wrong, and why?** (a) and (c) are both wrong, for the same underlying reason: the read that determines *where to store* runs too late, so it sees the post-invalidation world and stores the old result in it. (b) is right because the store's destination is fixed at the *start*, and the invalidation moves the live generation out from under it. The order is: **read the version → compute → store under that version**, and separately, **write to PostgreSQL → commit → invalidate** (so that any reader that started before the commit stores under the pre-invalidation generation).
-
-**3. The leak.** If the access check ran *after* a cache hit instead of before, an outsider requesting `GET /projects/:id/stats` for a project they don't belong to would:
-- On the first request (cold cache): compute the real stats — the access check would run after, but the cache was already populated by the miss path, so the outsider **sees the numbers** before any check can refuse them. The 404 would come too late.
-- On a warm cache: get a `hit` and the numbers **without any access check having run**. The cache is keyed by `project:<id>`, not by user, so the same entry is served to the outsider and to a legitimate member.
-
-That's a data leak that no later check can undo — the numbers are already in the response. `getProjectStats` calls `access.requireProjectRole(actor, projectId, "member")` as its **first** statement, before `cache.getOrCompute`. The unit test `"checks access BEFORE the cache or the database is touched"` asserts `cache.getOrCompute` and `tasks.projectStats` are never called for a stranger; the integration test `"answers 404 to a stranger even while the entry is warm"` warms the entry as the owner and then confirms the stranger still gets `404`.
-
-### Step 16 — benchmark (`bench:stats`)
-
-**Setup:** `npm run db:bench-seed` (five projects × 10,000 tasks), `npm run dev`, `npm run bench:stats` (15 iterations, each: invalidate → cold `miss` → warm `hit`; median reported).
-
-**Numbers:**
-
-> `project 179: cold (computed) 33.7 ms, warm (cached) 17.4 ms`
-
-The cache saves **~16.3 ms** per request on this project (a ~2× speedup). The cold time is dominated by the `groupBy(status, priority)` over the project's tasks; the two `count()` queries are comparatively cheap. The project has thousands of tasks (from `db:bench-seed`), which is why the `groupBy` is expensive here in a way the Day 32 `GET /tasks` page query was not.
-
-**Where the time goes:** `EXPLAIN ANALYZE` on the `groupBy` shape (still `TODO` — run it in `psql` and paste the plan and execution time here). The `count()` queries are cheap by comparison because they only scan the index on `(project_id, status, due_date)`.
-
-### Step 17 — mutation table (11 rows)
-
-| # | Break | Failed test | Result |
-|---|---|---|---|
-| 1 | Delete `access.requireProjectRole` in `getProjectStats` | unit "checks access BEFORE the cache or the database is touched" + integration "answers 404 to a stranger even while the entry is warm" | ✅ caught |
-| 2 | `scope: "project"` (no id) in `getProjectStats` | integration "keeps different projects apart", "does not let a member of one project read another project's entry" | ✅ caught |
-| 3 | `variant: "today"` instead of the date | unit "builds the cache key from the project and the date", "uses a different key after midnight UTC" | ✅ caught |
-| 4 | Remove invalidation from `deleteTask` | integration "after deleting a task" | ✅ caught |
-| 5 | In `updateTask`, invalidate only `updated.projectId` | integration "moving a task out of the project", "refreshes BOTH projects when a task moves between them" | ✅ caught |
-| 6 | Remove `stats.invalidateProject(targetId)` after a merge | integration "refreshes the target when two projects are merged" | ✅ caught |
-| 7 | Read the generation **after** `compute()` and store under that one | unit "stores a stale result under a dead generation when a write happens during the computation" | ✅ caught |
-| 8 | Delete the single-flight lookup (`if (running) ...`) | unit "runs one computation for many simultaneous misses", integration "shares one computation between simultaneous requests on a cold cache" | ✅ caught |
-| 9 | Remove the `try/catch` around the read | unit "when Redis fails / answers from the computation instead of failing, when reading fails", integration "stats while Redis is unreachable / still answers, straight from the database, and says so" | ✅ caught |
-| 10 | Replace `withJitter(...)` with the plain TTL | unit "spreads expiry times with jitter, always within 10% of the TTL" | ✅ caught |
-| 11 | Delete `flushTestRedis()` from `tests/support/setup.ts` | many tests, in confusing ways — the first test's cached answer for "project 1" is served as a `hit` to the next test's different project 1 | ⚠️ caught **indirectly** — the failures are "wrong `X-Cache`" and "wrong numbers" in unrelated tests, not a single named test. The lesson is the ID-collision point made observable, and the fix is to read `beforeEach` as load-bearing, not housekeeping. |
-
-**Row 7 is the lesson.** The "simpler" version of `getOrCompute` (read the version *after* `compute()`, store under that one) passes every test except the race test — because the race is rare, and a single-threaded unit test is the only place it's deterministic. The rule is: **read the version first, compute second, store under the version you read**. The test that pins it is `"stores a stale result under a dead generation when a write happens during the computation"`, and it is the executable form of the experiment's design (b) vs design (c) distinction.
-
-**Row 11 is the other lesson.** `RESTART IDENTITY` makes project 1 a *different* project after truncation, but the cache key is still `cache:v1:project-stats:project:1:<gen>:<date>`. Without `flushTestRedis()`, a cached `miss` from one test becomes a `hit` for a different project 1 in the next — which is exactly what happens in production after `npm run db:fresh` or a backup restore, and is why the test setup flushes the cache with the database.
-
-## Day 37 Checkpoint Answers
-
-1. **What makes a good key? What would go wrong if the date were left out, and what if the user were included unnecessarily?**
-   > A good key contains **every input the answer depends on**, and only those. Leave the date out and a cached "due soon" count from yesterday is wrong today (overdue and due-soon change at midnight UTC) — a stale answer served as fresh. Include the user unnecessarily and every member gets their own cache entry for an answer that is the same for all of them: the hit rate collapses (each user has their own cold start) and the memory grows with the user count, for zero correctness benefit. The right key here is `cache:v1:project-stats:project:<id>:<generation>:<UTC date>` — project, date, and the generation counter (which is not an input to the answer, but the mechanism that makes old answers unreachable).
-
-2. **Why does the access check run before the cache, and what would a stranger see otherwise?**
-   > The cache stores *answers*, not *permissions*. The stats answer is the same for every member of the project, so the key is per-project, not per-user — and that's only safe if the access check runs first. If the check ran after a cache read, a stranger would get the numbers from the cache on a hit, and the check would run too late to matter. `getProjectStats` calls `access.requireProjectRole(actor, projectId, "member")` as its first statement; a stranger gets `404` (same as a project that doesn't exist, to hide existence) and never reaches `cache.getOrCompute` or `tasks.projectStats`. The unit test `"checks access BEFORE the cache or the database is touched"` is the executable form of this rule.
-
-3. **Explain the stale-write race with a timeline, and why reading the generation *before* computing makes it harmless.**
-   > Timeline: (1) reader misses; (2) reader reads the database (from a snapshot that predates the write); (3) writer commits; (4) writer invalidates (bumps the generation from `g` to `g+1`); (5) reader stores its result. With a fixed key (design a), step 5 writes the stale result under the live key, and the next reader sees it until the TTL ends. With the version read **before** computing (design b), the reader stored under `g`; the writer's `INCR` moves the live generation to `g+1`; the next reader misses on `g+1` and computes from the new database state. The stale entry under `g` is unreachable (nobody reads `g` again) and expires by TTL. With the version read **after** computing (design c), the reader reads `g+1` and stores its stale result under `g+1` — which is the same bug as (a), one step later. The rule is: **read the version first, compute second, store under the version you read**, and separately, **write to PostgreSQL, commit, invalidate** — so any reader that started before the commit is storing under a generation that the invalidation will make unreachable.
-
-4. **Why must invalidation happen after the database write has committed, and what happens if it happens before?**
-   > If the invalidation runs *before* the commit, a reader can start after the invalidation (reading the new generation `g+1`) but compute from the **pre-commit** snapshot (the writer hasn't committed yet), and store its result under `g+1`. That stale result is now live for the next reader. The order has to be: writer commits → invalidate. Then any reader that started before the commit is storing under `g` (which the invalidation is about to make unreachable), and any reader that starts after the commit is computing from the new state and storing under `g+1` (correctly). The same rule applies to the two-project cases (a move, a merge): both projects must be invalidated **after** the transaction commits, not inside it, because a reader that starts during the transaction would see the pre-commit state.
-
-5. **What do the TTL, the generation counter and the date in the key each protect against?**
-   > **The TTL** bounds staleness when an invalidation is missed: a script writing directly to PostgreSQL, a Redis outage during the `INCR`, a bug that skips the invalidation. It's the safety net, not the mechanism — normal writes should keep the cache fresh, and the TTL only matters when they don't. **The generation counter** is the mechanism: every write bumps it, every entry under an old generation is unreachable (and expires by TTL), and a reader that computed from an old snapshot stores under that old generation, so its result is never served. **The date in the key** handles the one input that changes on a schedule rather than on a write: at midnight UTC, `overdue` and `dueSoon` change without any row changing, so the key's `variant` (the UTC date) makes the next read a miss and a fresh computation. Each protects against a different class of wrongness.
-
-6. **What do single-flight and jitter prevent, and why doesn't single-flight protect two separate instances?**
-   > **Single-flight** prevents a stampede *within one process*: concurrent misses for the same key share one `compute()`, so a hundred simultaneous requests produce one database query, not a hundred. **Jitter** prevents a different stampede: it spreads the expiry times of many entries so they don't all die at once (a thousand entries written together would all expire together, and the next thousand requests would all miss together). **Single-flight does not protect across instances** because each instance has its own `inFlight` map — N instances each compute their own once, so a cross-instance stampede produces N queries, not one. The remedy for that is a Redis lock (`SET lock:key token NX PX 5000`) around the computation — a challenge, not built today.
-
-7. **Why is a write allowed to succeed even when invalidation fails, and what bounds the damage?**
-   > The write must succeed because a user's action (creating a task, renaming a project) should not fail because a cache is down. If `invalidate` threw, a Redis outage would make every write return 500 — turning a cache outage into a write outage, which is worse than the bug it prevents. `invalidate` catches, logs (`cache.error`, throttled to once per 30 s), and returns `void`. The damage is bounded by **the TTL**: the affected entry lives for at most 60 s ± 10% from the last time it was written, so the worst case is a dashboard that is up to ~66 s stale after a Redis outage — visible, not silent, and self-healing when Redis recovers (the next `INCR` succeeds and the next read misses).
-
-8. **Why did row 11 break tests in confusing ways, and what real-world events would cause the same problem in production?**
-   > `RESTART IDENTITY` after `TRUNCATE` makes project 1 a *different* project in the next test, but the cache key is still `cache:v1:project-stats:project:1:...` — so the first test's cached answer for its project 1 is served as a `hit` to the second test's different project 1. The failures are "wrong `X-Cache`" and "wrong numbers" in tests that have nothing to do with the cache. In production, the same class of bug happens after **`npm run db:fresh`**, **a backup restore**, and **a database re-creation from migrations** — the IDs restart at 1, but the cache still has entries from the old project 1. The fix is to flush the cache whenever the database is reset (the test setup does it in `beforeEach`; `db:fresh` should do it explicitly, and does in a real deployment script). The general rule: *the cache's IDs are the database's IDs, so anything that resets the database must reset the cache*.
+**The lesson:** when a library accepts a narrower type than the one you're holding, **narrow it explicitly** rather than casting. A cast (`as RedisOptions`) would have silenced the error while lying to the compiler about the shape; the `toBullConnection` helper says out loud what BullMQ actually consumes.
 
 ## Known limitations
 *(Each of these is fixed by a specific upcoming week, showing forward planning.)*
@@ -1676,7 +1779,7 @@ The cache saves **~16.3 ms** per request on this project (a ~2× speedup). The c
 5. **`ILIKE` search lacks a trigram index:** The search is slow on large tables because it does a full scan. This will be fixed in **Week 5**.
 6. **CSV export loads all rows:** The export uses `findAll()`, which loads the entire table into memory. This will be fixed in **Week 5** with a streaming query.
 7. **`/health` doesn't check the database:** It's liveness only, by design. **`/ready` (Day 36) is the readiness probe** that checks the database and reports Redis.
-8. **Rate limits are in-memory:** They reset on restart and don't share between instances. **Week 6 (Day 36) moved them to a shared Redis store** (`RedisCounterStore` + `ResilientStore`), so the budget is the same across instances and survives a restart. Day 35's characterization tests describe today's behavior; Day 36's `describe.each(["memory", "redis"])` runs them against both stores.
+8. **Rate limits are in-memory (fixed on Day 36):** Counters now live in Redis and are shared across instances; the budget survives a restart. If `REDIS_URL` is empty, the app falls back to per-instance `MemoryStore` (dev only; the production config refuses to start without `REDIS_URL`).
 9. **During a Redis outage, rate limits degrade to per-instance:** The `ResilientStore` falls back to `MemoryStore`, so an attacker facing N instances gets N × the budget until Redis recovers. The alternative (fail closed) would 503 every login during the outage; the alternative (fail open) would remove the limit entirely. `/ready` reports `degraded` so operators see the outage. Documented in the Day 36 Observations.
 10. **Fixed-window rate limiting allows a burst at the window boundary:** A client can make `limit` requests at the end of one window and `limit` at the start of the next, getting `2 × limit` in a short span. Sliding-window (sorted set + Lua) is a challenge; the current fixed window is deliberate for simplicity and the `PEXPIRE ... NX` semantics.
 11. **Per-account throttle can be abused to lock a victim out:** An attacker can flood `/auth/login` with wrong passwords until the account is throttled (`429`). Rate limiting makes it slow, but not impossible.
@@ -1697,9 +1800,9 @@ The cache saves **~16.3 ms** per request on this project (a ~2× speedup). The c
 26. **No contract test between the OpenAPI document and real responses:** Redocly lints the spec and `docs.and.auth.test.ts` checks `operationId`/401 coverage, but no test validates a **real** response body against the spec's schema. A future Ajv-based test (Day 35 Challenge 2) would close this. Until then, the Zod schemas and the spec are kept in sync by generating the latter from the former, which reduces drift but doesn't prove it.
 27. **Five scripts retired:** `token-attacks`, `auth-coverage`, `refresh-flow`, `access-attacks`, `security-checks` (and their `package.json` commands). Their replacements are the integration suites listed above; the mutation table rows 1–4, 6, 8–10 are the evidence that each bug the scripts caught is now caught by the suite. `test:ratelimit` was retired on Day 35 once its 8 mutations all failed in the suite.
 28. **`smoke.ts` is intentionally small (12 checks):** It's a post-build check of the *compiled* `dist/` server, not a behavior suite. Detailed behavior is `npm test`'s job; if a check needs adding, it goes in an integration test, not in `smoke.ts`. **Day 36 added a `/ready` check** to the smoke test, so the compiled artifact is proven to expose the new endpoint too.
-29. **`verify.sh` restarts the compiled server between `smoke` and `test:ratelimit`:** In-memory rate-limit counters must start at zero for `test:ratelimit`, and `test:integration` + `smoke` will have drained them on the shared server. **Day 35 removed `test:ratelimit` from `verify.sh`** (the suite covers it now). **Day 36 re-adds the same restart rule** between `smoke` and the rate-limit test if the shared Redis has leftover keys from a previous run — the store's `beforeAll` calls `flushTestRedis()` on database 15, so a restart isn't strictly required for the Redis store, but it is for the memory store.
+29. **`verify.sh` restarts the compiled server between `smoke` and `test:ratelimit`:** In-memory rate-limit counters must start at zero for `test:ratelimit`, and `test:integration` + `smoke` will have drained them on the shared server. **Day 35 removed `test:ratelimit` from `verify.sh`** (the suite covers it now). **Day 36 re-adds the same restart rule** between `smoke` and the rate-limit test if the shared Redis has leftover keys from a previous run.
 30. **`eslint-config-prettier` is the only rule-disabling plugin:** Every ESLint rule disabled in `eslint.config.mjs` (e.g., `require-await`) has a written reason. `errorHandler.ts` has one file-level `eslint-disable` for `no-unsafe-member-access`/`no-unsafe-assignment`, with a reason on the line. Disables are decisions, not shortcuts.
-31. **`no-restricted-imports` is the architecture fitness function:** It makes `src/container.ts` the only place that constructs concrete repositories; controllers, routes, services, auth, middleware, and schemas cannot import `../db.js` or `src/repositories/prisma/**`. Verified in Step 9: blocked in a controller, allowed in `server.ts` and `cli.ts`. **`src/app.ts` is also allowed** — it wires the readiness probe.
+31. **`no-restricted-imports` is the architecture fitness function:** It makes `src/container.ts` the only place that constructs concrete repositories; controllers, routes, services, auth, middleware, and schemas cannot import `../db.js` or `src/repositories/prisma/**`. **`src/app.ts` is also allowed** — it wires the readiness probe.
 32. **`precheck` / `ci` catch drift the individual scripts can miss:** The first `npm run ci` found 7 files that had drifted from Prettier's output after the ESLint fixes. `format:check` is the canary — it's cheap and it never lies. **Day 35 made `ci` enforce the coverage thresholds too** (`test:coverage` replaces `test:integration` in the `ci` script), so a coverage drop fails the same command.
 33. **Hooks are not the gate:** the pre-commit hook was bypassed with `--no-verify` in Test 4, and `pre-push` was bypassed the same way. Only `npm run ci` on a fresh checkout is a real gate. This is why Week 7's pipeline will run `npm run ci` and never `git push`.
 34. **Redaction is by key name only:** A secret inside a message string, a field name not in `SENSITIVE_KEYS` (`pwd`, `rawToken`), or nesting deeper than the 3 configured paths is **not** redacted. Rows 5 and 6 of the Day 34 mutation table demonstrate both halves — the integration leak test is the real defense, and the pair of unit tests that document the limits keep it honest.
@@ -1723,7 +1826,15 @@ The cache saves **~16.3 ms** per request on this project (a ~2× speedup). The c
 52. **Single-flight is per process, not per cluster:** Two instances that miss the same key at the same time each compute it once, so a cold cache behind N instances produces N database queries, not one. The jittered TTLs reduce the *coincidence* of expirations between instances, but the cross-instance lock (`SET lock:key token NX PX 5000` around the computation) is a challenge, not built today.
 53. **The three aggregate queries are not one snapshot:** `projectStats` runs `groupBy(status, priority)`, `count(overdue)`, and `count(dueSoon)` in parallel (`Promise.all`), and a write can land between them. A dashboard can therefore show, for example, `total` from before a create and `overdue` from after it. Acceptable for a dashboard; a strong consistency guarantee would need a single query with `FILTER` or a transaction.
 54. **`prisma/seed.ts`, `scripts/seed-bench.ts`, and the `bench` fixture write directly to the database and do not invalidate the cache:** They bypass the service layer, so a cached stats answer survives their writes until the TTL. `db:fresh` and `db:bench-seed` should flush the cache in a real deployment; the test suite does it with `flushTestRedis()`.
-55. **Benchmark numbers from `bench:stats` (Day 37):** On this machine, project 179 (from `db:bench-seed`): **cold (computed) 33.7 ms, warm (cached) 17.4 ms** — the cache saves ~16.3 ms per request (~2× speedup). The cold time is dominated by the `groupBy(status, priority)` over the project's tasks; the two `count()` queries are comparatively cheap. The comparison to `GET /tasks`' 6 ms (Day 32's bench) is apples-to-oranges: `GET /tasks` is a page query (O(page)), `projectStats` is an aggregate over the whole project (O(project size)). The cache is a real win here in a way it wasn't for the list. The `EXPLAIN ANALYZE` plan for the `groupBy` is still a `TODO` — the execution time is in this file; the plan shape is not.
+55. **Benchmark numbers from `bench:stats` (Day 37):** On this machine, project 179 (from `db:bench-seed`): **cold (computed) 33.7 ms, warm (cached) 17.4 ms** — the cache saves ~16.3 ms per request (~2× speedup). The cold time is dominated by the `groupBy(status, priority)` over the project's tasks; the two `count()` queries are comparatively cheap. The comparison to `GET /tasks`' 6 ms (Day 32's bench) is apples-to-oranges: `GET /tasks` is a page query (O(page)), `projectStats` is an aggregate over the whole project (O(project size)). The `EXPLAIN ANALYZE` plan for the `groupBy` is still a `TODO`.
+56. **A Redis outage at the moment of assignment loses the notification (no outbox yet):** The assignment is saved (the request returns 200) and the failure is logged as `job.enqueue_failed`, but there is no durable record of the intent to notify. **Day 38's "Redis down at assignment" row in the failure table** is the honest case: *lost, not recovered.* The fix is the **transactional outbox** — a `notification_outbox` row written in the same PostgreSQL transaction as the assignment, with a relay that moves rows to the queue. That is Challenge 1 of Day 38 and is not implemented today.
+57. **At-least-once means a rare duplicate email is possible:** A worker that crashes after sending but before acknowledging leaves the job stalled; BullMQ re-delivers it to another worker, which sends again. The handler is idempotent (it re-reads the current task and skips if the assignee changed), so the worst case is one duplicate email for the same assignment. For something that must never be duplicated (charging a card), a stored idempotency key in a `sent_notifications` table is the fix — Challenge 2 of Day 38.
+58. **No per-user notification preferences or throttling:** Assigning, unassigning, and reassigning the same task in a minute sends **two** emails (the first assignment and the second assignment after the unassign), and there is no way for a user to say "don't email me for this project" or "batch my notifications". Day 38's Challenge 3 is a 30-second debounce: wait before sending, and skip the email if the assignee changed again in the meantime. Until then, the notification volume is whatever the assignment history is.
+59. **The worker needs its own process in production:** `npm run worker` is a separate Node process; a single-process deployment (`node dist/server.js` with no worker) will enqueue jobs and never run them. **Week 7** adds the Dockerfile and the deployment manifest that run the API and the worker as separate containers (or separate services in the same pod). Until then, the local `npm run dev` + `npm run worker` pair is the only way to run the whole thing.
+60. **SMTP error messages can contain addresses and reach the logs:** A `SmtpMailer` failure carries nodemailer's error object, whose `message` may include the recipient address (`"Can't send mail to alex@example.com: 550 mailbox unavailable"`) or the SMTP server's response. The worker logs the error at `warn`/`error`, and Day 34's `SENSITIVE_KEYS` redaction is by **field name** — it redacts `{ err: { message } }` only if `message` is a key in the redaction list, which it isn't. The result is that a failed email can put an email address in the log. The fix is a `serializeError`-style trim for mail errors (keep the SMTP response code, drop the recipient), the same shape as the Prisma trim from Day 34. Documented as a gap.
+61. **`JOBS_MODE=inline` hides retry behavior:** Inline mode runs the handler in the API process, catches its rejection, and logs `job.inline_failed` — it does **not** retry, back off, or move the job to a failed list. A test that runs in inline mode (which is every integration test, per `tests/support/env.ts`) proves the handler's logic and the request's behavior, but **cannot** prove the retry policy, the dead-letter list, or the worker's graceful shutdown. Those are covered by `jobs.queue.test.ts`, which runs against Redis database 15 with a real `Worker` — that's why both files exist. A developer reading only the inline tests would think "a failed email is logged and dropped", which is true in dev and false in production.
+62. **The queue and the cache share one `noeviction` Redis instance:** The cache would prefer `allkeys-lru` (evict old entries when memory is full); the queue needs `noeviction` (never silently delete a job). One instance means one policy, and `noeviction` is the safer choice today because a lost cache entry is a slow read while a lost job is a lost email. The cost is that the cache cannot grow past `maxmemory` without failing writes — the cache's `set` is in a `try/catch` and logs `cache.error`, so a full Redis degrades the cache to `bypass` rather than crashing. A real production deployment would run separate instances for the two workloads.
+63. **`smtpUrl` and `redisUrl` are in `SENSITIVE_KEYS`, but only at the three configured depths:** `REDIS_URL` and `SMTP_URL` can carry passwords (`redis://:pass@host`, `smtp://user:pass@host`), and Day 38 added both keys to `SENSITIVE_KEYS` so they're redacted when logged as `{ redisUrl }` or `{ config: { smtpUrl } }`. What is **not** covered: a URL inside a larger string (`"connecting to redis://user:pass@host"`), or a config dump nested deeper than two levels. Same limit as every other redaction rule — it's the safety net, not the defense; the defense is not putting the URL in the log call in the first place.
 
 ## Week 1 summary
 Three things I can do now that I couldn't on Day 1:
@@ -1851,6 +1962,18 @@ Things that confused me:
 - Why `flushTestRedis()` in `beforeEach` is load-bearing, not housekeeping — `RESTART IDENTITY` makes project 1 a *different* project, but the cache key is the same, and the first test's answer is served as a hit to the second. Row 11 removes it and many tests fail in confusing ways.
 - Why the `variant` has to be the **UTC date** and not `"today"` — the date is part of the key, and `"today"` never changes. At midnight UTC, overdue and due-soon change without any row changing, so the key has to change.
 - Why `X-Cache: bypass` is a 200, not a 503 — the app can serve from the database when Redis is down; returning 503 would turn a cache outage into a stats outage.
+- Why the job payload carries only ids — the worker must read the *current* title, assignee and project at run time, and personal data should not sit in Redis.
+- Why `attempts: 5` counts the first run — `attemptsMade` starts at 1 and reaches 5; 5 means "1 attempt + 4 retries".
+- Why a permanent failure is `UnrecoverableError` — BullMQ's retry decision is "retry unless it throws `UnrecoverableError`"; there is no other signal.
+- Why the worker's connection needs `maxRetriesPerRequest: null` and the producer's wants `enableOfflineQueue: false` — the worker blocks on `BRPOP`-style commands, the producer only issues `add()`.
+- Why BullMQ's `ConnectionOptions` is narrower than ioredis's `RedisOptions` — the `retryStrategy` types differ, and `toBullConnection` narrows explicitly rather than casting.
+- Why `jobs.close()` belongs in `server.ts`'s shutdown — the producer holds a `Queue` (an ioredis connection), and leaving it open keeps the event loop alive.
+- Why the worker must not run in `JOBS_MODE=inline` in production — inline mode runs in the API process, doesn't retry, and doesn't survive a restart.
+- Why "no email when the assignee is the actor" is a service rule — the worker only sees ids; the service sees the actor and can skip the "assigning to yourself" case.
+- Why a test that says `jobs.enqueue` was called is not the same as a test that says the email was sent — the three layers (handler unit, queue + worker against Redis, inline end-to-end) cover three different things.
+- Why Mailpit's SMTP test sends real mail while the rest use the memory mailer — the memory mailer is fast and deterministic, but only real SMTP proves the header-injection defense and the delivery path.
+- Why `SmtpMailer` doesn't retry on its own — BullMQ retries; an internal retry would produce `attempts × internalRetries` and race the queue's policy.
+- Why `MemoryMailer.failWith` exists — the failure-path tests need to inject a failure without monkey-patching nodemailer.
 
 What I'd do differently:
 - Write the test *before* the code. The `slugify` test found a bug instantly that would have shipped otherwise.
@@ -1871,3 +1994,574 @@ What I'd do differently:
 - Run `bench:stats` **before** the cache was written. The lesson says "measure first." I measured after — the cache is justified by the design properties (authorization, key correctness) rather than by the timing. That's not wrong, but the timing is the stronger argument, and it's only available if the number comes first.
 - Resist the urge to simplify the key by dropping the date. The date is an input to the answer (overdue changes at midnight UTC), and a key that omits it is a cache that serves yesterday's "due soon" count today.
 - Treat `flushTestRedis()` in `beforeEach` as load-bearing, not housekeeping. Row 11 removes it and many tests fail in confusing ways. The rule is: *the cache's IDs are the database's IDs, so anything that resets the database must reset the cache*.
+- Write the six-row failure table (worker not running / Redis down at assignment / SMTP down 10 min / worker killed mid-send / task deleted before job runs / garbage payload) **before** the assignment code, not after. The table *is* the design, and getting "the request returns 200 even when Redis is down" into the spec first saves a rewrite.
+- Add the four `package.json` scripts (`worker`, `worker:json`, `start:worker`, `jobs`) in the **same commit** as `src/worker.ts` and `scripts/jobs.ts`, so `project-docs.test.ts` never sees a README mention that resolves to nothing.
+- Extract `toBullConnection` into its own file (`src/jobs/bullConnection.ts`) so `queue.ts` and `worker.ts` both import it without creating a dependency from `worker.ts` to `queue.ts`. It works today because there's no cycle, but the current arrangement is one refactor away from one.
+- Set the development `MAIL_TRANSPORT` default to `smtp` (Mailpit is up via `npm run db:up`), not `log`. A developer who runs `npm run worker` without setting `MAIL_TRANSPORT` should see an email in Mailpit, not a `mail.logged` line.
+- Make `jobs -- retry <id>` print the job's `data` before retrying, so the operator's decision ("should I retry this?") has the one piece of context that matters. `job <id> queued again` is not enough.
+- Treat "no outbox" as a first-class limitation, not a footnote. The failure table's "Redis down at assignment" row is **lost, not recovered**, and the honest thing is to say so in the README's Known Limitations and in the Day 38 notes, not to bury it under `job.enqueue_failed`.
+- Pin `maxmemory-policy noeviction` for Redis with an assertion, not just a comment in `docker-compose.yml`. A future edit to the compose file could silently switch the policy and the `jobs.queue.test.ts` suite would not catch it (it runs against a real Redis whose policy is the test machine's, not the compose file's).
+- Make the `flushTestRedis()` call in the jobs queue test file's `beforeEach` the **first** thing, before any test runs, so a previous test's jobs (or the `rl:*` counters) never leak into the next.
+- Write the header-injection test at **both** the `oneLine` level (template test) **and** the `SmtpMailer` level (Mailpit test) from the first commit, not as an afterthought. The template test proves the flattening, the SMTP test proves the SMTP server treats the flattened subject as one line.
+
+## OWASP API Top 10 (Day 27 Review)
+
+| Risk | In TaskFlow | Where | Gap? |
+|---|---|---|---|
+| API1 Broken Object Level Authorization | `requireProjectRole` / `requireTaskRole` in services | `src/auth/access.ts`, `src/services/*.ts` | No |
+| API2 Broken Authentication | Argon2id + timing-safe login + JWT + refresh rotation | `src/auth/password.ts`, `src/auth/tokens.ts`, `src/services/auth.service.ts` | No |
+| API3 Broken Object Property Level Authorization | `.strict()` Zod schemas, `passwordHash` not in `User` | `src/schemas/*.ts`, `src/types.ts` | No |
+| API4 Unrestricted Resource Consumption | Rate limits, body limit, server timeouts | `src/middleware/limiters.ts`, `src/app.ts`, `src/server.ts` | No |
+| API5 Broken Function Level Authorization | Role-based access on every mutation | `src/services/*.ts` | No |
+| API6 Unrestricted Access to Sensitive Business Flows | `/auth/login` + `/register` + `/refresh` throttled | `src/routes/auth.routes.ts` | No |
+| API7 Server-Side Request Forgery | Not applicable yet (server never fetches URLs) | — | — |
+| API8 Security Misconfiguration | Helmet, CORS allow-list, `JWT_SECRET` guard, `RATE_LIMIT_ENABLED` guard | `src/app.ts`, `src/config.ts` | No |
+| API9 Improper Inventory Management | `/docs` can be disabled via `DOCS_ENABLED=false` | `src/config.ts`, `src/app.ts` | Partial (docs are public by default) |
+| API10 Unsafe Consumption of APIs | Not applicable yet (server never calls other APIs) | — | — |
+
+## API Conventions (Day 13 Audit)
+- **POST:** Returns `201` and a `Location` header.
+- **Errors:** All errors use the `{ "error": { "message": "..." } }` shape.
+- **Lists:** All list responses are wrapped in a `data` array. Projects do not have `meta` yet because we haven't added pagination to them.
+- **Casing:** All JSON field names are `camelCase`.
+- **Status Codes:** 400 (bad input), 401 (unauthenticated), 403 (forbidden), 404 (missing URL resource), 409 (state conflict), 413 (payload too large), 429 (rate limited), 503 (not ready).
+
+## Migration Rules (Day 20)
+- Never edit an applied migration (Prisma checks the checksum).
+- Rename columns with `RENAME COLUMN`, not `DROP` + `ADD`.
+- Adding a required column: expand (nullable) → backfill → contract (`NOT NULL`).
+- `migrate dev` on your laptop; `migrate deploy` in CI and production.
+- Seeds are idempotent (`upsert`) and never run in production.
+- `npm run db:check-migrations` verifies migrations from scratch.
+
+## Business Rules (Day 31)
+- A task's `dueDate` cannot be in the past **on creation** through the API.
+- Updates may set a past date (people correct dates).
+- The CLI (`SYSTEM` actor) is exempt — for imports and data fixes.
+- "Today" is the UTC calendar date. Documented tradeoff (see Day 31 Observations).
+
+## Logging Rules (Day 34)
+- **One JSON object per line on stdout.** The platform collects; the app doesn't rotate or ship.
+- **Stable `event` names** (`http.request`, `auth.refresh_reuse`, `redis.ready`, `redis.error`, `redis.unavailable`, `rate_limit.store_fallback`, `cache.error`, `queue.error`, `worker.error`, `worker.started`, `job.completed`, `job.will_retry`, `job.failed_permanently`, `job.inline_failed`, `job.enqueue_failed`, `mail.logged`) so alerts can match them for years.
+- **Levels mean something.** `error` = someone should look. `warn` = suspicious but handled. `info` = normal business.
+- **Every line inside a request carries `requestId`.** It matches the `X-Request-Id` response header; a user's bug report is one grep away from the full trace.
+- **Redaction is a last safety net, not the defense.** Defense #1 is not putting the secret in the log call. Query strings, request bodies and emails are never logged; the request logger records the path only.
+- **Prisma errors are trimmed** to their final line, `meta` dropped. Query arguments don't reach disk.
+- **The leak test** in `tests/integration/logging.test.ts` pushes real passwords, hashes, tokens and an email through the whole API and fails if any appear in the output. It's the most important test in the logging change.
+
+## Redis First Contact (Day 35)
+- **Redis is an in-memory key-value store.** Fast, optional-by-design: data can expire, an unconfigured Redis can lose recent writes on a crash. Never the only copy of something you can't recreate.
+- **`SET key value EX 10`** sets a TTL; `TTL key` shows the remaining seconds. A fixed window is one `INCR` plus one `EXPIRE ... NX`; the second `INCR` does not reset the clock, which is what makes the window fixed from the first request.
+- **`SET key value NX EX 30`** is an atomic lock: one caller gets `OK`, the rest get `nil`. This is the Redis version of `SELECT ... FOR UPDATE` for a job claim.
+- **`INCR` is atomic on the single-threaded server.** Day 9's file race (lost updates) becomes 2000 on Redis with the same two simultaneous loops. The counter can't lose a step because there is one thread.
+- **Never `KEYS *` in production.** It scans the whole keyspace and blocks the single thread. Use `SCAN` with a cursor.
+- **Hashes hold a small object per key** (`HSET stats:project:1 todo 3 done 5`, `HGETALL`), which is the shape a per-project dashboard cache would take.
+- **Redis is a network dependency with failure modes.** Week 6 decides fail-open vs fail-closed for the limiter, and read-through vs error for the cache. Both are written down and tested, not left to the first `redis.get()` throw.
+
+## Day 36 Observations
+
+### Step 1 — failure-policy experiment (before the code)
+
+| Feature | If Redis is down | Choice | Why |
+|---|---|---|---|
+| Global request limiter | Degrade to per-instance `MemoryStore` | **degrade** | Limits still apply, just per instance. Fail closed would 503 every request during any Redis outage; fail open would remove it entirely. |
+| Login, register, refresh limiters | Degrade | **degrade** | Failing closed on `/auth/login` locks every user out during a Redis outage — worse than a temporarily weaker limit. Failing open gives an attacker unlimited guesses. Per-instance counting is the compromise. |
+| Invitation limiter | Degrade | **degrade** | Same reasoning, lower stakes: 20/hour per instance instead of 20/hour total. |
+| `/ready` endpoint | `200` with `degraded` | **degraded** | The app can serve; the operator sees it in the readiness output; the load balancer should keep routing. A 503 here would take the whole API down for a Redis outage. |
+| Server startup | Start anyway, retry in background | **degrade** | A Redis hiccup during a deploy must not prevent the API from booting. `connectRedis()` returns `false`, logs `redis.unavailable`, and the retry loop kicks in. |
+
+**Worst an attacker can do during a Redis outage under "degrade for login":** with N instances running, up to N × 10 login failures per 15 min per account (the per-instance fallback limit), instead of 10 total. A single-instance deployment has no worse behavior than before; a multi-instance deployment has the weakness until Redis recovers. Deliberate trade-off: without Redis, either every login is blocked (fail closed) or no login is limited (fail open). Per-instance counting is the middle ground.
+
+### Step 17 — two-instance experiment (shared budget)
+
+Setup: two servers, `RATE_LIMIT_ENABLED=true PORT=3000/3001`, `REDIS_URL` set (so both use Redis). Loop hits `POST /auth/register` with an empty body (`-d '{}'`), alternating ports:
+
+```
+port 3000 -> 400
+port 3001 -> 400
+port 3000 -> 400
+port 3001 -> 400
+port 3000 -> 400
+port 3001 -> 429
+```
+
+Five `400` then one `429` on the **sixth** request, split across two processes. Before Day 36 (each process with its own `MemoryStore`) the same six requests would all have been `400`, because each instance would have counted only three.
+
+**Redis inspection right after the loop:**
+- `redis-cli --scan --pattern 'rl:*'` → `rl:register:::/56`, `rl:global:::/56` — two keys, one per limiter, **one shared counter each**.
+- `get 'rl:register:::/56'` → `6`. The register limit is 5; `express-rate-limit` increments *then* compares, so a blocked request leaves the counter at `limit + 1`. The test asserts the status sequence (`[400, 400, 400, 400, 400, 429]`), not the counter value.
+- `pttl 'rl:register:::/56'` → `3368289` ms (≈ 56 minutes left of the 1-hour window).
+- `get 'rl:global:::/56'` → `(nil)` and `pttl` → `-2` **when inspected later** — the global window is 60 s, and the inspection happened more than a minute after the loop.
+- The key contains `::` (the IPv6 loopback, normalized by `ipKeyGenerator` to the `/56` subnet) and `/56` (the prefix length), so it is `rl:register:::/56`, **not** `rl:register:::1`.
+
+### Step 17 — survives a restart / rebuild from empty state
+
+1. Deleted every `rl:*` key.
+2. Re-ran the same 3×2 loop → **same sequence** `[400, 400, 400, 400, 400, 429]`.
+3. With the counter over the limit:
+   - Request against the running server → `429`.
+   - Restarted port 3000.
+   - Same request against the **fresh** process → **`429`**, not `400`. The counter lives in Redis, not in the process.
+
+### Step 17 — per-instance when `REDIS_URL` is empty
+
+Both servers restarted with `REDIS_URL=` (empty). Same 3×2 loop → **six `400`, zero `429`**. `redis-cli --scan --pattern 'rl:*'` → **no keys**. Each process sees 3 requests against its own limit of 5. `GET /ready` → `{ "status": "ok", "checks": { "database": "up", "redis": "disabled" } }`.
+
+### Step 18 — the store as Redis sees it
+
+`redis-cli monitor` while one register request is served shows a single `MULTI` transaction:
+
+```
+"multi"
+"incr"     "rl:register:::/56"
+"pexpire"  "rl:register:::/56"  "3600000"  "NX"
+"pttl"     "rl:register:::/56"
+"exec"
+```
+
+The `NX` is visible in the `pexpire` arguments.
+
+### Step 19 — outage drill
+
+- `docker stop taskflow-redis` → `/ready` flipped to `degraded` within ~1 s.
+- Six register requests → `400 400 400 400 400 429` — the in-memory fallback still applies the limit, per instance.
+- `docker start taskflow-redis` → within ~8 s, `/ready` returned `ok` **without restarting the server**.
+- Server log during the outage: **one** `rate_limit.store_fallback` warning and **one** `redis.error` — not hundreds.
+- Server log after recovery: **one** `redis.ready`.
+
+### Step F — mutation table (7 rows)
+
+| # | Break | Failed test | Result |
+|---|---|---|---|
+| 1 | Drop `"NX"` from `PEXPIRE` | store test "does not extend the window" | ✅ caught |
+| 2 | Give the `refresh` limiter the name `register` | **only the redis variant** of the rate-limit tests | ✅ caught — the memory variant cannot see the collision |
+| 3 | Return the raw email from `emailKey` | "never puts an email address into a Redis key" | ✅ caught |
+| 4 | Rethrow in `ResilientStore.run` instead of falling back | outage test | ✅ caught |
+| 5 | Remove `enableOfflineQueue: false` | outage tests still pass, but are **noticeably slower** | ⚠️ caught only as a **speed regression** |
+| 6 | Delete the "REDIS_URL required in production" guard | config unit test | ✅ caught |
+| 7 | Make `/ready` return 200 when `unavailable` | health integration test | ✅ caught |
+
+### Step 20 — checkpoint answers
+
+(Summarized here; full text on Day 36.)
+
+1. `INCR` is one step; Day 9's read-modify-write had a gap.
+2. `PEXPIRE ... NX` sets the expiry only if none exists; without it, every request resets the timer.
+3. `enableOfflineQueue: false` fails fast instead of queueing; row 5 is a **latency** difference, not a correctness one.
+4. **Degrade** for the login limiter: N × the budget, not unlimited (fail open) or zero (fail closed).
+5. The email is hashed inside the Redis key so `MONITOR`/`KEYS` can't enumerate login targets.
+6. Two limiters with the same name share a counter; only the redis variant can see the collision.
+7. `/health` is liveness, `/ready` is readiness with a deadline; Redis down is `degraded` (200), database down is `unavailable` (503).
+8. `"127.0.0.1:6379:6379"` binds to localhost; `"6379:6379"` publishes on every interface. `noeviction` is for the Day 38 queue (jobs must not be evicted); every key needs a TTL.
+
+## Day 37 Observations
+
+### Step 1 — thinking before coding
+
+**1. What could make a cached stats answer wrong, and which mechanism handles each?**
+
+| Situation | Mechanism |
+|---|---|
+| A task is created in the project | **Invalidation** (`invalidateStats(created.projectId)` in `addTask`) |
+| A task's status changes | **Invalidation** (`invalidateStats(task.projectId, updated.projectId)` in `updateTask`) |
+| A task's priority changes | **Invalidation** (same call) |
+| A task moves to another project | **Invalidation** of **both** projects (the `Set` in `invalidateStats` dedupes) |
+| A task is deleted | **Invalidation** (`invalidateStats(task.projectId)` in `deleteTask`) |
+| Midnight UTC passes | **The date in the key** (`variant: todayUtc(now())`) |
+| A script writes rows directly | **The TTL** (up to 60 s ± 10% of staleness) |
+| Redis is down during a write | **The TTL** (`invalidate` never throws, so the write succeeds) |
+| Redis is down during a read | **`bypass`** (computed fresh; `X-Cache: bypass`) |
+| Two tests reuse project 1 | **`flushTestRedis()` in `beforeEach`** |
+| The stats `computedAt` makes two answers look different | **Nothing** — a `hit` returns the same `computedAt`; it's the same stored JSON |
+| `overdue` computed from a local midnight | **The UTC date** is what's in the key — the Day 31 trade-off |
+
+**2. The race. Events in this order:** (1) reader misses; (2) reader reads the database; (3) writer commits; (4) writer invalidates; (5) reader stores its result.
+
+| Design | Next request stale? |
+|---|---|
+| (a) one fixed key, writer deletes it | **Yes** — the reader stores its stale result under the same fixed key |
+| (b) version read **before** computing, writer increments it | **No** — the reader stores under the old generation `g`; the writer's `INCR` moves the live generation to `g+1`; the next reader misses on `g+1` and computes fresh |
+| (c) version read **after** computing | **Yes** — the reader reads `g+1`, stores its stale result under `g+1`, and the next reader sees it |
+
+**Which one is wrong, and why?** (a) and (c) are both wrong: the read that determines *where to store* runs too late, so it sees the post-invalidation world and stores the old result in it. (b) is right because the store's destination is fixed at the *start*.
+
+**3. The leak.** If the access check ran *after* a cache hit: a stranger would get the numbers from the cache on a hit, and the check would run too late. `getProjectStats` calls `access.requireProjectRole` **first**; a stranger gets `404` and never reaches the cache.
+
+### Step 16 — benchmark (`bench:stats`)
+
+**Setup:** `npm run db:bench-seed`, `npm run dev`, `npm run bench:stats` (15 iterations, each: invalidate → cold `miss` → warm `hit`).
+
+**Numbers:** `project 179: cold (computed) 33.7 ms, warm (cached) 17.4 ms` — the cache saves **~16.3 ms** per request (~2× speedup). The cold time is dominated by the `groupBy(status, priority)` over the project's tasks. The `EXPLAIN ANALYZE` plan for the `groupBy` is still a `TODO`.
+
+### Step 17 — mutation table (11 rows)
+
+| # | Break | Failed test | Result |
+|---|---|---|---|
+| 1 | Delete `access.requireProjectRole` in `getProjectStats` | unit "checks access BEFORE the cache…" + integration "answers 404 to a stranger even while the entry is warm" | ✅ caught |
+| 2 | `scope: "project"` (no id) | integration "keeps different projects apart", "does not let a member of one project read another project's entry" | ✅ caught |
+| 3 | `variant: "today"` instead of the date | unit "builds the cache key from the project and the date", "uses a different key after midnight UTC" | ✅ caught |
+| 4 | Remove invalidation from `deleteTask` | integration "after deleting a task" | ✅ caught |
+| 5 | In `updateTask`, invalidate only `updated.projectId` | integration "moving a task out of the project", "refreshes BOTH projects…" | ✅ caught |
+| 6 | Remove `stats.invalidateProject(targetId)` after a merge | integration "refreshes the target when two projects are merged" | ✅ caught |
+| 7 | Read the generation **after** `compute()` | unit "stores a stale result under a dead generation…" | ✅ caught |
+| 8 | Delete the single-flight lookup | unit "runs one computation for many simultaneous misses", integration "shares one computation…" | ✅ caught |
+| 9 | Remove the `try/catch` around the read | unit "answers from the computation…", integration "still answers, straight from the database…" | ✅ caught |
+| 10 | Replace `withJitter(...)` with the plain TTL | unit "spreads expiry times with jitter…" | ✅ caught |
+| 11 | Delete `flushTestRedis()` from `setup.ts` | many tests, in confusing ways | ⚠️ caught **indirectly** |
+
+**Row 7 is the lesson:** the "simpler" version of `getOrCompute` (read the version *after* `compute()`) passes every test except the race test. The rule is: **read the version first, compute second, store under the version you read**. The test that pins it is `"stores a stale result under a dead generation when a write happens during the computation"`.
+
+**Row 11 is the other lesson:** `RESTART IDENTITY` makes project 1 a *different* project after truncation, but the cache key is still `cache:v1:project-stats:project:1:...`. Without `flushTestRedis()`, a cached `miss` from one test becomes a `hit` for a different project 1 in the next.
+
+## Day 37 Checkpoint Answers
+
+1. **What makes a good key?** Every input the answer depends on, and only those. Without the date, yesterday's "due soon" count is wrong today. With the user unnecessarily included, every member has their own cold start for an answer that is the same for all of them.
+2. **Why does the access check run before the cache?** The cache stores *answers*, not *permissions*. If the check ran after a cache read, a stranger would get the numbers from the cache on a hit, and the check would run too late to matter.
+3. **The stale-write race.** (1) reader misses; (2) reader reads the database; (3) writer commits; (4) writer invalidates (bumps `g` to `g+1`); (5) reader stores. With a fixed key (design a), step 5 writes the stale result under the live key. With the version read **before** computing (design b), the reader stored under `g`, the writer's `INCR` moves the live generation to `g+1`, and the next reader misses on `g+1`. With the version read **after** computing (design c), the reader reads `g+1` and stores its stale result under `g+1` — the same bug as (a), one step later.
+4. **Why must invalidation happen after the commit?** If it runs *before*, a reader can start after the invalidation (reading `g+1`) but compute from the pre-commit snapshot, and store its stale result under `g+1`.
+5. **What do the TTL, the generation counter and the date protect against?** The TTL bounds staleness when an invalidation is missed. The generation counter is the mechanism — every write bumps it, old entries become unreachable. The date in the key handles midnight UTC (overdue and due-soon change without any row changing).
+6. **What do single-flight and jitter prevent?** Single-flight prevents a stampede *within one process*; jitter prevents a stampede across many entries (they don't all expire together). Single-flight doesn't protect across instances because each has its own `inFlight` map.
+7. **Why is a write allowed to succeed even when invalidation fails?** The user's action should not fail because a cache is down. `invalidate` catches, logs (`cache.error`, throttled), and returns `void`. The damage is bounded by the TTL.
+8. **Why did row 11 break tests in confusing ways?** `RESTART IDENTITY` makes project 1 a *different* project, but the cache key is the same. The same happens in production after `db:fresh`, a backup restore, or a re-creation from migrations. The fix is to flush the cache with the database.
+
+## Day 38 Checkpoint Answers
+
+1. **Why does a payload carry ids instead of the task title, and what does the worker read at run time?**
+   > A payload that carries the title would send what the title *was* when the job was enqueued, not what it *is* when the handler runs. Between those two moments the task can be renamed, reassigned, or deleted, and the email should reflect the current state (or not be sent at all). The payload is `{ taskId, assigneeId, assignedById }` — ids only — and the worker reads the **task**, the **assignee**, the **assigner**, and the **project** from the database at run time. It also keeps personal data (titles, names, email addresses) out of Redis, which is consistent with Day 36's "hash the email before it becomes a key" rule.
+
+2. **What does at-least-once delivery mean, and how does the handler stay safe when a job runs twice?**
+   > "At-least-once" means the queue guarantees every job runs **at least** once — never lost — but it can run **more than once** if a worker crashes after doing the work and before acknowledging the job to Redis. The handler is safe because it **decides from the current database state, not from what the payload claims**: `"task-assigned"` first loads the task; if the task no longer exists, or `task.assigneeId !== payload.assigneeId`, it returns `{ outcome: "skipped", reason }` and sends nothing.
+
+3. **Which failures are retried, which aren't, and why does `attempts` include the first run?**
+   > **Retried**: temporary failures (anything `isPermanent` doesn't recognize — a connection timeout, a DNS hiccup, an SMTP 4xx). BullMQ waits 5 s, then 10, then 20, then 40, for `attempts: 5` total. **Not retried**: `isPermanent(error)` returns true for an SMTP 5xx and an envelope error; those throw `UnrecoverableError` and go straight to the failed list. A malformed payload or unknown job name also throws `UnrecoverableError` before the handler runs. **`attempts: 5` counts the first run**: BullMQ's `attemptsMade` starts at 1 on the first failure and reaches 5 on the last.
+
+4. **What is the dual-write problem, what did you do about it today, and what does the outbox pattern change?**
+   > The dual-write problem: "save the assignment in PostgreSQL" and "put a job in Redis" are two writes to two systems, with no transaction across them. Today's choice is "after the commit, log `job.enqueue_failed`, and never fail the request" — the assignment is correct and visible; the email is lost, and the log line is the only evidence. The **outbox pattern** fixes it by making the "to notify" row part of the same PostgreSQL transaction as the assignment — either both save or neither does — and a relay reads the outbox and enqueues the jobs (then deletes the rows).
+
+5. **Why must the worker finish its active job on `SIGTERM`, and what happens to a job whose worker is killed outright?**
+   > A worker that exits on `SIGTERM` without finishing its active job leaves the job *active* in Redis but unowned. `worker.close()` stops taking new jobs, lets the current handler finish, acknowledges the job to Redis, then exits. A worker **killed outright** leaves its job *stalled*; BullMQ notices after the job's lock expires (default 30 s) and gives it to another worker — one more way to get a duplicate run.
+
+6. **Why does assignment refuse a user from another project with the same message as a user who doesn't exist?**
+   > To prevent **enumeration**: if the two cases had different messages, an owner could probe whether an account exists by trying to assign a task to it. Both throw the same `UserError("User <id> is not a member of this project.")`; the integration test strips the digits from both messages and asserts they're equal.
+
+7. **Why are titles flattened onto one line before they reach a mail header, and why is the body plain text?**
+   > A `Subject:` value that contains `\r\nBcc: evil@example.com` is interpreted by the SMTP server as a second header, and the message gets an extra recipient. `oneLine(text, max)` replaces every line break (including `\u2028`/`\u2029`) with a space and truncates to a max length. The body is `text:` (plain text, no `html:`), so a title containing `<script>alert(1)</script>` is shown literally.
+
+8. **Why do the queue tests close the worker in `afterEach` and poll with `waitFor` instead of sleeping?**
+   > `afterEach` closes the worker so a worker from one test doesn't pick up a job from the next test — the file runs its tests against the **same** Redis queue. `waitFor` polls a condition with a short interval (20 ms) and a timeout (5 s), and **fails with a clear message** if the condition doesn't hold in time. A fixed `sleep(100)` would either be too short (flake) or too long (slow), and a `sleep` that "passed" tells you nothing about *why*.
+
+## Day 38 Observations
+
+### Step 1 — the failure table, filled in
+
+| Situation | What happens to the assignment | What happens to the email | How it's noticed or recovered |
+|---|---|---|---|
+| The worker isn't running when someone is assigned | **Succeeds** — PostgreSQL is written, the job sits in Redis's `waiting` list | **Delayed** — the job runs as soon as a worker starts | `npm run jobs -- stats` shows `waiting: N`. When the worker starts, `job.completed` logs, and the message appears in Mailpit. No loss. |
+| Redis is down at the moment of assignment | **Succeeds** — the write is saved; `jobs.enqueue` throws and is caught | **Lost** — no record anywhere of the intent to notify | The API logs `job.enqueue_failed`. The email is never sent. This is the dual-write problem, and the outbox pattern (Challenge 1) is the fix. |
+| SMTP is down for ten minutes | **Succeeds** — the job is in Redis | **Retried** with backoff (5 s, 10 s, 20 s, 40 s) until the mailer succeeds or 5 attempts are used | `job.will_retry` with `attempt: job.attemptsMade` each time; once Mailpit is back, `job.completed` fires. If the outage outlasts the attempts, `job.failed_permanently` logs and `jobs -- failed` shows the job. |
+| The worker is killed while sending | **Succeeds** (the assignment was saved before the job ran) | **May be sent twice** — the job is *stalled*; after ~30 s BullMQ gives it to another worker | `job.completed` appears twice (two workers). At-least-once delivery — the handler is idempotent, so at worst the assignee gets two emails. |
+| The task is deleted before the job runs | **Succeeds** (the deletion) | **Skipped** — the handler finds no task and returns `{ outcome: "skipped", reason: "task no longer exists" }` | `job.completed` with `result: { outcome: "skipped", reason: "task no longer exists" }`. No email, no error. |
+| The job's payload is garbage | **Succeeds** (the enqueue would have failed the Zod schema in the producer) | **Not sent** — `safeParse` fails, `UnrecoverableError("invalid job payload")` is thrown, the job goes straight to the failed list | `job.failed_permanently` with `attempt: 1`; `jobs -- failed` shows `attemptsMade=1` and `failedReason="invalid job payload"` — but **not** the payload. |
+
+**What the table makes explicit:** the assignment is **always** saved (the request never fails because a notification can't be queued or sent). Three rows are "delayed, retried, or skipped — and the state is consistent"; two are "duplicate, but harmless because the handler is idempotent"; one is "**lost**, and only the outbox pattern would recover it."
+
+### Step 17 — the two-instance durability drill
+
+**Setup:** `docker compose ps` shows `taskflow-db`, `taskflow-redis`, `taskflow-mailpit` healthy. `npm run dev`, `npm run worker`, `.env` at `JOBS_MODE=queue`, `MAIL_TRANSPORT=smtp`, `SMTP_URL=smtp://localhost:1025`.
+
+**Baseline:** assign task 1 to Alex. The PATCH returns `200` with `assigneeId: 2`. The worker logs `job.completed`, `result: { outcome: "sent" }`. Mailpit has one message: `Sam assigned you: Design the schema`, to `alex@example.com`. `jobs -- stats` → `completed: 1`.
+
+**Durability 1 (worker stopped):**
+
+1. `Ctrl+C` in the worker → `"shutting down: finishing the active jobs first"`.
+2. Assign task 2 to Alex. The PATCH returns `200`. No `job.completed` yet.
+3. `jobs -- stats` → `waiting: 1`. The job is sitting in Redis.
+4. `npm run worker` → the new worker picks up the job immediately, logs `job.completed`, Mailpit has a second message.
+5. `jobs -- stats` → `completed: 2, waiting: 0`.
+
+**Durability 2 (worker restart):**
+
+1. Assign task 3 to Mina. It completes. Mailpit has a third message.
+2. Restart the worker (`Ctrl+C`, `npm run worker`). The worker logs `"worker started, waiting for jobs"`.
+3. `completed: 3` is unchanged; nothing is re-run on startup.
+
+### Step 19 — the SMTP outage drill
+
+**Outage 1 (SMTP down, recover before attempts run out):**
+
+1. `docker stop taskflow-mailpit`.
+2. Assign task 4 to Alex. The PATCH returns `200`.
+3. The worker logs `job.will_retry` with `attempt: 1`. ~5 s later, `attempt: 2`. ~10 s later, `attempt: 3`. ~20 s later, `attempt: 4`.
+4. **Before** attempt 5 fires, `docker start taskflow-mailpit`.
+5. The next retry succeeds: `job.completed`, `result: { outcome: "sent" }`. Mailpit has a message for Alex.
+
+**Outage 2 (SMTP down past all attempts, then recover by hand):**
+
+1. `docker stop taskflow-mailpit`.
+2. Assign task 5 to Mina. Watch `job.will_retry` with `attempt: 1, 2, 3, 4, 5`.
+3. After the 5th attempt fails, `job.failed_permanently` with `attempt: 5`.
+4. `jobs -- stats` → `completed: 4, failed: 1`.
+5. `jobs -- failed` → shows job 5 with `attempts=5` and the SMTP error reason.
+6. `docker start taskflow-mailpit`, then `jobs -- retry 5`. `job.completed`, Mailpit has a message for Mina.
+
+### Step 20 — the Redis outage drill
+
+1. `docker stop taskflow-redis`. The worker logs `redis.error` (throttled). `/ready` flips to `degraded`.
+2. Assign task 6 to Alex. The PATCH returns **`200`** — the assignment is saved. The API logs `job.enqueue_failed`.
+3. `jobs -- stats` **fails** — Redis is down.
+4. `docker start taskflow-redis`. `/ready` returns `ok`; the worker logs `redis.ready`.
+5. **The email for task 6 is never sent.** The job was never enqueued. This is the "lost, not recovered" row — the outbox pattern is the fix.
+
+### Week 6 numbers (Day 38)
+
+- `typecheck:all` → green
+- `lint` → green (the `no-unsafe-call` on `mailer.close` fixed by making `close` optional and using `mailer.close?.()`)
+- `test:unit` → 19 files, 304/304
+- `test:integration` → all passing, including `tasks.assignment.test.ts`, `jobs.queue.test.ts`, `mail.smtp.test.ts`
+- `ci` → green
+- Part F drills: **durability** ✅, **SMTP outage** (retry and exhaust) ✅, **Redis outage** (assignment succeeds, email lost) ✅
+
+### The row-2 lesson (BullMQ connection type)
+
+**What it is:** BullMQ's `ConnectionOptions` has a narrower `retryStrategy` type than ioredis's `RedisOptions`. Passing the full `RedisOptions` fails the TypeScript overload with `Type 'RetryStrategy' is not assignable to type '((times: number) => void | number | null) | undefined'`.
+
+**What it is not:** a runtime problem.
+
+**The fix:** `toBullConnection(opts)` returns a `Pick<RedisOptions, "host" | "port" | "username" | "password" | "db" | "tls">`, and both `queue.ts` and `worker.ts` spread it. The narrower type matches BullMQ's overload; `enableOfflineQueue: false` (producer) and `maxRetriesPerRequest: null` (worker) are added on top.
+
+**The lesson:** when a library accepts a narrower type than the one you're holding, **narrow it explicitly** rather than casting. A cast (`as RedisOptions`) would have silenced the error while lying to the compiler about the shape; the `toBullConnection` helper says out loud what BullMQ actually consumes.
+
+## Known limitations
+*(Each of these is fixed by a specific upcoming week, showing forward planning.)*
+
+1. **Search Wildcards:** Searching for `%` or `_` returns all tasks because SQL `LIKE` interprets them as wildcards.
+2. **No Retries on `P2034`:** No automatic retries for deadlocks yet.
+3. **No CI:** No GitHub Actions pipeline yet; **Week 7**.
+4. **Offset pagination is slow on deep pages** — **Week 5**.
+5. **`ILIKE` search lacks a trigram index** — **Week 5**.
+6. **CSV export loads all rows** — **Week 5**.
+7. **`/health` doesn't check the database:** liveness only; **`/ready`** is the readiness probe.
+8. **Rate limits are in-memory (fixed on Day 36):** Counters now live in Redis and are shared across instances.
+9. **During a Redis outage, rate limits degrade to per-instance.** The `ResilientStore` falls back to `MemoryStore`; `/ready` reports `degraded`.
+10. **Fixed-window rate limiting allows a burst at the window boundary.**
+11. **Per-account throttle can be abused to lock a victim out.**
+12. **No CAPTCHA or MFA.**
+13. **No email verification** — **Week 6** adds it.
+14. **Access tokens cannot be revoked.**
+15. **Member invites reveal email existence.**
+16. **No automated alerting.**
+17. **Only two roles (owner, member).**
+18. **Legacy tasks and projects with no owner are invisible.**
+19. **Moving a task out of a project can orphan it from a creator who left.**
+20. **`listComments` still loads every comment before filtering.**
+21. **Integration tests wipe the test database on every `beforeEach`.**
+22. **Due-date rule uses the UTC date, not the caller's local date.**
+23. **Integration tests don't cover every branch of `PATCH /tasks/:id`.**
+24. **Rate-limiter window expiry was untested** — fixed on **Day 36**.
+25. **No load testing** — **Week 7**.
+26. **No contract test between OpenAPI and real responses.**
+27. **Five scripts retired.**
+28. **`smoke.ts` is intentionally small (12 checks).**
+29. **`verify.sh` restarts the compiled server between `smoke` and `test:ratelimit`.**
+30. **`eslint-config-prettier` is the only rule-disabling plugin.**
+31. **`no-restricted-imports` is the architecture fitness function.**
+32. **`precheck` / `ci` catch drift.**
+33. **Hooks are not the gate.**
+34. **Redaction is by key name only.**
+35. **Prisma's own query log bypasses pino.**
+36. **No log shipping or alerting yet.**
+37. **Logs from before the context middleware rely on explicit `requestId`.**
+38. **`operationId` is auto-generated from method+path.**
+39. **`operation-4xx-response` is off in `redocly.yaml`.**
+40. **During a Redis outage, rate limits are per instance, not shared.**
+41. **Fixed-window rate limiting allows a burst at the boundary.**
+42. **No Redis authentication or TLS in development.**
+43. **`/ready` is public and reveals dependency state.**
+44. **No email verification or password reset** — **Week 6**.
+45. **No CI or container hardening yet** — **Week 7**.
+46. **No load testing.**
+47. **No contract test between OpenAPI and real responses.**
+48. **Redis is a single instance with `noeviction` and `appendonly yes`.**
+49. **The in-memory fallback's counters are local to the process and reset on restart.**
+50. **`ipKeyGenerator` normalizes IPv6 to a `/56` subnet.**
+51. **Cached stats can be up to ~66 s stale after a write that bypasses the service layer.**
+52. **Single-flight is per process, not per cluster.**
+53. **The three aggregate queries are not one snapshot.**
+54. **`prisma/seed.ts`, `scripts/seed-bench.ts`, and the `bench` fixture write directly to the database and do not invalidate the cache.**
+55. **Benchmark numbers from `bench:stats` (Day 37):** **cold (computed) 33.7 ms, warm (cached) 17.4 ms** on project 179 (~2× speedup).
+56. **A Redis outage at the moment of assignment loses the notification (no outbox yet):** The assignment is saved (the request returns 200) and the failure is logged as `job.enqueue_failed`, but there is no durable record of the intent to notify. **Day 38's "Redis down at assignment" row in the failure table** is the honest case: *lost, not recovered.* The fix is the **transactional outbox** (Challenge 1 of Day 38, not implemented today).
+57. **At-least-once means a rare duplicate email is possible:** A worker that crashes after sending but before acknowledging leaves the job stalled; BullMQ re-delivers it to another worker, which sends again. The handler is idempotent (it re-reads the current task and skips if the assignee changed), so the worst case is one duplicate email. For something that must never be duplicated (charging a card), a stored idempotency key in a `sent_notifications` table is the fix (Challenge 2).
+58. **No per-user notification preferences or throttling:** Assigning, unassigning, and reassigning the same task in a minute sends **two** emails. Day 38's Challenge 3 is a 30-second debounce.
+59. **The worker needs its own process in production:** `npm run worker` is a separate Node process; a single-process deployment will enqueue jobs and never run them. **Week 7** adds the Dockerfile and the deployment manifest that run the API and the worker as separate containers.
+60. **SMTP error messages can contain addresses and reach the logs:** A `SmtpMailer` failure carries nodemailer's error object, whose `message` may include the recipient address. Day 34's `SENSITIVE_KEYS` redaction is by **field name**, and `message` is not in the list. The fix is a `serializeError`-style trim for mail errors (keep the SMTP response code, drop the recipient), the same shape as the Prisma trim from Day 34.
+61. **`JOBS_MODE=inline` hides retry behavior:** Inline mode runs the handler in the API process, catches its rejection, and logs `job.inline_failed` — it does **not** retry, back off, or move the job to a failed list. Every integration test runs in inline mode (per `tests/support/env.ts`), so the retry policy, the dead-letter list, and the worker's graceful shutdown are only proven by `jobs.queue.test.ts`.
+62. **The queue and the cache share one `noeviction` Redis instance:** The cache would prefer `allkeys-lru`, the queue needs `noeviction`. One instance means one policy, and `noeviction` is the safer choice today because a lost cache entry is a slow read while a lost job is a lost email. A real production deployment would run separate instances.
+63. **`smtpUrl` and `redisUrl` are in `SENSITIVE_KEYS`, but only at the three configured depths:** `REDIS_URL` and `SMTP_URL` can carry passwords; Day 38 added both keys to `SENSITIVE_KEYS` so they're redacted when logged as `{ redisUrl }` or `{ config: { smtpUrl } }`. Not covered: a URL inside a larger string, or a config dump nested deeper than two levels.
+
+## Week 1 summary
+Three things I can do now that I couldn't on Day 1:
+- import and export files
+- write TypeScript
+- use Git PRs
+
+One thing I want to get better at in Week 2:
+- HTTP requests
+
+## Week 2 summary
+Three things I can do now that I couldn't on Day 8:
+- Build a full REST API with Express and middleware.
+- Validate every layer of a request with Zod.
+- Design a repository pattern that decouples storage from logic.
+
+Things that confused me:
+- CORS preflight requests (why the browser blocks things `curl` doesn't).
+- The exact order of middleware in `app.ts`.
+
+What I'd do differently:
+- Commit smaller and more often (I lost some work in a merge conflict).
+- Write the smoke test earlier so I could catch regressions faster.
+
+One thing I want to get better at in Week 3:
+- Writing raw SQL and understanding database constraints.
+
+## Week 3 summary
+Three things I can do now that I couldn't on Day 15:
+- Design database schemas with relations and constraints.
+- Write and safely apply migrations to a database with existing data.
+- Use transactions to keep multi-step operations atomic.
+
+Things that confused me:
+- The difference between `migrate dev` and `migrate deploy`.
+- Why a rename requires `RENAME COLUMN` instead of `DROP` + `ADD`.
+
+What I'd do differently:
+- Write the migration check script earlier so I catch schema drift sooner.
+
+One thing I want to get better at in Week 4:
+- Implementing authentication and authorization securely.
+
+## Week 4 summary
+Three things I can do now that I couldn't on Day 22:
+- Implement secure authentication (Argon2, JWT, refresh tokens with rotation).
+- Design and enforce role-based access control with a matrix.
+- Prove security properties with automated test scripts (tokens, access, rate limits).
+
+Things that confused me:
+- Why access tokens are stateless and refresh tokens are stateful.
+- The last-owner race condition and how `SELECT ... FOR UPDATE` fixes it.
+
+What I'd do differently:
+- Write the access matrix test *before* writing the services, so the tests guide the design.
+
+One thing I want to get better at in Week 5:
+- Writing proper unit and integration tests with a framework (Vitest), instead of ad-hoc scripts.
+
+## Week 5 summary
+Three things I can do now that I couldn't on Day 28:
+- Write fast unit tests for pure logic using Vitest.
+- Mock external dependencies (like `randomBytes` or `Date`) to make tests deterministic.
+- Use a fake implementation of an interface to test complex logic without a database.
+
+Three more things I can do now that I couldn't on Day 29:
+- Write integration tests against a real, isolated test database using Supertest.
+- Migrate the test database from migration files, proving the migration history is reproducible from empty.
+- Prove the test infrastructure itself works (name checks, truncation between tests, `RESTART IDENTITY`) before trusting it with real tests.
+
+Three more things I can do now that I couldn't on Day 30:
+- Write integration tests for task CRUD, visibility, filtering, sorting and pagination — the heart of TaskFlow.
+- Write integration tests for project management, including **transactional duplicate and merge**, with the concurrency race under `Promise.all`.
+- Practice **red-green-refactor** end-to-end on a real new rule (past due dates rejected on creation), with the boundary ("is today past?") extracted into a pure function tested deterministically.
+
+Three more things I can do now that I couldn't on Day 31:
+- Port a security-critical **access matrix** (24 actions × 3 personas = 72 cells) into a real test suite, with a **fingerprint** assertion that a denied request changes nothing.
+- Test **sessions end-to-end**: refresh rotation, reuse detection, logout, logout-all, purge, expired-token behavior, parallel-refresh race, and the documented "access token survives logout" limitation.
+- Run **combined coverage** (unit + integration) with a **ratcheted threshold** and prove the guard fails when it should.
+- **Retire scripts safely**: only after re-introducing the exact bugs they caught and confirming the suite now catches them, then shrink `smoke.ts` to a post-build check of the compiled server.
+
+Three more things I can do now that I couldn't on Day 32:
+- Set up **Prettier + EditorConfig** and land the giant reformat as an isolated commit that `git blame` skips via `.git-blame-ignore-revs`.
+- Install **ESLint flat config with type-aware rules** — including the side-by-side TypeScript 7 / TypeScript 6 alias workaround for `typescript-eslint`'s peer dependency — and triage a real `recommendedTypeChecked` findings pile down to zero.
+- Enforce **architecture** with `no-restricted-imports`: controllers/routes/services/auth/middleware/schemas can't import Prisma; only `container.ts`, `server.ts`, and `cli.ts` can.
+- Install **Husky + lint-staged** hooks that run in ~2s on staged files, plus a pre-push hook that runs typecheck + unit tests, and prove all five behaviors empirically (block, auto-fix, speed, `--no-verify` bypass, pre-push block).
+- Wire **`precheck` and `ci`** as one command that matches what Week 7's pipeline will run, and add `.vscode/` settings for team consistency.
+
+Three more things I can do now that I couldn't on Day 33:
+- Replace `console.error` with **pino** producing one JSON object per line on stdout, with a **`mixin()`** that attaches `{ requestId, userId }` from the async context to every line automatically.
+- Use **`AsyncLocalStorage`** so code deep inside a service logs with the right request ID without passing `requestId` through every function signature — and place the context middleware **after** `express.json()` because a listener runs in the context of whoever calls `emit`.
+- **Redact secrets by field name** at 3 depths and write a **Prisma-aware error serializer** that keeps only the last line and drops `meta`, so query arguments never reach disk — then prove it with an **integration leak test** that pushes real passwords, hashes, tokens and an email through the whole API and fails if any appear in the output.
+- **Lint the OpenAPI document with Redocly**: auto-generate `operationId` from method+path (unique by construction) and add descriptions to tags, so documentation mistakes fail `precheck` in ~2 seconds.
+- Catch up the Day 32 **`docs.and.auth.test.ts`** file (it was never created) — every documented operation answers `401` without credentials, every protected operation documents a `401`, and `operationId` exists and is unique on every operation.
+
+Three more things I can do now that I couldn't on Day 34:
+- **Test rate limiters inside the suite** by building a fresh copy of the app with `RATE_LIMIT_ENABLED=true` and `vi.resetModules()`, and using `X-Forwarded-For` to give each test its own client address. This replaces the standalone `test:ratelimit` script.
+- **Write characterization tests before a storage swap.** The rate limiter's current behavior is now pinned in the suite; Week 6's move to a Redis store can change the *storage* without changing the *behavior*, and the tests will say if anything changed.
+- **Test documentation so it can't drift.** `project-docs.test.ts` parses the README, `.env.example`, and `CHANGELOG.md` and compares them against `envSchema.shape`, `package.json` scripts, and `package.json` version. Fix the docs, not the test.
+- **Run Redis by hand in a throwaway container** and read the answers to `SET`, `GET`, `TTL`, `INCR`, `SET NX EX`, `HSET`, `HGETALL`, `SCAN`. `INCR` is atomic on a single-threaded server, so Day 9's race returns 2000, not 1998. `SET NX EX` is an atomic lock — the Redis version of `SELECT ... FOR UPDATE`.
+- **Release with a fresh-clone test.** `v0.5.0` tagged only after the clone's `npm run ci` was green, which proves `.env.example` and the README are complete and the setup has no hidden dependency on my machine.
+
+Things that confused me:
+- The difference between a fake, a stub, and a spy.
+- Why faking *all* timers broke the token tests.
+- Why `fileParallelism: false` is required when files share one database.
+- Why `nulls: "last"` matters only in the **descending** direction.
+- Why a rate-limit test can fail on a *freshly started* server — turned out to be a double-mounted limiter (each request counted twice, effective limit halved) rather than any shared budget or ordering issue.
+- Why `typescript-eslint` needs the side-by-side TypeScript 6/7 alias — the native TypeScript 7 compiler removed the JS API it depends on, and `npm i` doesn't tell you that; the `ERESOLVE` message does.
+- Why 24 lint findings is normal and not a sign the code is bad — `recommendedTypeChecked` is the strictest config; reading the top-five rules turns a wall of errors into a handful of categories.
+- Why the `"finish"` handler in `requestLogger` receives `requestId` explicitly and can't read the async context — the response is done, the socket is closing, and the context is either gone or belongs to a different request.
+- Why `operationId` "unique by construction" (generated from method + path) is stronger than "unique by checking" (a test that has to be updated on every new endpoint).
+- Why the rate-limiter tests need `vi.stubEnv` + `vi.resetModules` + a dynamic `import` — the shared test app has limits off, and there's no way to turn them on for one file without a fresh module graph.
+- Why `TRUST_PROXY_HOPS` had to be `1` in the rate-limiter tests — each test poses as a different client with `X-Forwarded-For`, and the app must trust exactly one proxy hop to read that header. Zero hops would ignore it; two would trust a forged one.
+- Why "the test failed with the wrong count" is a *good* diagnostic — exactly half the expected number means the limiter ran twice per request, which is a mount bug, not a config bug. The `RateLimit` response header (`remaining` dropping by 2) shows it in one probe.
+- Why the docs test is not "testing the README" — it's testing the **contract** between three files that must agree (`envSchema`, `.env.example`, README). The files are the source of truth; the test just fails when they disagree.
+- Why the Redis key was `rl:register:::/56`, not `rl:register:::1` — `ipKeyGenerator` normalizes IPv6 to a subnet, not a single address, so two clients in the same `/56` share one budget.
+- Why `express-rate-limit` leaves the counter at `limit + 1` after a 429 — it increments *then* compares, and a blocked request still counts (unless `skipSuccessfulRequests: true`, which decrements on success only).
+- Why the redis variant of the rate-limit suite needed its own assertions — a silent fallback to `MemoryStore` would pass every behavior test, so the "Redis specifics" block has to read `rl:*` directly.
+- Why a private `prefix` field collides with the `Store` interface — the interface has an optional **public** `prefix`, and a class cannot narrow it to `private`. Rename to `keyPrefix`.
+- Why `void this.run(...)` satisfies the lint but breaks `increment`'s type — `increment` returns `ClientRateLimitInfo | Promise<ClientRateLimitInfo>`, and `void` makes it `undefined`. `async increment(...) { return await this.run(...) }` satisfies both.
+- Why the cache read has to come before `compute()` — the "read it after" version is design (c) from the experiment, and it stores the stale result under the live generation. Row 7 of the Day 37 mutation table is the test.
+- Why the invalidation has to come after the commit — the "invalidate before commit" version lets a reader compute from the pre-commit snapshot and store it under the post-invalidation generation.
+- Why `invalidate` must not throw — a Redis outage during a write must not turn into a 500 for the user. The TTL bounds the staleness; the write succeeds.
+- Why `flushTestRedis()` in `beforeEach` is load-bearing, not housekeeping — `RESTART IDENTITY` makes project 1 a *different* project, but the cache key is the same, and the first test's answer is served as a hit to the second. Row 11 removes it and many tests fail in confusing ways.
+- Why the `variant` has to be the **UTC date** and not `"today"` — the date is part of the key, and `"today"` never changes. At midnight UTC, overdue and due-soon change without any row changing, so the key has to change.
+- Why `X-Cache: bypass` is a 200, not a 503 — the app can serve from the database when Redis is down; returning 503 would turn a cache outage into a stats outage.
+- Why the job payload carries only ids — the worker must read the *current* title, assignee and project at run time, and personal data should not sit in Redis.
+- Why `attempts: 5` counts the first run — `attemptsMade` starts at 1 and reaches 5; 5 means "1 attempt + 4 retries".
+- Why a permanent failure is `UnrecoverableError` — BullMQ's retry decision is "retry unless it throws `UnrecoverableError`"; there is no other signal.
+- Why the worker's connection needs `maxRetriesPerRequest: null` and the producer's wants `enableOfflineQueue: false` — the worker blocks on `BRPOP`-style commands, the producer only issues `add()`.
+- Why BullMQ's `ConnectionOptions` is narrower than ioredis's `RedisOptions` — the `retryStrategy` types differ, and `toBullConnection` narrows explicitly rather than casting.
+- Why `jobs.close()` belongs in `server.ts`'s shutdown — the producer holds a `Queue` (an ioredis connection), and leaving it open keeps the event loop alive.
+- Why the worker must not run in `JOBS_MODE=inline` in production — inline mode runs in the API process, doesn't retry, and doesn't survive a restart.
+- Why "no email when the assignee is the actor" is a service rule — the worker only sees ids; the service sees the actor and can skip the "assigning to yourself" case.
+- Why a test that says `jobs.enqueue` was called is not the same as a test that says the email was sent — the three layers (handler unit, queue + worker against Redis, inline end-to-end) cover three different things.
+- Why Mailpit's SMTP test sends real mail while the rest use the memory mailer — the memory mailer is fast and deterministic, but only real SMTP proves the header-injection defense and the delivery path.
+- Why `SmtpMailer` doesn't retry on its own — BullMQ retries; an internal retry would produce `attempts × internalRetries` and race the queue's policy.
+- Why `MemoryMailer.failWith` exists — the failure-path tests need to inject a failure without monkey-patching nodemailer.
+
+What I'd do differently:
+- Write the test *before* the code. The `slugify` test found a bug instantly that would have shipped otherwise.
+- Compute the expected sort order by hand from the dataset before running the test, not after it fails.
+- When a rate-limit test fails, read the `RateLimit` response header first (`remaining`, `limit`), not the status code.
+- Trust the mutation table, not the coverage number.
+- Don't try the ambitious version of a fix under time pressure. The `errorShape()` guard broke the parser mid-edit; the disable-with-reason was correct all along and took 30 seconds.
+- Land the formatting commit and the ESLint fixes as separate commits.
+- When migrating every log call site, run `npm run typecheck:all` after each file.
+- When adding the OpenAPI linter, run `lint:openapi` after every spec change.
+- Write the characterization tests **before** the storage swap.
+- Run the docs tests on the same PR as the docs change.
+- Decide the failure policy in writing before writing the code.
+- Make the shared store visible in the test, not just in the assertion.
+- Run the same test suite against both implementations of an interface.
+- Write the four "cached answer never reaches..." tests **before** the stats service.
+- Build the invalidation table before the write helpers.
+- Run `bench:stats` **before** the cache was written.
+- Resist the urge to simplify the key by dropping the date.
+- Treat `flushTestRedis()` in `beforeEach` as load-bearing, not housekeeping.
+- Write the six-row failure table **before** the assignment code.
+- Add the four `package.json` scripts in the **same commit** as `src/worker.ts` and `scripts/jobs.ts`.
+- Extract `toBullConnection` into its own file (`src/jobs/bullConnection.ts`).
+- Set the development `MAIL_TRANSPORT` default to `smtp`.
+- Make `jobs -- retry <id>` print the job's `data` before retrying.
+- Treat "no outbox" as a first-class limitation.
+- Pin `maxmemory-policy noeviction` for Redis with an assertion.
+- Put `flushTestRedis()` in the jobs queue test file's `beforeEach` first.
+- Write the header-injection test at **both** the `oneLine` level and the `SmtpMailer` level from the first commit.

@@ -5,6 +5,8 @@ import { pipeline } from "node:stream/promises";
 import { createAccess } from "../auth/access.js";
 import { assertSystem, creatorOf, type Actor } from "../auth/policy.js";
 import { ForbiddenError, InvalidReferenceError, NotFoundError, UserError } from "../errors.js";
+import { logger } from "../logger.js";
+import type { JobQueue } from "../jobs/queue.js";
 import type { MemberRepository } from "../repositories/memberRepository.js";
 import type { TaskRepository } from "../repositories/repository.js";
 import type { TaskPatch, TaskQuery } from "../schemas/task.schemas.js";
@@ -27,9 +29,14 @@ function csvEscape(value: string): string {
 const isCreator = (task: Task, actor: Actor) =>
   actor.kind === "system" || task.createdById === actor.id;
 
-type Deps = { tasks: TaskRepository; members: MemberRepository; stats: StatsInvalidator };
+type Deps = {
+  tasks: TaskRepository;
+  members: MemberRepository;
+  stats: StatsInvalidator;
+  jobs: JobQueue;
+};
 
-export function createTaskService({ tasks, members, stats }: Deps) {
+export function createTaskService({ tasks, members, stats, jobs }: Deps) {
   const access = createAccess(members);
 
   // A task you may not see is reported exactly like one that does not exist
@@ -66,6 +73,36 @@ export function createTaskService({ tasks, members, stats }: Deps) {
     }
   }
 
+  // The assignee must belong to the project the task lives in. An unknown user and a user
+  // from another project get the same answer, so this reveals nothing about other accounts.
+  async function assertCanAssign(projectId: number | undefined, assigneeId: number) {
+    if (projectId === undefined) {
+      throw new UserError("A task must belong to a project before it can be assigned.");
+    }
+    if (!(await members.roleOf(projectId, assigneeId))) {
+      throw new UserError(`User ${assigneeId} is not a member of this project.`);
+    }
+  }
+
+  // Runs after the change was saved. Best effort: a failure here must never fail the request.
+  async function notifyAssigned(task: Task, previousAssigneeId: number | undefined, actor: Actor) {
+    if (actor.kind !== "user") return;
+    if (task.assigneeId === undefined || task.assigneeId === previousAssigneeId) return; // nothing new
+    if (task.assigneeId === actor.id) return; // assigning to yourself needs no email
+    try {
+      await jobs.enqueue("task-assigned", {
+        taskId: task.id,
+        assigneeId: task.assigneeId,
+        assignedById: actor.id,
+      });
+    } catch (err) {
+      logger.warn(
+        { event: "job.enqueue_failed", job: "task-assigned", taskId: task.id, err },
+        "could not queue the notification; the assignment itself was saved",
+      );
+    }
+  }
+
   async function getTask(id: number, actor: Actor): Promise<Task> {
     return (await loadTask(id, actor)).task;
   }
@@ -74,6 +111,7 @@ export function createTaskService({ tasks, members, stats }: Deps) {
     const title = input.title.trim();
     if (!title) throw new UserError("Task title cannot be empty.");
     if (input.projectId !== undefined) await assertCanUseProject(actor, input.projectId);
+    if (input.assigneeId !== undefined) await assertCanAssign(input.projectId, input.assigneeId);
     const dueDate = input.dueDate ? validateDate(input.dueDate) : undefined;
     if (dueDate && actor.kind === "user" && isPastDate(dueDate)) {
       throw new UserError("Due date cannot be in the past.");
@@ -88,9 +126,11 @@ export function createTaskService({ tasks, members, stats }: Deps) {
         createdAt: new Date().toISOString(),
         projectId: input.projectId,
         createdById: creatorOf(actor),
+        assigneeId: input.assigneeId,
       }),
     );
     await invalidateStats(created.projectId);
+    await notifyAssigned(created, undefined, actor);
     return created;
   }
 
@@ -115,6 +155,12 @@ export function createTaskService({ tasks, members, stats }: Deps) {
       }
     }
 
+    const targetProjectId =
+      patch.projectId !== undefined ? (patch.projectId ?? undefined) : task.projectId;
+    if (patch.assigneeId !== undefined && patch.assigneeId !== null) {
+      await assertCanAssign(targetProjectId, patch.assigneeId);
+    }
+
     const changes: Partial<Omit<Task, "id">> = {};
     if (patch.title !== undefined) changes.title = patch.title;
     if (patch.status !== undefined) changes.status = patch.status;
@@ -122,11 +168,22 @@ export function createTaskService({ tasks, members, stats }: Deps) {
     if (patch.dueDate !== undefined) changes.dueDate = patch.dueDate ?? undefined;
     if (patch.projectId !== undefined) changes.projectId = patch.projectId ?? undefined;
 
+    if (patch.assigneeId !== undefined) {
+      changes.assigneeId = patch.assigneeId ?? undefined; // null clears it
+    } else if (moving && task.assigneeId !== undefined) {
+      // A moved task keeps its assignee only if they also belong to the new project
+      const stillMember =
+        targetProjectId !== undefined &&
+        Boolean(await members.roleOf(targetProjectId, task.assigneeId));
+      if (!stillMember) changes.assigneeId = undefined;
+    }
+
     const updated = await withProjectCheck(patch.projectId ?? undefined, () =>
       tasks.update(id, changes),
     );
     if (!updated) throw new NotFoundError(`No task with id ${id}.`);
     await invalidateStats(task.projectId, updated.projectId);
+    await notifyAssigned(updated, task.assigneeId, actor);
     return updated;
   }
 
