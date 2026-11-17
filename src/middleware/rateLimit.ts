@@ -61,7 +61,9 @@ export function makeLimiter(spec: Spec): RequestHandler {
     keyGenerator: (req, res) => (spec.key ?? ipKey)(req, res),
     ...(store ? { store } : {}),
     // Same error shape as the rest of the API
-    handler: (_req, res) => {
+    handler: (req, res) => {
+      logger.info(`[${res.locals.requestId}] rate limited ${req.method} ${req.originalUrl} ip=${req.ip}`);
+      
       const retryAfter = Number(res.getHeader("Retry-After")) || Math.ceil(spec.windowMs / 1000);
       res.status(429).json({ error: { message: spec.message, retryAfterSeconds: retryAfter } });
     },
