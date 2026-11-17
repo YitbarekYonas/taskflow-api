@@ -15,14 +15,13 @@ export async function getById(_req: Request, res: Response) {
 }
 
 export async function create(_req: Request, res: Response) {
-
   const task = await taskService.addTask(res.locals.body as NewTask, actorOf(res));
   res.status(201).location(`/tasks/${task.id}`).json({ data: task });
 }
 
 export async function update(_req: Request, res: Response) {
   const { id } = res.locals.params as { id: number };
-    res.json({ data: await taskService.updateTask(id, res.locals.body as TaskPatch, actorOf(res)) });
+  res.json({ data: await taskService.updateTask(id, res.locals.body as TaskPatch, actorOf(res)) });
 }
 
 export async function remove(_req: Request, res: Response) {

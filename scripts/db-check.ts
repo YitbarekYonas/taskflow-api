@@ -16,7 +16,9 @@ await prisma.projectMember.deleteMany();
 await prisma.project.deleteMany();
 await prisma.user.deleteMany();
 
-const sam = await prisma.user.create({ data: { email: "sam@example.com", name: "Sam",passwordHash: "!" } });
+const sam = await prisma.user.create({
+  data: { email: "sam@example.com", name: "Sam", passwordHash: "!" },
+});
 const project = await prisma.project.create({
   data: {
     name: "TaskFlow API",
@@ -43,18 +45,21 @@ console.log(JSON.stringify(loaded, null, 2));
 
 // The rules the database enforces for you
 await expectFailure("duplicate email (unique)", () =>
-  prisma.user.create({ data: { email: "sam@example.com", name: "Clone",passwordHash: "!" } })
+  prisma.user.create({ data: { email: "sam@example.com", name: "Clone", passwordHash: "!" } }),
 );
 await expectFailure("task in missing project (foreign key)", () =>
-  prisma.task.create({ data: { title: "Ghost", projectId: 99999 } })
+  prisma.task.create({ data: { title: "Ghost", projectId: 99999 } }),
 );
 await expectFailure("delete project that has tasks (restrict)", () =>
-  prisma.project.delete({ where: { id: project.id } })
+  prisma.project.delete({ where: { id: project.id } }),
 );
 
 // Cascade and SetNull
 await prisma.user.delete({ where: { id: sam.id } });
-console.log("task assignee after user delete:", (await prisma.task.findUnique({ where: { id: task.id } }))?.assigneeId); // null
+console.log(
+  "task assignee after user delete:",
+  (await prisma.task.findUnique({ where: { id: task.id } }))?.assigneeId,
+); // null
 await prisma.task.delete({ where: { id: task.id } });
 console.log("comments left after task delete:", await prisma.comment.count()); // 0
 await prisma.project.delete({ where: { id: project.id } });

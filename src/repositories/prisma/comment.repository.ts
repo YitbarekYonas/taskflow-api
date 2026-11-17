@@ -15,13 +15,18 @@ function toComment(row: CommentRow): Comment {
     body: row.body,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt?.toISOString(),
-    authorId: row.authorId ?? undefined
+    authorId: row.authorId ?? undefined,
   };
 }
 
 function toColumns(d: Partial<CommentData>) {
   const c: {
-    taskId?: number; author?: string; body?: string; createdAt?: Date; updatedAt?: Date | null; authorId?: number | null;
+    taskId?: number;
+    author?: string;
+    body?: string;
+    createdAt?: Date;
+    updatedAt?: Date | null;
+    authorId?: number | null;
   } = {};
   if (d.taskId !== undefined) c.taskId = d.taskId;
   if (d.author !== undefined) c.author = d.author;
@@ -46,7 +51,9 @@ export class PrismaCommentRepository implements Repository<Comment> {
 
   async insert(data: CommentData) {
     try {
-      const row = await this.prisma.comment.create({ data: { ...toColumns(data), taskId: data.taskId, author: data.author, body: data.body } });
+      const row = await this.prisma.comment.create({
+        data: { ...toColumns(data), taskId: data.taskId, author: data.author, body: data.body },
+      });
       return toComment(row);
     } catch (err) {
       throw mapWriteError(err);
@@ -55,7 +62,9 @@ export class PrismaCommentRepository implements Repository<Comment> {
 
   async update(id: number, changes: Partial<CommentData>) {
     try {
-      return toComment(await this.prisma.comment.update({ where: { id }, data: toColumns(changes) }));
+      return toComment(
+        await this.prisma.comment.update({ where: { id }, data: toColumns(changes) }),
+      );
     } catch (err) {
       if (isPrismaError(err, "P2025")) return undefined;
       throw mapWriteError(err);

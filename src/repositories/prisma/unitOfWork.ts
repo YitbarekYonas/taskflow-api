@@ -19,7 +19,7 @@ export class PrismaUnitOfWork implements UnitOfWork {
           members: new PrismaMemberRepository(tx),
           users: new PrismaUserRepository(tx),
         }),
-      { maxWait: 5_000, timeout: 10_000 }
+      { maxWait: 5_000, timeout: 10_000 },
     );
   }
 }

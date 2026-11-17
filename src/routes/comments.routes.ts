@@ -10,12 +10,12 @@ commentsRouter.get("/", validate({ params: taskIdParamSchema }), list);
 commentsRouter.post(
   "/",
   validate({ params: taskIdParamSchema, body: createCommentSchema }),
-  create
+  create,
 );
 commentsRouter.get("/:commentId", validate({ params: commentParamsSchema }), getById);
 commentsRouter.patch(
   "/:commentId",
   validate({ params: commentParamsSchema, body: updateCommentSchema }),
-  update
+  update,
 );
 commentsRouter.delete("/:commentId", validate({ params: commentParamsSchema }), remove);

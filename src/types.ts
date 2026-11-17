@@ -11,10 +11,14 @@ export const taskSchema = z.object({
   title: z.string().min(1),
   status: z.enum(STATUSES),
   priority: z.enum(PRIORITIES),
-  dueDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  dueDate: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .optional(),
   createdAt: z.string(),
   projectId: z.number().int().positive().optional(),
   createdById: z.number().int().positive().optional(),
+  assigneeId: z.number().int().positive().optional(),
 });
 
 export const commentSchema = z.object({
@@ -30,9 +34,8 @@ export type Comment = z.infer<typeof commentSchema>;
 
 export type Task = z.infer<typeof taskSchema>;
 
-
 export type NewTask = Pick<Task, "title"> &
-  Partial<Pick<Task, "priority" | "dueDate" | "projectId">>;
+  Partial<Pick<Task, "priority" | "dueDate" | "projectId" | "assigneeId">>;
 
 export const projectSchema = z.object({
   id: z.number().int().positive(),

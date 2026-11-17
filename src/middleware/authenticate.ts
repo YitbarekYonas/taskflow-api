@@ -3,15 +3,19 @@ import { authService } from "../container.js";
 import { UnauthorizedError } from "../errors.js";
 import type { User } from "../types.js";
 import type { Actor } from "../auth/policy.js";
+import { setContextUser } from "../requestContext.js";
 
 export function actorOf(res: Response): Actor {
   return { kind: "user", id: currentUser(res).id };
 }
+
 export const authenticate: RequestHandler = async (req, res, next) => {
   const match = req.header("authorization")?.match(/^Bearer\s+(\S+)$/i);
   if (!match) throw new UnauthorizedError("Authentication required.");
 
-  res.locals.user = await authService.authenticate(match[1]);
+  const user = await authService.authenticate(match[1]);
+  res.locals.user = user;
+  setContextUser(user.id);
   next();
 };
 

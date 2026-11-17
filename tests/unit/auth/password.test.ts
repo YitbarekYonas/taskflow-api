@@ -32,6 +32,6 @@ describe("passwords", () => {
     "treats the unusable stored value %j as a failed login, never an exception",
     async (stored) => {
       await expect(verifyPassword(stored, PASSWORD)).resolves.toBe(false);
-    }
+    },
   );
 });

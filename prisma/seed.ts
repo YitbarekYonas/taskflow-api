@@ -22,7 +22,12 @@ const PROJECTS = [
       { title: "Design the schema", status: "done", priority: "high", dueDate: "2026-09-20" },
       { title: "Write migrations", status: "in_progress", priority: "high", dueDate: "2026-09-28" },
       { title: "Add authentication", status: "todo", priority: "high", dueDate: "2026-11-15" },
-      { title: "Write integration tests", status: "todo", priority: "medium", dueDate: "2026-11-30" },
+      {
+        title: "Write integration tests",
+        status: "todo",
+        priority: "medium",
+        dueDate: "2026-11-30",
+      },
       { title: "Deploy to production", status: "todo", priority: "low", dueDate: undefined },
     ],
   },
@@ -32,7 +37,12 @@ const PROJECTS = [
     description: "A smaller project for variety",
     tasks: [
       { title: "Collect brand assets", status: "done", priority: "low", dueDate: undefined },
-      { title: "Draft the landing page", status: "in_progress", priority: "medium", dueDate: "2026-11-05" },
+      {
+        title: "Draft the landing page",
+        status: "in_progress",
+        priority: "medium",
+        dueDate: "2026-11-05",
+      },
     ],
   },
 ] as const;
@@ -46,7 +56,7 @@ try {
         where: { email: u.email },
         update: { name: u.name },
         create: { ...u, passwordHash: await hashPassword(DEV_PASSWORD) },
-      })
+      }),
     );
   }
 
@@ -58,7 +68,7 @@ try {
           name: def.name,
           slug: def.slug,
           description: def.description,
-          createdById: users[0].id, 
+          createdById: users[0].id,
         },
       }));
 
@@ -80,15 +90,17 @@ try {
             dueDate: t.dueDate ? new Date(t.dueDate) : null,
             projectId: project.id,
             assigneeId: users[i % users.length].id,
-            createdById: users[0].id, 
+            createdById: users[0].id,
             comments:
               i % 2 === 0
-                ? { 
-                    create: [{ 
-                      author: users[0].name, 
-                      authorId: users[0].id, 
-                      body: `Kicking off: ${t.title}` 
-                    }] 
+                ? {
+                    create: [
+                      {
+                        author: users[0].name,
+                        authorId: users[0].id,
+                        body: `Kicking off: ${t.title}`,
+                      },
+                    ],
                   }
                 : undefined,
           },

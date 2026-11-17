@@ -19,9 +19,16 @@ afterEach(() => {
 });
 
 // Builds tokens a careful attacker (or a buggy client) might send
-function forge(o: {
-  sub?: string | null; key?: Uint8Array; exp?: number; iss?: string; aud?: string; alg?: "HS256" | "HS512";
-} = {}) {
+function forge(
+  o: {
+    sub?: string | null;
+    key?: Uint8Array;
+    exp?: number;
+    iss?: string;
+    aud?: string;
+    alg?: "HS256" | "HS512";
+  } = {},
+) {
   let jwt = new SignJWT({})
     .setProtectedHeader({ alg: o.alg ?? "HS256" })
     .setIssuer(o.iss ?? "taskflow")
@@ -39,7 +46,13 @@ describe("signAccessToken and verifyAccessToken", () => {
 
   it("carries no claims beyond the standard ones (no role, no email)", async () => {
     const token = await signAccessToken(42);
-    expect(Object.keys(decode(token.split(".")[1])).sort()).toEqual(["aud", "exp", "iat", "iss", "sub"]);
+    expect(Object.keys(decode(token.split(".")[1])).sort()).toEqual([
+      "aud",
+      "exp",
+      "iat",
+      "iss",
+      "sub",
+    ]);
   });
 
   it("expires after the configured lifetime", async () => {
@@ -56,7 +69,10 @@ describe("signAccessToken and verifyAccessToken", () => {
     ["garbage", async () => "not.a.token"],
     ["an empty string", async () => ""],
     ["an expired token", () => forge({ exp: nowSeconds() - 10 })],
-    ["a token signed with another secret", () => forge({ key: new TextEncoder().encode("another-secret-of-at-least-32-characters!!") })],
+    [
+      "a token signed with another secret",
+      () => forge({ key: new TextEncoder().encode("another-secret-of-at-least-32-characters!!") }),
+    ],
     ["the wrong audience", () => forge({ aud: "someone-else" })],
     ["the wrong issuer", () => forge({ iss: "evil" })],
     ["no subject", () => forge({ sub: null })],
@@ -64,14 +80,20 @@ describe("signAccessToken and verifyAccessToken", () => {
     ["a negative subject", () => forge({ sub: "-5" })],
     ["a zero subject", () => forge({ sub: "0" })],
     ["an algorithm that is not on the allow-list", () => forge({ alg: "HS512" })],
-    ["alg none (unsigned)", async () => {
-      const real = await signAccessToken(42);
-      return `${b64({ alg: "none", typ: "JWT" })}.${real.split(".")[1]}.`;
-    }],
-    ["a tampered payload with the old signature", async () => {
-      const [header, payload, signature] = (await signAccessToken(42)).split(".");
-      return `${header}.${b64({ ...decode(payload), sub: "1" })}.${signature}`;
-    }],
+    [
+      "alg none (unsigned)",
+      async () => {
+        const real = await signAccessToken(42);
+        return `${b64({ alg: "none", typ: "JWT" })}.${real.split(".")[1]}.`;
+      },
+    ],
+    [
+      "a tampered payload with the old signature",
+      async () => {
+        const [header, payload, signature] = (await signAccessToken(42)).split(".");
+        return `${header}.${b64({ ...decode(payload), sub: "1" })}.${signature}`;
+      },
+    ],
   ])("rejects %s, always with the same message", async (_name, make) => {
     const error = await verifyAccessToken(await make()).catch((e) => e);
     expect(error).toBeInstanceOf(UnauthorizedError);

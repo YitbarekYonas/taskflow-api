@@ -24,11 +24,11 @@ export class PrismaUserRepository implements UserRepository {
 
   async create(data: { email: string; name: string; passwordHash: string }) {
     try {
-        return toUser(
+      return toUser(
         await this.prisma.user.create({
           data,
           omit: { passwordHash: true },
-        })
+        }),
       );
     } catch (err) {
       // The unique constraint decides, not a racy "does it exist?" check

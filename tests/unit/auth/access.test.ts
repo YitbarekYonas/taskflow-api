@@ -43,7 +43,9 @@ describe("requireProjectRole", () => {
 
   it("treats a member of a different project as a stranger", async () => {
     const access = createAccess(fakeMembers({ "11:1": "owner" }));
-    await expect(access.requireProjectRole(user(1), 10, "member")).rejects.toBeInstanceOf(NotFoundError);
+    await expect(access.requireProjectRole(user(1), 10, "member")).rejects.toBeInstanceOf(
+      NotFoundError,
+    );
   });
 
   it("lets the system act as owner everywhere", async () => {
@@ -80,11 +82,15 @@ describe("requireTaskRole", () => {
   const access = createAccess(fakeMembers({ "10:1": "member" }));
 
   it("answers 404 for a task the caller cannot see", async () => {
-    await expect(access.requireTaskRole(user(9), task({ projectId: 10 }), "member")).rejects.toBeInstanceOf(NotFoundError);
+    await expect(
+      access.requireTaskRole(user(9), task({ projectId: 10 }), "member"),
+    ).rejects.toBeInstanceOf(NotFoundError);
   });
 
   it("answers 403 for a visible task that needs more rights", async () => {
-    await expect(access.requireTaskRole(user(1), task({ projectId: 10 }), "owner")).rejects.toBeInstanceOf(ForbiddenError);
+    await expect(
+      access.requireTaskRole(user(1), task({ projectId: 10 }), "owner"),
+    ).rejects.toBeInstanceOf(ForbiddenError);
   });
 });
 

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { Request, Response } from "express";
 import type { User } from "../types.js";
 import { ipKey, makeLimiter } from "./rateLimit.js";
@@ -9,9 +10,14 @@ const HOUR = 60 * MINUTE;
 // Falls back to the IP if the body has no usable email (the request will be a 400 anyway).
 function emailKey(req: Request): string {
   const email = (req.body as { email?: unknown } | undefined)?.email;
-  return typeof email === "string" && email.trim()
-    ? `email:${email.trim().toLowerCase().slice(0, 254)}`
-    : `ip:${ipKey(req)}`;
+  if (typeof email === "string" && email.trim()) {
+    // Hashed: Redis keys are visible to anyone who can run KEYS or MONITOR
+    const digest = createHash("sha256")
+      .update(email.trim().toLowerCase().slice(0, 254))
+      .digest("hex");
+    return `email:${digest.slice(0, 32)}`;
+  }
+  return `ip:${ipKey(req)}`;
 }
 
 // Only valid on routes mounted AFTER `authenticate`
@@ -20,19 +26,22 @@ function userKey(_req: Request, res: Response): string {
 }
 
 export const globalLimiter = makeLimiter({
+  name: "global",
   windowMs: MINUTE,
   limit: 300,
-  skip: (req) => req.path === "/health", // monitors poll this constantly
+  skip: (req) => req.path === "/health" || req.path === "/ready", // monitors poll these constantly
   message: "Too many requests. Please slow down.",
 });
 
 export const registerLimiter = makeLimiter({
+  name: "register",
   windowMs: HOUR,
   limit: 5,
   message: "Too many accounts created from this address. Try again later.",
 });
 
 export const loginIpLimiter = makeLimiter({
+  name: "login-ip",
   windowMs: 15 * MINUTE,
   limit: 30,
   skipSuccessfulRequests: true, // only failures count
@@ -40,6 +49,7 @@ export const loginIpLimiter = makeLimiter({
 });
 
 export const loginAccountLimiter = makeLimiter({
+  name: "login-account",
   windowMs: 15 * MINUTE,
   limit: 10,
   skipSuccessfulRequests: true,
@@ -48,6 +58,7 @@ export const loginAccountLimiter = makeLimiter({
 });
 
 export const refreshLimiter = makeLimiter({
+  name: "refresh",
   windowMs: 15 * MINUTE,
   limit: 60,
   message: "Too many token requests. Try again later.",
@@ -55,6 +66,7 @@ export const refreshLimiter = makeLimiter({
 
 // Adding members by email reveals whether an account exists, so this is a sensitive flow
 export const inviteLimiter = makeLimiter({
+  name: "invite",
   windowMs: HOUR,
   limit: 20,
   key: userKey,

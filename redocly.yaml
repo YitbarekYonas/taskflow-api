@@ -1,0 +1,11 @@
+extends:
+  - recommended
+
+rules:
+  # /health has no failure case worth documenting
+  operation-4xx-response: off
+  # Rules we care about are hard failures
+  operation-operationId: error
+  operation-operationId-unique: error
+  tag-description: error
+  no-unused-components: error

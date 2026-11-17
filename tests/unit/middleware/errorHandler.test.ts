@@ -2,14 +2,20 @@ import type { Request, Response } from "express";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import {
-  ConflictError, DuplicateError, ForbiddenError, InUseError, InvalidReferenceError,
-  NotFoundError, UnauthorizedError, UserError,
+  ConflictError,
+  DuplicateError,
+  ForbiddenError,
+  InUseError,
+  InvalidReferenceError,
+  NotFoundError,
+  UnauthorizedError,
+  UserError,
 } from "../../../src/errors.js";
 import { logger } from "../../../src/logger.js";
 import { errorHandler } from "../../../src/middleware/errorHandler.js";
 
 vi.mock("../../../src/logger.js", () => ({
-  logger: { debug: vi.fn(), info: vi.fn(), error: vi.fn() },
+  logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
 // Just enough of Express's req/res to see what the handler decided
@@ -19,9 +25,18 @@ function run(err: unknown) {
     statusCode: 0,
     body: undefined as any,
     headers: {} as Record<string, string>,
-    status(code: number) { this.statusCode = code; return this; },
-    set(name: string, value: string) { this.headers[name] = value; return this; },
-    json(body: unknown) { this.body = body; return this; },
+    status(code: number) {
+      this.statusCode = code;
+      return this;
+    },
+    set(name: string, value: string) {
+      this.headers[name] = value;
+      return this;
+    },
+    json(body: unknown) {
+      this.body = body;
+      return this;
+    },
   };
   const req = { method: "GET", originalUrl: "/x", ip: "127.0.0.1" };
   errorHandler(err, req as unknown as Request, res as unknown as Response, vi.fn());
@@ -61,6 +76,9 @@ describe("errorHandler", () => {
     expect(res.body.error.message).toBe("Internal server error");
     expect(res.body.error.requestId).toBe("req-123");
     expect(JSON.stringify(res.body)).not.toContain("hunter2");
-    expect(logger.error).toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error) }),
+      expect.any(String),
+    );
   });
 });

@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { loginSchema, registerSchema } from "../../src/schemas/auth.schemas.js";
 import { dbId, dbIdBody, noNul } from "../../src/schemas/common.schemas.js";
-import { createTaskSchema, listTasksQuerySchema, updateTaskSchema } from "../../src/schemas/task.schemas.js";
+import {
+  createTaskSchema,
+  listTasksQuerySchema,
+  updateTaskSchema,
+} from "../../src/schemas/task.schemas.js";
 
 const ok = (schema: { safeParse: (v: unknown) => { success: boolean } }, value: unknown) =>
   schema.safeParse(value).success;
@@ -13,7 +17,9 @@ describe("ids", () => {
 
   it.each(["0", "-1", "1.5", "abc", "", "2147483648", "99999999999999999999999"])(
     "rejects the id %j from a path or query",
-    (value) => { expect(ok(dbId, value)).toBe(false); }
+    (value) => {
+      expect(ok(dbId, value)).toBe(false);
+    },
   );
 
   it.each([1, 2147483647])("accepts the body id %j", (value) => {
@@ -41,7 +47,11 @@ describe("registerSchema", () => {
       name: "  Sam  ",
       password: "  spaced password  ",
     });
-    expect(result).toEqual({ email: "sam@example.com", name: "Sam", password: "  spaced password  " });
+    expect(result).toEqual({
+      email: "sam@example.com",
+      name: "Sam",
+      password: "  spaced password  ",
+    });
   });
 
   it("enforces the password length bounds", () => {
@@ -93,7 +103,9 @@ describe("createTaskSchema", () => {
   });
 
   it("accepts a complete valid task", () => {
-    expect(ok(createTaskSchema, { title: "x", priority: "high", dueDate: "2026-12-01", projectId: 5 })).toBe(true);
+    expect(
+      ok(createTaskSchema, { title: "x", priority: "high", dueDate: "2026-12-01", projectId: 5 }),
+    ).toBe(true);
   });
 });
 
@@ -114,11 +126,19 @@ describe("updateTaskSchema", () => {
 
 describe("listTasksQuerySchema", () => {
   it("fills in the defaults", () => {
-    expect(listTasksQuerySchema.parse({})).toMatchObject({ page: 1, limit: 10, sort: "createdAt", order: "asc" });
+    expect(listTasksQuerySchema.parse({})).toMatchObject({
+      page: 1,
+      limit: 10,
+      sort: "createdAt",
+      order: "asc",
+    });
   });
 
   it("converts numbers that arrive as strings", () => {
-    expect(listTasksQuerySchema.parse({ page: "2", limit: "50" })).toMatchObject({ page: 2, limit: 50 });
+    expect(listTasksQuerySchema.parse({ page: "2", limit: "50" })).toMatchObject({
+      page: 2,
+      limit: 50,
+    });
   });
 
   it.each([

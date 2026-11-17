@@ -1,10 +1,9 @@
 import type { Prisma, PrismaClient, Task as TaskRow } from "../../generated/prisma/client.js";
 import type { Db } from "./db.js";
 import type { Priority, Status, Task } from "../../types.js";
-import type { Repository } from "../repository.js";
-import { isPrismaError,mapWriteError } from "./errors.js";
+import { isPrismaError, mapWriteError } from "./errors.js";
 import type { TaskQuery } from "../../schemas/task.schemas.js";
-import { TaskRepository } from "../repository.js";
+import type { TaskRepository } from "../repository.js";
 
 type TaskData = Omit<Task, "id">;
 
@@ -16,6 +15,7 @@ type TaskColumns = {
   createdAt?: Date;
   projectId?: number | null;
   createdById?: number;
+  assigneeId?: number | null;
 };
 
 // Database row -> domain object
@@ -28,7 +28,8 @@ function toTask(row: TaskRow): Task {
     dueDate: row.dueDate ? row.dueDate.toISOString().slice(0, 10) : undefined,
     createdAt: row.createdAt.toISOString(),
     projectId: row.projectId ?? undefined,
-    createdById: row.createdById ?? undefined
+    createdById: row.createdById ?? undefined,
+    assigneeId: row.assigneeId ?? undefined,
   };
 }
 
@@ -43,6 +44,7 @@ function toColumns(d: Partial<TaskData>): TaskColumns {
   if ("dueDate" in d) c.dueDate = d.dueDate ? new Date(d.dueDate) : null;
   if ("projectId" in d) c.projectId = d.projectId ?? null;
   if (d.createdById !== undefined) c.createdById = d.createdById;
+  if ("assigneeId" in d) c.assigneeId = d.assigneeId ?? null;
   return c;
 }
 
@@ -51,10 +53,7 @@ type Scope = { userId: number };
 // A task is visible if it lives in one of my projects, or it is my own personal task
 function visibleTo(userId: number): Prisma.TaskWhereInput {
   return {
-    OR: [
-      { project: { members: { some: { userId } } } },
-      { projectId: null, createdById: userId },
-    ],
+    OR: [{ project: { members: { some: { userId } } } }, { projectId: null, createdById: userId }],
   };
 }
 
@@ -69,7 +68,10 @@ function buildWhere(q: TaskQuery, scope?: Scope): Prisma.TaskWhereInput {
 }
 
 // id is always the last tie-breaker, so pages never overlap or skip rows
-function buildOrderBy(sort: TaskQuery["sort"], dir: "asc" | "desc"): Prisma.TaskOrderByWithRelationInput[] {
+function buildOrderBy(
+  sort: TaskQuery["sort"],
+  dir: "asc" | "desc",
+): Prisma.TaskOrderByWithRelationInput[] {
   switch (sort) {
     case "dueDate":
       return [{ dueDate: { sort: dir, nulls: "last" } }, { id: "asc" }];
@@ -95,7 +97,9 @@ export class PrismaTaskRepository implements TaskRepository {
   }
   async insert(data: TaskData) {
     try {
-      const row = await this.prisma.task.create({ data: { ...toColumns(data), title: data.title } });
+      const row = await this.prisma.task.create({
+        data: { ...toColumns(data), title: data.title },
+      });
       return toTask(row);
     } catch (err) {
       throw mapWriteError(err);
@@ -120,8 +124,8 @@ export class PrismaTaskRepository implements TaskRepository {
     }
   }
 
-async query(q: TaskQuery, scope?: Scope) { 
-  const where = buildWhere(q, scope);
+  async query(q: TaskQuery, scope?: Scope) {
+    const where = buildWhere(q, scope);
     const page = {
       where,
       orderBy: buildOrderBy(q.sort, q.order),
@@ -131,7 +135,7 @@ async query(q: TaskQuery, scope?: Scope) {
 
     let rows: TaskRow[];
     let total: number;
-    
+
     if ("$transaction" in this.prisma) {
       // We have a full PrismaClient, so we can use $transaction
       [rows, total] = await this.prisma.$transaction([
@@ -162,7 +166,7 @@ async query(q: TaskQuery, scope?: Scope) {
     for (const g of groups) counts[g.status] = g._count._all;
     return counts;
   }
-    async findByProject(projectId: number) {
+  async findByProject(projectId: number) {
     const rows = await this.prisma.task.findMany({ where: { projectId }, orderBy: { id: "asc" } });
     return rows.map(toTask);
   }
@@ -189,5 +193,38 @@ async query(q: TaskQuery, scope?: Scope) {
     } catch (err) {
       throw mapWriteError(err);
     }
+  }
+
+  async projectStats(projectId: number, today: string) {
+    const start = new Date(today);
+    const soonEnd = new Date(start.getTime() + 7 * 86_400_000);
+
+    const [groups, overdue, dueSoon] = await Promise.all([
+      this.prisma.task.groupBy({
+        by: ["status", "priority"],
+        where: { projectId },
+        _count: { _all: true },
+      }),
+      this.prisma.task.count({
+        where: { projectId, status: { not: "done" }, dueDate: { lt: start } },
+      }),
+      this.prisma.task.count({
+        where: { projectId, status: { not: "done" }, dueDate: { gte: start, lte: soonEnd } },
+      }),
+    ]);
+
+    return {
+      groups: groups.map((g) => ({ status: g.status, priority: g.priority, count: g._count._all })),
+      overdue,
+      dueSoon,
+    };
+  }
+
+  async unassignUser(projectId: number, userId: number) {
+    const result = await this.prisma.task.updateMany({
+      where: { projectId, assigneeId: userId },
+      data: { assigneeId: null },
+    });
+    return result.count;
   }
 }

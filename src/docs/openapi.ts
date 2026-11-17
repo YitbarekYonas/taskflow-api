@@ -8,6 +8,7 @@ import {
   addMemberSchema,
   changeRoleSchema,
 } from "../schemas/project.schemas.js";
+import { projectStatsSchema } from "../schemas/stats.schemas.js";
 import { SORT_FIELDS, createTaskSchema, updateTaskSchema } from "../schemas/task.schemas.js";
 import {
   PRIORITIES,
@@ -23,10 +24,10 @@ import { readFileSync } from "node:fs";
 
 // package.json sits two folders above this file in both src/docs/ and dist/docs/
 const { version } = JSON.parse(
-  readFileSync(new URL("../../package.json", import.meta.url), "utf-8")
+  readFileSync(new URL("../../package.json", import.meta.url), "utf-8"),
 ) as { version: string };
 function schemaOf(schema: z.ZodType, io: "input" | "output" = "input") {
-  const { $schema, ...rest } = z.toJSONSchema(schema, { io }) as Record<string, unknown>;
+  const { $schema: _schema, ...rest } = z.toJSONSchema(schema, { io }) as Record<string, unknown>;
   return rest;
 }
 
@@ -40,7 +41,9 @@ const listOf = (name: string) => ({
   type: "object",
   properties: { data: { type: "array", items: ref(name) } },
 });
-const errorRef = (name: "BadRequest" | "NotFound" | "Conflict" | "Unauthorized" | "Forbidden"|"RateLimited") => ({
+const errorRef = (
+  name: "BadRequest" | "NotFound" | "Conflict" | "Unauthorized" | "Forbidden" | "RateLimited",
+) => ({
   $ref: `#/components/responses/${name}`,
 });
 const query = (name: string, schema: object, description?: string) => ({
@@ -67,8 +70,11 @@ const taskListParams = [
   query("priority", { type: "string", enum: [...PRIORITIES] }),
   query("projectId", { type: "integer", minimum: 1 }),
   query("search", { type: "string" }, "Case-insensitive match on the title"),
-  query("sort", { type: "string", enum: [...SORT_FIELDS], default: "createdAt" },
-    "Tasks without a due date always sort last"),
+  query(
+    "sort",
+    { type: "string", enum: [...SORT_FIELDS], default: "createdAt" },
+    "Tasks without a due date always sort last",
+  ),
   query("order", { type: "string", enum: ["asc", "desc"], default: "asc" }),
   query("page", { type: "integer", minimum: 1, default: 1 }),
   query("limit", { type: "integer", minimum: 1, maximum: 100, default: 10 }),
@@ -81,18 +87,21 @@ export const baseSpec = {
     version: version,
     description:
       "A task-management API built with Node.js, Express and TypeScript.\n\n" +
-      "All errors share one shape: `{ \"error\": { \"message\": \"...\" } }`. " +
+      'All errors share one shape: `{ "error": { "message": "..." } }`. ' +
       "Validation errors add a `details` array, and unexpected 500s include a `requestId`.",
-    license: { name: "MIT" },
+    license: {
+      name: "MIT",
+      url: "https://opensource.org/licenses/MIT",
+    },
   },
   security: [{ bearerAuth: [] }],
   servers: [{ url: "/" }],
   tags: [
-    { name: "System" },
-    { name: "Auth" },
-    { name: "Tasks" },
-    { name: "Projects" },
-    { name: "Comments" },
+    { name: "System", description: "Health check and API metadata" },
+    { name: "Auth", description: "Registration, login, tokens and logout" },
+    { name: "Tasks", description: "Create, read, update and delete tasks" },
+    { name: "Projects", description: "Projects, their members, and duplicate/merge" },
+    { name: "Comments", description: "Comments on tasks" },
   ],
   paths: {
     "/health": {
@@ -110,6 +119,19 @@ export const baseSpec = {
               },
             }),
           },
+        },
+      },
+    },
+
+    "/ready": {
+      get: {
+        tags: ["System"],
+        summary: "Readiness check",
+        description:
+          "200 while the database is reachable (Redis being down only reports `degraded`); 503 when the database is unreachable.",
+        responses: {
+          200: { description: "Ready, possibly degraded", content: json(ref("Readiness")) },
+          503: { description: "Not ready", content: json(ref("Readiness")) },
         },
       },
     },
@@ -137,6 +159,8 @@ export const baseSpec = {
       post: {
         tags: ["Tasks"],
         summary: "Create a task",
+        description:
+          "A due date in the past is rejected with 400 (UTC date). Updates may set past dates.",
         requestBody: { required: true, content: json(schemaOf(createTaskSchema)) },
         responses: { 201: created("Task"), 400: errorRef("BadRequest") },
       },
@@ -152,7 +176,8 @@ export const baseSpec = {
       patch: {
         tags: ["Tasks"],
         summary: "Update some fields of a task",
-        description: "Send only the fields to change. `dueDate: null` or `projectId: null` clears the field. Strangers get 404.",
+        description:
+          "Send only the fields to change. `dueDate: null` or `projectId: null` clears the field. Strangers get 404.",
         requestBody: { required: true, content: json(schemaOf(updateTaskSchema)) },
         responses: { 200: ok("Task"), 400: errorRef("BadRequest"), 404: errorRef("NotFound") },
       },
@@ -168,7 +193,12 @@ export const baseSpec = {
         tags: ["Projects"],
         summary: "List projects",
         description: "Only projects you belong to.",
-        responses: { 200: { description: "Projects with task counts", content: json(listOf("ProjectWithCount")) } },
+        responses: {
+          200: {
+            description: "Projects with task counts",
+            content: json(listOf("ProjectWithCount")),
+          },
+        },
       },
       post: {
         tags: ["Projects"],
@@ -195,7 +225,8 @@ export const baseSpec = {
       delete: {
         tags: ["Projects"],
         summary: "Delete a project",
-        description: "Blocked with 409 while tasks still reference the project. Only owners can delete. Strangers get 404.",
+        description:
+          "Blocked with 409 while tasks still reference the project. Only owners can delete. Strangers get 404.",
         responses: {
           204: noContent,
           400: errorRef("BadRequest"),
@@ -226,6 +257,28 @@ export const baseSpec = {
       },
     },
 
+    "/projects/{id}/stats": {
+      parameters: [{ $ref: "#/components/parameters/Id" }],
+      get: {
+        tags: ["Projects"],
+        summary: "Dashboard statistics for a project",
+        description:
+          "Counts by status and priority, overdue and due-soon tasks. Answers are cached for up to 60 seconds " +
+          "and refreshed immediately when a task in the project changes. `X-Cache` says whether the answer came " +
+          "from the cache (`hit`), was computed (`miss`) or the cache was unavailable (`bypass`). " +
+          "Strangers get 404, exactly as for a missing project.",
+        responses: {
+          200: {
+            description: "Statistics",
+            headers: { "X-Cache": { schema: { type: "string", enum: ["hit", "miss", "bypass"] } } },
+            content: json(envelope("ProjectStats")),
+          },
+          400: errorRef("BadRequest"),
+          404: errorRef("NotFound"),
+        },
+      },
+    },
+
     "/tasks/{taskId}/comments": {
       parameters: [{ $ref: "#/components/parameters/TaskId" }],
       get: {
@@ -242,7 +295,11 @@ export const baseSpec = {
         summary: "Add a comment to a task",
         description: "The author is the logged-in user. Strangers get 404.",
         requestBody: { required: true, content: json(schemaOf(createCommentSchema)) },
-        responses: { 201: created("Comment"), 400: errorRef("BadRequest"), 404: errorRef("NotFound") },
+        responses: {
+          201: created("Comment"),
+          400: errorRef("BadRequest"),
+          404: errorRef("NotFound"),
+        },
       },
     },
 
@@ -277,7 +334,8 @@ export const baseSpec = {
       post: {
         tags: ["Projects"],
         summary: "Duplicate a project and its tasks",
-        description: "Runs in one transaction. Copied tasks start as `todo`. Only members can duplicate. Strangers get 404.",
+        description:
+          "Runs in one transaction. Copied tasks start as `todo`. Only members can duplicate. Strangers get 404.",
         requestBody: { required: false, content: json(schemaOf(duplicateProjectSchema)) },
         responses: {
           201: {
@@ -304,7 +362,8 @@ export const baseSpec = {
       post: {
         tags: ["Projects"],
         summary: "Merge this project into another",
-        description: "Moves every task into the target project and deletes this one. Only owners of both projects can merge. Strangers get 404.",
+        description:
+          "Moves every task into the target project and deletes this one. Only owners of both projects can merge. Strangers get 404.",
         requestBody: { required: true, content: json(schemaOf(mergeProjectSchema)) },
         responses: {
           200: {
@@ -330,7 +389,8 @@ export const baseSpec = {
       post: {
         tags: ["Auth"],
         summary: "Create an account",
-        description: "Email is trimmed and lowercased. Passwords need 10 to 128 characters and are stored as Argon2id hashes.",
+        description:
+          "Email is trimmed and lowercased. Passwords need 10 to 128 characters and are stored as Argon2id hashes.",
         requestBody: { required: true, content: json(schemaOf(registerSchema)) },
         responses: {
           201: { description: "Account created", content: json(envelope("User")) },
@@ -344,7 +404,8 @@ export const baseSpec = {
       post: {
         tags: ["Auth"],
         summary: "Log in",
-        description: "Returns a short-lived access token and a refresh token. Every failure returns the same 401 message.",
+        description:
+          "Returns a short-lived access token and a refresh token. Every failure returns the same 401 message.",
         requestBody: { required: true, content: json(schemaOf(loginSchema)) },
         responses: {
           200: {
@@ -445,7 +506,8 @@ export const baseSpec = {
       post: {
         tags: ["Projects"],
         summary: "Add a member by email (owners only)",
-        description: "Strangers get 404, plain members get 403. 409 if the user is already a member.",
+        description:
+          "Strangers get 404, plain members get 403. 409 if the user is already a member.",
         requestBody: { required: true, content: json(schemaOf(addMemberSchema)) },
         responses: {
           201: { description: "Added", content: json(envelope("Member")) },
@@ -476,7 +538,8 @@ export const baseSpec = {
       delete: {
         tags: ["Projects"],
         summary: "Remove a member, or leave the project",
-        description: "Owners can remove anyone. Anyone can remove themselves. 409 for the last owner.",
+        description:
+          "Owners can remove anyone. Anyone can remove themselves. 409 for the last owner.",
         responses: { 204: noContent, 404: errorRef("NotFound"), 409: errorRef("Conflict") },
       },
     },
@@ -485,9 +548,24 @@ export const baseSpec = {
   components: {
     parameters: {
       Id: { name: "id", in: "path", required: true, schema: { type: "integer", minimum: 1 } },
-      TaskId: { name: "taskId", in: "path", required: true, schema: { type: "integer", minimum: 1 } },
-      CommentId: { name: "commentId", in: "path", required: true, schema: { type: "integer", minimum: 1 } },
-      UserId: { name: "userId", in: "path", required: true, schema: { type: "integer", minimum: 1 } },
+      TaskId: {
+        name: "taskId",
+        in: "path",
+        required: true,
+        schema: { type: "integer", minimum: 1 },
+      },
+      CommentId: {
+        name: "commentId",
+        in: "path",
+        required: true,
+        schema: { type: "integer", minimum: 1 },
+      },
+      UserId: {
+        name: "userId",
+        in: "path",
+        required: true,
+        schema: { type: "integer", minimum: 1 },
+      },
     },
     schemas: {
       Task: schemaOf(taskSchema, "output"),
@@ -496,10 +574,15 @@ export const baseSpec = {
       ProjectWithCount: {
         allOf: [
           ref("Project"),
-          { type: "object", required: ["taskCount"], properties: { taskCount: { type: "integer" } } },
+          {
+            type: "object",
+            required: ["taskCount"],
+            properties: { taskCount: { type: "integer" } },
+          },
         ],
       },
       Comment: schemaOf(commentSchema, "output"),
+      ProjectStats: schemaOf(projectStatsSchema, "output"),
       PageMeta: {
         type: "object",
         properties: {
@@ -542,23 +625,53 @@ export const baseSpec = {
           joinedAt: { type: "string" },
         },
       },
+      Readiness: {
+        type: "object",
+        properties: {
+          status: { type: "string", enum: ["ok", "degraded", "unavailable"] },
+          checks: {
+            type: "object",
+            properties: {
+              database: { type: "string", enum: ["up", "down"] },
+              redis: { type: "string", enum: ["up", "down", "disabled"] },
+            },
+          },
+        },
+      },
     },
     securitySchemes: {
       bearerAuth: { type: "http", scheme: "bearer", bearerFormat: "JWT" },
     },
     responses: {
       BadRequest: {
-        description: "Invalid input (bad JSON, failed validation, or a reference to something that does not exist)",
+        description:
+          "Invalid input (bad JSON, failed validation, or a reference to something that does not exist)",
         content: json(ref("Error")),
       },
-      NotFound: { description: "The resource or route does not exist", content: json(ref("Error")) },
-      Conflict: { description: "The request is valid but conflicts with the current state", content: json(ref("Error")) },
-      Unauthorized: { description: "Missing, invalid or expired credentials", content: json(ref("Error")) },
-      Forbidden: { description: "You are logged in but not allowed to do this", content: json(ref("Error")) },
-            RateLimited: {
-        description: "Too many requests. Wait for `retryAfterSeconds` (also sent as a Retry-After header).",
+      NotFound: {
+        description: "The resource or route does not exist",
+        content: json(ref("Error")),
+      },
+      Conflict: {
+        description: "The request is valid but conflicts with the current state",
+        content: json(ref("Error")),
+      },
+      Unauthorized: {
+        description: "Missing, invalid or expired credentials",
+        content: json(ref("Error")),
+      },
+      Forbidden: {
+        description: "You are logged in but not allowed to do this",
+        content: json(ref("Error")),
+      },
+      RateLimited: {
+        description:
+          "Too many requests. Wait for `retryAfterSeconds` (also sent as a Retry-After header).",
         headers: {
-          "Retry-After": { schema: { type: "integer" }, description: "Seconds until the limit resets" },
+          "Retry-After": {
+            schema: { type: "integer" },
+            description: "Seconds until the limit resets",
+          },
         },
         content: json({
           type: "object",
@@ -575,16 +688,41 @@ export const baseSpec = {
 };
 
 const METHODS = ["get", "post", "put", "patch", "delete"] as const;
-const PUBLIC_OPS = new Set(["GET /health", "POST /auth/register", "POST /auth/login", "POST /auth/refresh", "POST /auth/logout"]);
+const PUBLIC_OPS = new Set([
+  "GET /health",
+  "GET /ready",
+  "POST /auth/register",
+  "POST /auth/login",
+  "POST /auth/refresh",
+  "POST /auth/logout",
+]);
 const FORBIDDEN_OPS = new Set([
-  "PATCH /tasks/{id}", "DELETE /tasks/{id}",
-  "PATCH /projects/{id}", "DELETE /projects/{id}",
-  "POST /projects/{id}/merge", "POST /projects/{id}/members",
-  "PATCH /projects/{id}/members/{userId}", "DELETE /projects/{id}/members/{userId}",
-  "PATCH /tasks/{taskId}/comments/{commentId}", "DELETE /tasks/{taskId}/comments/{commentId}"
+  "PATCH /tasks/{id}",
+  "DELETE /tasks/{id}",
+  "PATCH /projects/{id}",
+  "DELETE /projects/{id}",
+  "POST /projects/{id}/merge",
+  "POST /projects/{id}/members",
+  "PATCH /projects/{id}/members/{userId}",
+  "DELETE /projects/{id}/members/{userId}",
+  "PATCH /tasks/{taskId}/comments/{commentId}",
+  "DELETE /tasks/{taskId}/comments/{commentId}",
 ]);
 
-type Operation = { security?: unknown[]; responses: Record<string, unknown> };
+type Operation = { operationId?: string; security?: unknown[]; responses: Record<string, unknown> };
+
+const capitalise = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
+
+// GET /tasks/{id}/comments -> getTasksByIdComments. Unique by construction, stable across runs.
+function operationIdFor(method: string, path: string): string {
+  const parts = path
+    .split("/")
+    .filter(Boolean)
+    .map((segment) =>
+      segment.startsWith("{") ? `By${capitalise(segment.slice(1, -1))}` : capitalise(segment),
+    );
+  return `${method}${parts.join("")}`;
+}
 
 function withSecurity<T extends { paths: object }>(spec: T): T {
   for (const [path, item] of Object.entries(spec.paths)) {
@@ -592,11 +730,13 @@ function withSecurity<T extends { paths: object }>(spec: T): T {
       const op = (item as Record<string, Operation | undefined>)[method];
       if (!op) continue;
       const key = `${method.toUpperCase()} ${path}`;
+      op.operationId ??= operationIdFor(method, path);
       if (PUBLIC_OPS.has(key)) {
         op.security = []; // overrides the global requirement
         continue;
       }
-      if (key !== "GET /health") op.responses["429"] ??= errorRef("RateLimited");
+      if (key !== "GET /health" && key !== "GET /ready")
+        op.responses["429"] ??= errorRef("RateLimited");
       op.responses["401"] ??= errorRef("Unauthorized");
       if (FORBIDDEN_OPS.has(key)) op.responses["403"] ??= errorRef("Forbidden");
     }

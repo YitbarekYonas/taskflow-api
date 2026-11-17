@@ -9,7 +9,9 @@ describe("test infrastructure", () => {
   });
 
   it("applied every migration", async () => {
-    const [{ n }] = await prisma.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM _prisma_migrations`;
+    const [{ n }] = await prisma.$queryRaw<
+      { n: number }[]
+    >`SELECT count(*)::int AS n FROM _prisma_migrations`;
     expect(n).toBeGreaterThan(0);
   });
 

@@ -11,14 +11,25 @@ import { projectsRouter } from "./routes/projects.routes.js";
 import { tasksRouter } from "./routes/tasks.routes.js";
 import { authRouter } from "./routes/auth.routes.js";
 import { authenticate } from "./middleware/authenticate.js";
-import { 
-  globalLimiter, 
-  loginIpLimiter, 
-  registerLimiter, 
-  refreshLimiter 
-} from "./middleware/limiters.js";
+import { globalLimiter } from "./middleware/limiters.js";
+import { requestContext } from "./middleware/requestContext.js";
+import { prisma } from "./db.js";
+import { redis } from "./redis.js";
+import { checkReadiness, type Readiness } from "./health.js";
 
-export function createApp() {
+// The real readiness probe: talks to the database and (if configured) Redis.
+// Wrapped in a function so tests can inject a fake with createApp({ readiness }).
+const defaultReadiness = () => {
+  const client = redis; // captured once, so TypeScript narrows `redis` inside the arrow below
+  return checkReadiness({
+    database: () => prisma.$queryRaw`SELECT 1`,
+    redis: client ? () => client.ping() : undefined,
+  });
+};
+
+type AppOptions = { readiness?: () => Promise<Readiness> };
+
+export function createApp({ readiness = defaultReadiness }: AppOptions = {}) {
   const app = express();
 
   // Number of REAL proxies in front of this app.
@@ -32,7 +43,7 @@ export function createApp() {
     app.use(
       "/docs",
       swaggerUi.serve,
-      swaggerUi.setup(openApiSpec, { customSiteTitle: "TaskFlow API docs" })
+      swaggerUi.setup(openApiSpec, { customSiteTitle: "TaskFlow API docs" }),
     );
   }
 
@@ -44,20 +55,22 @@ export function createApp() {
       allowedHeaders: ["Content-Type", "X-Request-Id", "Authorization"],
       exposedHeaders: ["X-Request-Id", "Location"],
       maxAge: 600,
-    })
+    }),
   );
   app.use(requestId);
   app.use(requestLogger);
   app.use(globalLimiter);
   app.use(express.json({ limit: "100kb" }));
+  app.use(requestContext);
 
   app.get("/health", (_req, res) => {
     res.json({ status: "ok", uptime: process.uptime() });
   });
 
-  app.use("/auth/login", loginIpLimiter);
-  app.use("/auth/register", registerLimiter);
-  app.use("/auth/refresh", refreshLimiter);
+  app.get("/ready", async (_req, res) => {
+    const result = await readiness();
+    res.status(result.status === "unavailable" ? 503 : 200).json(result);
+  });
 
   app.use("/tasks", authenticate, tasksRouter);
   app.use("/projects", authenticate, projectsRouter);

@@ -1,21 +1,28 @@
 # TaskFlow
 
+![Node](https://img.shields.io/badge/node-%E2%89%A520-339933)
+![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6)
+![License](https://img.shields.io/badge/license-MIT-blue)
+
 A team task-management API built with Node.js, Express, TypeScript, and Prisma.
 
 ## Features
 - **CLI:** Add, list, start, complete, delete, filter, and export tasks (CSV).
-- **HTTP API:** Full CRUD for tasks, projects, and comments, with SQL-powered pagination, sorting, searching, and filtering.
-- **Auth & Access Control:** User registration, login (JWT), refresh tokens (rotation + reuse detection), logout, role-based access control, and **rate limiting**.
+- **HTTP API:** Full CRUD for tasks, projects, and comments, with SQL-powered pagination, sorting, searching, and filtering. Dashboard statistics at `GET /projects/:id/stats`, cached in Redis. Assigning a task to a project member (`assigneeId`) enqueues a notification email.
+- **Auth & Access Control:** User registration, login (JWT), refresh tokens (rotation + reuse detection), logout, role-based access control, and **rate limiting** (counters shared across instances via Redis).
 - **Core:** Repository pattern, Unit of Work for transactions, Zod validation, strict TypeScript, and centralized error handling.
 - **Database:** PostgreSQL with Prisma ORM, enforcing referential integrity, cascading deletes, and composite indexes for fast queries.
-- **Testing:** Vitest unit tests for pure logic, and integration tests against a real, isolated test database via Supertest. Also smoke, token, auth-coverage, refresh, access, rate-limit, and security scripts.
+- **Testing:** Vitest unit tests for pure logic, integration tests against a real, isolated test database via Supertest, and a small post-build smoke test of the compiled server. Coverage thresholds ratchet both suites. Task assignment, the queue + worker, and SMTP delivery are covered by their own integration tests.
+- **Code quality:** ESLint (flat config, type-aware rules, architecture enforcement), Prettier, Husky pre-commit/pre-push hooks, Redocly OpenAPI linting, and `npm run ci` for the exact pipeline CI will run.
+- **Observability:** Structured JSON logging with pino, request-scoped correlation via `AsyncLocalStorage`, secret redaction by field name, and a Prisma-safe error serializer. `/ready` reports dependency state (database required, Redis optional-but-visible). `X-Cache: hit|miss|bypass` on cached endpoints makes the cache observable from the client. Job and worker events (`job.completed`, `job.will_retry`, `job.failed_permanently`, `job.inline_failed`, `job.enqueue_failed`, `queue.error`, `worker.error`) are structured lines like every other event.
 - **Production Middleware:** Security headers (Helmet), CORS, Request IDs, body size limits, and **rate limits**.
+- **Infrastructure:** PostgreSQL, Redis and Mailpit run via `docker compose`, all bound to `127.0.0.1` (not every interface). Redis holds shared rate-limit counters and the stats cache, and BullMQ's job data (it must run with `noeviction`, or a job could be silently evicted). Mailpit catches every outgoing email in development. If Redis is down, the limiters fall back to per-instance in-memory counters, the stats cache degrades to `bypass`, and `/ready` reports `degraded`.
 
 ## Setup
 
 ### Prerequisites
 - Node.js 20+
-- Docker (for running PostgreSQL)
+- Docker (for PostgreSQL, Redis **and** Mailpit)
 
 ### Install
 ```bash
@@ -26,6 +33,8 @@ npm install
 npm run setup
 ```
 
+`npm install` installs the Git hooks via `prepare: "husky || true"`. If you're in an environment without Git (CI runner, fresh container), set `HUSKY=0` before `npm install` to skip the hook installation.
+
 ### Verify
 ```bash
 npm run typecheck
@@ -33,18 +42,23 @@ npm run typecheck
 
 ## Development
 ```bash
-npm run dev     # Run API with auto-restart (http://localhost:3000)
+npm run dev     # Run API with auto-restart (http://localhost:3000), pretty logs via pino-pretty
+npm run dev:json # Same, but raw JSON on stdout (no pretty pipe)
+npm run worker  # Run the background-jobs worker (needs Redis; prints job.completed and friends)
 npm run cli -- list  # Run CLI
 npm run build   # Build for production
 npm start       # Run compiled JS
+npm run start:worker  # Run the compiled worker
 ```
 
-## Database Workflow
+`npm run db:up` starts **PostgreSQL, Redis and Mailpit** in one command (`docker compose up -d`), all bound to `127.0.0.1` so they are not reachable from the network. `npm run db:down` stops all three.
+
+## Database & Infrastructure Workflow
 
 | Task | Command |
 |---|---|
-| Start the database | `npm run db:up` |
-| Stop the database | `npm run db:down` |
+| Start PostgreSQL, Redis and Mailpit | `npm run db:up` |
+| Stop all three | `npm run db:down` |
 | Apply migrations and create new ones (dev) | `npm run db:migrate` |
 | Apply migrations only (CI, production) | `npm run db:deploy` |
 | Rebuild the dev database with sample data | `npm run db:fresh` |
@@ -53,15 +67,58 @@ npm start       # Run compiled JS
 
 **Development Seed Credentials:** `sam@example.com` / `dev-password-123` (only available in development, never in production).
 
+**Redis (development):** an unauthenticated instance on `127.0.0.1:6379`, `appendonly yes`, `maxmemory 256mb`, `maxmemory-policy noeviction` (Day 38 stores BullMQ jobs here; nothing may be silently evicted). `REDIS_URL` in `.env` points at it.
+
+**Mailpit (development):** an SMTP catch-all at `127.0.0.1:1025` with a web UI at `http://localhost:8025`. It accepts every message and shows it; nothing is ever delivered to a real address during development. `SMTP_URL` in `.env` points at it.
+
+## Development Workflow
+
+| Command | What it does |
+|---|---|
+| `npm run precheck` | Typecheck, lint, format check, OpenAPI lint, unit tests, build (~30s) |
+| `npm run ci` | `precheck` plus integration tests (~1 min) — what CI will run |
+| `npm run lint` / `npm run lint:fix` | ESLint with `--max-warnings 0`; fix mode applies autofixes |
+| `npm run format` / `npm run format:check` | Prettier write / check |
+| `npm run lint:openapi` | Export the spec to `.tmp/openapi.json` and run Redocly against it |
+| `npm run verify` | Build and run everything against the compiled server |
+| `npm run test:coverage` | Combined unit + integration with ratcheted thresholds |
+| `npm run jobs` | Inspect the BullMQ queue: `npm run jobs -- stats`, `failed`, `retry <id>` |
+
+**Git hooks (installed by `npm install`):**
+- **`pre-commit`** runs `lint-staged` on staged files (`eslint --fix --max-warnings 0` + `prettier --write` for `.ts`; `prettier --write` for `.json`, `.yml`, `.yaml`, `.mjs`). Takes ~2 seconds because it only touches staged files.
+- **`pre-push`** runs `npm run typecheck:all` + `npm run test:unit`. Takes ~10 seconds. Integration tests are left to `npm run ci` because they need a database and take 25 seconds.
+
+Hooks can be skipped with `git commit --no-verify` / `git push --no-verify`, so **only CI is a real gate.** The `pre-push` hook is a courtesy for keeping broken code off the remote branch, not a security boundary.
+
+### Editor setup
+
+`.vscode/extensions.json` recommends **ESLint**, **Prettier**, and **EditorConfig**. `.vscode/settings.json` enables format-on-save (Prettier) and ESLint autofix-on-save. Every editor reads `.editorconfig` (utf-8, LF, 2 spaces, final newline). The point is team consistency — no "I use 2-space, you use 4" arguments.
+
+### Architecture enforcement
+
+`eslint.config.mjs` uses `no-restricted-imports` to make the composition-root rule **executable**:
+- `src/controllers/**`, `src/routes/**`, `src/services/**`, `src/auth/**`, `src/middleware/**`, `src/schemas/**` — **cannot** import Prisma or `src/repositories/prisma/**`.
+- `src/container.ts`, `src/server.ts`, `src/cli.ts` — allowed (composition roots and shutdown).
+
+A new developer who tries `import { prisma } from "../db.js"` in a controller gets a clear error pointing to `src/container.ts`, and the pre-commit hook blocks the commit. It's not a convention — it's a failing check.
+
 ## Documentation & Testing
 
 Interactive API docs are available at `http://localhost:3000/docs` when the server is running. You can test every endpoint directly in the browser.
 
-To verify the API against a running server:
+See [docs/TESTING.md](./docs/TESTING.md) for the full testing guide: the three layers (unit / integration / smoke), commands, conventions and known gaps.
+
+```bash
+npm test                  # unit, then integration
+npm run test:coverage     # both suites, with thresholds
+npm run verify            # build + all tests + smoke against the compiled server
+```
+
+To verify the whole project against a **compiled** server (what actually ships), run:
 ```bash
 npm run verify
 ```
-*(The server must be running in another terminal).*
+This builds `dist/`, starts it, then runs `test:unit`, `test:integration`, and `smoke` in that order. The script ends with `Everything passed.` when all three steps succeed.
 
 ![Smoke Test Results](./docs/smoke-test.png)
 
@@ -69,7 +126,6 @@ npm run verify
 ```bash
 npm run test:unit       # Fast unit tests (about a second)
 npm run test:watch      # Re-run affected tests on every save
-npm run test:coverage   # Coverage report in coverage/
 ```
 
 Unit tests cover pure logic that needs no I/O:
@@ -81,47 +137,234 @@ Unit tests cover pure logic that needs no I/O:
 - Access tokens (sign/verify, expiry, and forged/tampered/`alg:none` rejection)
 - Config validation (including production guards)
 - Error-to-status mapping (with order locked in)
+- Date helpers (`isPastDate`, `todayUtc` with an injected clock)
 - Zod schemas (ids, NUL characters, mass-assignment, query params)
+- **Logger format, level filtering, redaction (7 paths), Prisma error serialization, non-Error thrown values, request context propagation across `await`/timers/overlapping requests, `setContextUser`, explicit-field-wins-vs-mixin** (`logger.test.ts`, 21 tests)
+- **Cache-aside helper** (`tests/unit/cache/cache.test.ts`, 17 tests): hit/miss/bypass, generation-based invalidation, the stale-write race, single-flight stampedes, TTL jitter within ±10%, and fail-soft behavior when Redis is down
+- **Stats service** (`tests/unit/services/stats.service.test.ts`, 8 tests): group rollups, UTC-date key, access-before-cache, and `invalidateProject` scope
+- **Mail templates** (`tests/unit/mail/templates.test.ts`, 8 tests): plain-text body, optional fields omitted, header-injection flattening (title, assigner name, project name), long-title cap, `<script>` shown literally
+- **Job handlers** (`tests/unit/jobs/handlers.test.ts`, 7 tests): sent with the right recipient and subject, skipped when the task is gone / reassigned / unassigned / the assignee's account is gone, still sent when the assigner has left, mail failures escape so the queue can retry
+- **Redis connection options** (`tests/unit/redisOptions.test.ts`, 6 tests): parses `redis://`, `rediss://`, credentials, db paths, default port 6379
+- **Readiness logic** (`tests/unit/health.test.ts`): `ok` / `degraded` / `unavailable` table, `disabled` for no Redis, and a hanging dependency treated as `down` within `timeoutMs`
+- **ResilientStore fallback** (`tests/unit/middleware/resilientStore.test.ts`): primary used when healthy, fallback on error (with the operation name passed to `onFallback`), automatic return to the primary on the next call, `decrement`/`resetKey` covered, `init` forwarded to both
 
 The tests are named after behavior, and the tables in `it.each` make gaps obvious. Coverage is used as a map of untested logic, not a score — controllers, repositories, and routes are covered by integration tests, not unit tests.
 
-### Integration Tests (real PostgreSQL, no server)
+### Integration Tests (real PostgreSQL and Redis, no server)
 ```bash
 npm run test:integration   # API tests against a real, isolated test database
 npm test                   # unit tests, then integration tests
 ```
 
-Integration tests run the real HTTP stack — validation, controllers, services, Prisma, and PostgreSQL — against a **separate** database (`taskflow_test` by default). They use **Supertest**, which calls `createApp()` directly; no `npm run dev`, no port conflicts.
+Integration tests run the real HTTP stack — validation, controllers, services, Prisma, and PostgreSQL — against a **separate** database (`taskflow_test` by default). They use **Supertest**, which calls `createApp()` directly; no `npm run dev`, no port conflicts. The rate-limiter tests additionally run against **Redis database 15**, which `assertTestRedis` enforces.
 
-- **Prerequisites:** PostgreSQL must be running (`npm run db:up`).
+- **Prerequisites:** PostgreSQL **and** Redis must be running (`npm run db:up`). Mailpit must be reachable for `mail.smtp.test.ts` (it is part of `npm run db:up`).
 - **The test database is created and migrated automatically** on the first run (`prisma migrate deploy`).
-- **Wiped before every test** (`TRUNCATE ... RESTART IDENTITY CASCADE`), so tests are independent and IDs are predictable.
+- **Wiped before every test** (`TRUNCATE ... RESTART IDENTITY CASCADE`), so tests are independent and IDs are predictable. The **cache is flushed before every test** too (`flushTestRedis()`), so ids restarting at 1 cannot collide with a previous test's cached answer.
 - **Two layers of protection** against wiping the wrong database:
   1. `globalSetup.ts` refuses any URL whose database name doesn't match `/^[a-z0-9_]+_test$/`.
   2. `truncateAll()` runs `SELECT current_database()` and refuses if the name doesn't end in `_test`.
+- **Two layers of protection** against wiping the wrong Redis database:
+  1. `assertTestRedis()` refuses any URL whose pathname isn't `/15`.
+  2. `flushTestRedis()` runs `assertTestRedis()` again before `flushdb()`.
 - **Files run one at a time** (`fileParallelism: false`) because they share one database.
 
-What integration tests prove:
+Integration tests cover seven areas:
+
+**Auth**
 - Registration: 201 with public fields, Argon2id hash stored, no password in body, security headers, duplicate email 409 (case-insensitive), mass-assignment rejected, malformed JSON/array/`null`/`text/plain` rejected, **8 parallel registrations produce exactly one account**.
 - Login: access + refresh tokens issued, refresh hash stored (not the token), two families per user, identical 401 for unknown email vs. wrong password, unusable hash → 401, no session created on failure, validation errors on missing/extra fields.
 - `/auth/me`: valid token returns the user, no/garbage/wrong-scheme/empty token 401, valid token for a deleted user 401.
-- Test infrastructure: DB name ends in `_test`, all migrations applied, tables empty between tests, `RESTART IDENTITY` gives `id=1`.
+- **Sessions:** rotation, reuse detection (whole family revoked), logout, logout-all, purge of expired rows, **exactly one of six parallel refreshes succeeds** (5 rounds), and a documented test for the known limitation that an access token issued before logout stays valid until it expires.
+
+**Tasks**
+- CRUD: create personal or project tasks with defaults and `createdById` from the token, `Location` header, all validation errors returning 400 and storing nothing.
+- Visibility: project members see shared tasks, strangers see `404` identical to missing tasks, personal tasks visible only to their creator, `meta.total` counts only visible tasks.
+- PATCH: any member can edit any field of a teammate's task, strangers get `404` and the row is unchanged, moving `projectId` requires being the creator or the project owner, target project must be visible.
+- Delete: creator or project owner only, comments cascade with the task.
+- Filtering: `status`, `priority`, `search` (case-insensitive), and combinations.
+- Sorting: `createdAt`, `title`, `priority`, `dueDate`, with `id` as tie-breaker, and `nulls: "last"` honored in both `asc` and `desc`.
+- Pagination: page/limit table with correct `meta`, and **"walk every page"** — 25 tasks with heavy `priority` ties split across 3 pages, all 25 distinct, rank order never goes back up (Day 18's bug class, made permanent).
+- Due dates: a past date on creation returns `400 "Due date cannot be in the past."`; updates may still set past dates; the CLI (`SYSTEM` actor) is exempt.
+- **Assignment (Day 38):** `assigneeId` on create and update; the email goes to the assignee (not the requester); no email on self-assignment; no email when the assignee is unchanged; only the new assignee on reassignment; no email on unassign; title read at send time, not enqueue time; a non-member and an unknown user both get the same `400`; a personal task refuses assignment; assigning on create refuses a bad `assigneeId` and stores nothing; four `it.each` rows for non-numeric / zero / huge / negative ids; moving a task clears the assignee if they're not in the target project and keeps it if they are; removing a member unassigns their tasks in that project only; a queue failure and a mail failure both leave the assignment saved.
+
+**Projects**
+- Create: `201` with slug, `Location`, creator's `owner` membership created; validation table (empty name, client-chosen slug/`createdById`, NUL) → 400.
+- List/get: only your projects, `taskCount` accurate, stranger `404` == missing `404`.
+- Update/delete: owner renames/deletes; member `403`, stranger `404`; delete blocked with `409` while tasks exist.
+- Duplicate: copies project + tasks as `todo` tasks with `createdById: caller`, `Location` header, original untouched, custom name accepted.
+- Merge: tasks move, source disappears, memberships cascade, **all-or-nothing** on unowned target (source and target both unchanged), self-merge 400, member on source 403, stranger 404, and **two simultaneous merges → exactly one `200`, the loser is `404` or `409`, no task lost or duplicated**.
+
+**Members & Comments & the access matrix**
+- **Members:** owner adds by email (case-insensitive, immediate access), can add as `owner`; 409 for an existing member (role unchanged), 404 for unknown email; promote/demote validation, **last-owner cannot demote or leave** (`409`), removing a member leaves their tasks in the project but strips their access at once. Includes a **10-round race** where two owners demote each other simultaneously — never zero owners, never both succeed.
+- **Comments:** author comes from the token (client-supplied `author`/`authorId`/`taskId` rejected), the author edits their own words, **even a project owner cannot edit another user's comment** (403, unchanged), the author or project owner deletes, a stranger gets `404`, comments vanish with their task, **a comment cannot be reached through the wrong task's URL** (IDOR), and on a deleted account the comment keeps its `author` name but loses `authorId` and can only be moderated.
+- **Access matrix:** 24 actions × 3 personas (stranger/member/owner) = **72 cells**, each asserting the exact status and — for every denied request — that a **fingerprint of every table is unchanged before and after**. The matrix is the executable version of the roles table below; a missing cell is visible, a wrong cell fails a test with a readable name.
+
+**Stats (Day 37)**
+- `GET /projects/:id/stats` computes correct totals from a known dataset (5 tasks with relative due dates) and serves the same answer from the cache on the second call (`X-Cache: miss` then `hit`, identical `computedAt`).
+- Response carries `Cache-Control: private, no-cache` — a personalised response is not stored by shared proxies.
+- Any member of the project gets the same entry; **strangers get `404` even while the entry is warm**, identical to a missing project, and the cached body never appears.
+- A member removed from the project stops seeing the stats immediately (the access check runs before the cache).
+- Different projects never share an entry (different scope in the key), and the cache stores **aggregate numbers only** — a dedicated test asserts the 8-field shape and that no task title, user name or email address appears anywhere in the cached JSON.
+- A write through the API invalidates on the **very next read** — every case in an `it.each` table (create, status, priority, due date into the past, clear due date, move out of the project, delete, move between two projects, merge) shows `X-Cache: miss` and a changed answer.
+- A duplicated project gets its own statistics with every task reset to `todo`.
+- **A stampede is single-flighted:** 20 simultaneous requests on a cold cache all return `200` with the same `computedAt`.
+- **Outage:** with `REDIS_URL` unreachable, `GET /projects/:id/stats` still answers `200` from PostgreSQL with `X-Cache: bypass`, writes still succeed (never fail because invalidation could not run), and the next read is correct; strangers are still refused.
+
+**Jobs (Day 38)**
+- **`tests/integration/tasks.assignment.test.ts`** — the assignment rules through the HTTP API, in `inline` mode with the in-memory mailbox. Covers: email on create, email on patch, no email when assigning to yourself, no email when reassigning to the same person, only the new assignee gets an email on reassign, no email on unassign, title read at send time, refusal of non-members with the same message as unknown users, refusal on personal tasks, refusal on creation, four invalid-assignee 400s, move-keeps-assignee-if-still-a-member, member-leave-removes-assignment-only-in-that-project, queue failure does not fail the request, mail failure does not fail the request, header-injection flattening end-to-end.
+- **`tests/integration/jobs.queue.test.ts`** — the real queue and a real worker, against Redis database 15. Covers: handler receives the payload; a job survives while no worker is running and runs when one starts; the producer refuses a bad payload; retries with backoff on temporary failures; an SMTP 4xx treated as temporary; exhaustion after the configured attempts plus the job stays in the failed list; an SMTP 5xx not retried; a malformed payload / unknown job type not retried and the handler not called; worker shutdown lets the active job finish.
+- **`tests/integration/mail.smtp.test.ts`** — real SMTP against Mailpit, using Mailpit's REST API to inspect the inbox. Covers: a real delivery through SMTP; header-injection defeat (a `\r\nBcc:` in the subject cannot add a recipient); a connection refused when nothing is listening on the SMTP port.
+
+**Logging & observability**
+- **One structured line per request**, with `event: "http.request"` and a `requestId` matching the `X-Request-Id` response header.
+- **Level mapping**: 200 → `info`, 4xx → `warn`, 5xx → `error`.
+- **Path only, never the query string** — a request with `?search=needle-in-the-query` produces a log line whose `path` field is `/tasks`, and the needle string appears nowhere in the output.
+- **`userId` only on authenticated requests.**
+- **The `auth.refresh_reuse` event written inside `auth.service.ts`** (no explicit `requestId` argument) **carries the request id** of the HTTP request being served — proving the `AsyncLocalStorage` context survives the body parser and reaches code deep inside a service.
+- **Six parallel replays keep their request ids distinct** — no cross-contamination under load.
+- **The leak test** pushes real passwords (correct, wrong, and short), the access token, the refresh token (original and rotated), and the user's email through `register` / `login` / `me` / `refresh` / `logout` — **none of them appear anywhere in the log output**. `$argon2` also absent.
+- **Unexpected 500s** log the real cause at `error` level with the request id, while the client sees a generic message. A fake Prisma error with an email and a password hash in its message produces no `LEAK` in the output but keeps the final "Unique constraint failed" reason.
+
+**Readiness** (`tests/integration/health.test.ts`)
+- `/health` answers `200` without touching any dependency (liveness only).
+- `/ready` answers `ok` when the database works and Redis is not configured (`redis: "disabled"`).
+- `/ready` answers `503` when the database is down (`status: "unavailable"`).
+- `/ready` answers `200` when only Redis is down (`status: "degraded"`).
+
+**Rate-limit stores** (`tests/integration/rateLimitStores.test.ts`)
+- Against real Redis: counts hits and reports `resetTime`, the window starts on the first hit and is **not extended** by later hits, a fresh window starts after expiry (this closes the Day 35 window-expiry gap), 50 concurrent increments produce exactly `1..50` with no lost step, every key always has a positive `PTTL`, `decrement` on a missing key does not create it, `resetKey` forgets a counter, and different prefixes stay independent.
+
+**Rate limiters** (`ratelimit.test.ts`) — runs **twice**, once with `MemoryStore` and once with the Redis store (`describe.each(["memory", "redis"])`)
+- Builds its own copy of the app with `RATE_LIMIT_ENABLED=true` via `vi.stubEnv` + `vi.resetModules()` + dynamic import. The redis variant additionally sets `REDIS_URL=TEST_REDIS_URL`, calls `connectRedis()`, and `flushTestRedis()`s database 15 before the suite.
+- Each test uses its own `X-Forwarded-For` address so limiters don't interfere.
+- Covers: register (5/hour per IP), login per account (10/15min, case-insensitive emails, "correct password while throttled"), login per IP (30/15min, successful logins don't count), refresh/logout (60/15min shared), invites (20/hour per user), global (300/min per IP, `/health` and `/ready` exempt).
+- **Redis specifics** (only run for the redis variant): `rl:register:<ip>` exists with value `"1"` and a positive `PTTL` after one request (proves the store is actually in use, not a silent fallback), and **no email address appears in any `rl:*` key** (the per-account limiter hashes the email).
+- The limiter body is no longer a coverage gap: `rateLimit.ts` and `limiters.ts` are now covered by both variants.
+
+**Outage behavior** (`ratelimit.outage.test.ts`)
+- With `REDIS_URL` pointing at a port that nothing listens on: the app still starts (degraded), the register limiter still returns `400 × 5, 429` from the in-memory fallback, every response completes in well under 2 s (`enableOfflineQueue: false` + `commandTimeout: 500`), and `/ready` answers `200` with `{ status: "degraded", checks: { database: "up", redis: "down" } }`.
+
+**Docs & auth coverage & operation ids** (`docs.and.auth.test.ts`)
+- Every documented operation answers `401` without credentials (except `GET /health`, `GET /ready`, `POST /auth/register`, `/auth/login`, `/auth/refresh`, `/auth/logout`).
+- Every protected operation documents a `401` response in the spec.
+- `/openapi.json` serves, its `openapi: "3.1.0"` and `info.version` matches `package.json`.
+- `/docs/` serves.
+- `bearerAuth` is declared.
+- **`operationId` exists on every operation.**
+- **`operationId` values are unique.**
+
+- **Test infrastructure:** DB name ends in `_test` (both safety layers), all migrations applied, tables empty between tests, `RESTART IDENTITY` gives `id=1`, Redis URL is database `/15`.
+- **Security & docs:** Helmet headers present, CORS allows `Authorization` for the configured origin, unknown routes return JSON `404`, oversized bodies return `413` with the standard error shape.
+
+### Coverage (unit + integration together)
+```bash
+npm run test:coverage   # Runs both suites once and enforces thresholds
+```
+
+The combined run prints a per-file coverage report and writes HTML to `coverage/`. **Thresholds are a ratchet:** they live in `vitest.coverage.config.ts` and only go up. A failing threshold means "add tests", never "lower the number". If a threshold fails, the command exits non-zero — this is what the Week 7 CI gate will check.
+
+Current thresholds (measured after Day 35, rounded down − 2 to absorb v8's rounding noise):
+- Statements: **90**
+- Branches: **78**
+- Functions: **96**
+- Lines: **92**
+
+Expected low-coverage files that are **not** regressions:
+- `src/repositories/prisma/*.repository.ts` — the `P2002`/`P2003`/`P2025` mappings that the service layer's fast-path checks prevent from being hit. The `task.repository.ts` P2003 path is covered by a dedicated repo-level test; the rest are documented as gaps.
+
+### Post-build smoke test
+```bash
+npm run smoke       # 13 checks against the COMPILED server
+```
+
+`smoke.ts` builds the project, starts `dist/server.js`, and hits it over real HTTP. It's the only test that proves the *built artifact* works — no missing file in `dist/`, no broken import path after compilation, no missing runtime dependency. It now also checks `GET /ready` after `GET /health`, so the compiled server is proven to expose the readiness endpoint. Detailed behavior is `npm test`'s job; the smoke test is intentionally small.
 
 ### Test Scripts
 | Script | What it proves |
 |---|---|
-| `npm run test:unit` | Pure functions (pagination, slugs, access rules, tokens, config, schemas) |
+| `npm run test:unit` | Pure functions (pagination, slugs, access rules, tokens, config, schemas, dates, logger, readiness, resilient store, cache helper, stats service, mail templates, job handlers, redis connection options) |
 | `npm run test:watch` | Re-runs affected tests on save |
-| `npm run test:coverage` | Coverage report for `src/` in `coverage/` |
-| `npm run test:integration` | API tests against a real, isolated test database (`taskflow_test`) |
+| `npm run test:integration` | API tests against a real, isolated test database (`taskflow_test`) and Redis database 15 |
 | `npm test` | Unit tests, then integration tests |
-| `npm run smoke` | Every endpoint, happy path and failures |
-| `npm run test:tokens` | Forged, expired and tampered tokens are rejected |
-| `npm run test:auth-coverage` | Every documented route returns 401 without a token |
-| `npm run test:refresh` | Rotation, reuse detection, logout, concurrency |
-| `npm run test:access` | Role matrix (stranger, member, owner) |
-| `npm run test:ratelimit` | Rate limits and `Retry-After` headers |
-| `npm run test:security` | Hostile input, NUL characters, out-of-range IDs |
+| `npm run test:coverage` | Runs both suites once with coverage report and thresholds |
+| `npm run smoke` | Post-build check of the compiled server over real HTTP |
+| `npm run lint:openapi` | Redocly lint of the exported OpenAPI spec |
+| `npm run verify` | Builds, starts the compiled server, then runs all of the above |
+
+## Business Rules
+
+- A task's `dueDate` cannot be in the past **on creation** through the API. The rule uses the **UTC calendar date**.
+- Updates may still set a past date (people correct dates after the fact).
+- The CLI (`SYSTEM` actor) is exempt — imports and data fixes are unaffected.
+
+## Background jobs
+
+Some work should not happen inside a request: an email takes hundreds of milliseconds when SMTP is healthy and seconds — or nothing — when it isn't. `POST /tasks` and `PATCH /tasks/:id` **record the assignment in PostgreSQL, then enqueue a job** (`task-assigned`) in Redis. A separate worker process (`npm run worker`) reads the job, loads the task, users and project from the database, renders the message from the current state, and sends it.
+
+- **Delivery is at-least-once.** A job is never lost, but it may run twice (a worker that crashed after sending, before acknowledging). The handler decides from the database at run time ("is this task still assigned to this person?"), so running it twice sends at most one extra email and never notifies about an assignment that no longer exists.
+- **The payload carries ids only** (`taskId`, `assigneeId`, `assignedById`). Titles, names and email addresses never travel through Redis.
+- **Retries:** 5 attempts, exponential backoff from 5 s (5, 10, 20, 40). Permanent failures — an SMTP 5xx answer, a malformed payload, an unknown job — throw `UnrecoverableError` and fail at once. Failed jobs are kept for 7 days in Redis's **failed** list.
+- **The request never fails because a notification couldn't be queued or sent.** A queue or mail failure is logged (`job.enqueue_failed`, `job.inline_failed`) and the assignment itself is already saved.
+- **`npm run jobs -- stats | failed | retry <id>`** inspects and recovers the failed list.
+- **Modes:** `JOBS_MODE=queue` (production behaviour; requires Redis and a running worker), `JOBS_MODE=inline` (run the handler in-process — for tests, and handy without a worker), `JOBS_MODE=off` (do nothing; no email is sent).
+- **Mailpit** captures every message in development and shows it at `http://localhost:8025`; the SMTP endpoint is `localhost:1025`. Both bound to `127.0.0.1`.
+
+## Caching
+
+`GET /projects/:id/stats` is cached in Redis with **cache-aside**:
+
+- **Key = format version + namespace + project + generation + UTC date** (`cache:v1:project-stats:project:<id>:<ver>:<YYYY-MM-DD>`). The date is part of the key because `overdue` and `dueSoon` change at midnight UTC.
+- **Authorization runs before the cache.** A stranger gets `404` identical to a missing project, and never reaches the cached entry. The same stats are shared by every member of the project, which is safe *because* the access check comes first.
+- **Writes through the API invalidate immediately.** Every `TaskService` / `ProjectService` mutation that can change the numbers `INCR`s a per-project generation counter after the database commit (`cache:ver:project-stats:project:<id>`). Old entries become unreachable and expire by TTL — no `KEYS`/`SCAN`+`DEL` sweep.
+- **TTL is 60 s ±10%** (jitter). It is the safety net for writes that bypass the service layer (scripts, direct SQL, the benchmark seed) and for an invalidation that failed because Redis was down; it is not the mechanism.
+- **If Redis is down, answers come from PostgreSQL.** The endpoint still returns `200` with `X-Cache: bypass`. A write never fails because invalidation failed.
+- **Stampedes are single-flighted** within one process: concurrent misses on the same key share one computation. Across instances, a cross-instance lock is a future improvement (see Known Limitations).
+- **`X-Cache: hit|miss|bypass`** on every response is a debugging aid, and a test hook — the integration suite asserts the hit/miss/bypass sequence, not just the numbers.
+
+Measured on a 10,000-task project (median of 15 iterations, each pair after an explicit invalidation): **cold 17.3 ms**, **warm 8.2 ms**. The cache roughly halves the latency; the saving is modest on this data and grows with the number of rows, which is why the key includes the project and the write path invalidates immediately.
+
+## Logging
+
+Output is **one JSON object per line on stdout**. The platform (Docker, systemd, cloud) collects and rotates; the app does not.
+
+**Fields:**
+
+| Field | Present on | Meaning |
+|---|---|---|
+| `level` | every line | Numeric: 10 trace, 20 debug, 30 info, 40 warn, 50 error, 60 fatal |
+| `time` | every line | ISO 8601 timestamp |
+| `service` | every line | Always `"taskflow"` |
+| `msg` | every line | Short, constant, human-readable |
+| `event` | business events | Stable name, e.g. `http.request`, `auth.refresh_reuse`, `redis.ready`, `redis.error`, `redis.unavailable`, `rate_limit.store_fallback`, `cache.error`, `queue.error`, `worker.started`, `worker.error`, `job.completed`, `job.will_retry`, `job.failed_permanently`, `job.inline_failed`, `job.enqueue_failed`, `mail.logged` |
+| `requestId` | inside a request's async context | Matches the `X-Request-Id` response header |
+| `userId` | authenticated requests | The user making the request |
+| `method`, `path`, `status`, `durationMs`, `ip` | `event: "http.request"` | Standard request fields |
+| `limiter`, `operation` | `event: "rate_limit.store_fallback"` | Which limiter fell back to memory, and which store operation failed |
+| `operation`, `err` | `event: "cache.error"` | Which cache operation failed (`read`, `write`, `invalidate`) and why; throttled to once per 30 s |
+| `job`, `jobId`, `attempt`, `result` | `event: "job.*"` | Which job, its BullMQ id, which attempt failed, and the handler's outcome (`{ outcome: "sent" }` / `{ outcome: "skipped", reason }`) |
+
+**Reading them:**
+
+```bash
+npm run dev                  # pretty output for development
+npm run dev:json             # raw JSON lines
+npm run dev:json | jq 'select(.status >= 400)'                   # only failures
+npm run dev:json | jq 'select(.event == "auth.refresh_reuse")'   # security events
+npm run dev:json | jq 'select(.event == "rate_limit.store_fallback")'  # limiter degraded
+npm run dev:json | jq 'select(.event == "cache.error")'          # cache unavailable
+npm run dev:json | jq 'select(.event | startswith("job."))'      # job lifecycle
+```
+
+If a user reports a bug, find their `X-Request-Id` in the response header and grep the logs for `"requestId":"<that id>"` — every line written while serving that request will match.
+
+**Security:** secrets are redacted by field name (`password`, `passwordHash`, `accessToken`, `refreshToken`, `authorization`, `cookie`, `jwtSecret`, `databaseUrl` at three depths). Query strings, request bodies and email addresses are never logged. Prisma errors are trimmed to their final line and `meta` is dropped. **A test sends real passwords, hashes, tokens and an email through the API and fails if any appear in the output.** Redis rate-limit keys contain a **hashed** email, not the raw address; cache keys contain only the project id, a generation counter and the UTC date.
+
+**Known limits of redaction:** it works by key name only. A secret inside a message string, under an unlisted key (`pwd`, `rawToken`), or nested deeper than the configured paths is not redacted. Defense #1 is **not putting the secret in the log call**; the leak test is the second line.
+
+**Operation IDs in the OpenAPI spec** are auto-generated from method + path (`op.operationId ??= operationIdFor(method, path)` inside `withSecurity()`) so they are unique by construction and stable across runs. A hand-written `operationId` is preserved; a missing one gets generated. `npm run lint:openapi` runs Redocly against the exported spec, and a unit test asserts existence and uniqueness — because a linter only catches what someone remembers to run, and a test catches every push.
+
+**Redis log throttling:** `redis.error` is logged at most once per 30 s (ioredis emits an `error` on every failed retry; without the throttle an outage would flood stdout). `rate_limit.store_fallback` is logged at most once per 30 s **per limiter** (an outage would otherwise produce one warning per request per limiter). `cache.error` is likewise throttled to once per 30 s, so a Redis outage produces one cache warning, not one per request.
 
 ## Security
 
@@ -130,6 +373,12 @@ See [SECURITY.md](./SECURITY.md) for reporting vulnerabilities and the full list
 See [docs/THREAT_MODEL.md](./docs/THREAT_MODEL.md) for the threat model and what is not defended today.
 
 ## API Endpoints
+
+**System** (public)
+| Method | Path | Description | Success |
+|--------|------|-------------|---------|
+| GET | `/health` | Liveness: the process is alive. Touches no dependency. | 200 |
+| GET | `/ready` | Readiness: the database is reachable (`503` if not), Redis is optional (`200` with `degraded` if Redis is down, `disabled` if not configured). | 200 / 503 |
 
 **Auth** (public)
 | Method | Path | Description | Success |
@@ -146,8 +395,8 @@ See [docs/THREAT_MODEL.md](./docs/THREAT_MODEL.md) for the threat model and what
 |--------|------|-------------|---------|
 | GET | `/tasks` | List tasks you can see (see params below) | 200 |
 | GET | `/tasks/:id` | Get one task (requires membership) | 200 |
-| POST | `/tasks` | Create a task | 201 |
-| PATCH | `/tasks/:id` | Update fields (creator, owner, or member) | 200 |
+| POST | `/tasks` | Create a task (past `dueDate` rejected with 400; `assigneeId` triggers an email) | 201 |
+| PATCH | `/tasks/:id` | Update fields (creator, owner, or member; `assigneeId` triggers an email; `null` unassigns) | 200 |
 | DELETE | `/tasks/:id` | Delete a task (creator or project owner only) | 204 |
 
 **Projects** (login required)
@@ -159,6 +408,7 @@ See [docs/THREAT_MODEL.md](./docs/THREAT_MODEL.md) for the threat model and what
 | PATCH | `/projects/:id` | Update a project (owner only) | 200 |
 | DELETE | `/projects/:id` | Delete a project (owner only, fails with 409 if it has tasks) | 204 |
 | GET | `/projects/:id/tasks` | List the tasks of one project (requires membership) | 200 |
+| GET | `/projects/:id/stats` | Dashboard statistics, cached 60 s (requires membership; `X-Cache` header) | 200 |
 | POST | `/projects/:id/duplicate` | Duplicate a project (requires membership) | 201 |
 | POST | `/projects/:id/merge` | Merge this project (owner only) | 200 |
 
@@ -200,23 +450,53 @@ See [docs/THREAT_MODEL.md](./docs/THREAT_MODEL.md) for the threat model and what
 }
 ```
 
+### Sample Response (`GET /projects/:id/stats`)
+```json
+{
+  "data": {
+    "projectId": 1,
+    "total": 5,
+    "byStatus": { "todo": 3, "in_progress": 1, "done": 1 },
+    "byPriority": { "low": 1, "medium": 1, "high": 3 },
+    "overdue": 1,
+    "dueSoon": 1,
+    "asOf": "2026-11-15",
+    "computedAt": "2026-11-15T08:09:52.358Z"
+  }
+}
+```
+`X-Cache: hit|miss|bypass` says whether the answer came from Redis, was computed, or Redis was unavailable. `Cache-Control: private, no-cache` stops shared proxies from storing the response.
+
+### Sample Response (`GET /ready`)
+```json
+{
+  "status": "ok",
+  "checks": { "database": "up", "redis": "up" }
+}
+```
+`status` is `ok`, `degraded` (Redis down or disabled, database up), or `unavailable` (database down, response is `503`). `checks.redis` can be `up`, `down`, or `disabled` (no `REDIS_URL`).
+
 ### Error Response
 ```json
 {
   "error": { "message": "Validation failed", "details": [{ "path": "title", "message": "Required" }] }
 }
 ```
-*Status codes: 400 (Bad Input), 401 (Unauthorized), 403 (Forbidden), 404 (Not Found), 409 (Conflict), 413 (Payload Too Large), 429 (Too Many Requests), 500 (Server Error)*
+*Status codes: 400 (Bad Input), 401 (Unauthorized), 403 (Forbidden), 404 (Not Found), 409 (Conflict), 413 (Payload Too Large), 429 (Too Many Requests), 500 (Server Error), 503 (Not Ready)*
 
 ### Rate Limiting
-Rate limits are applied to protect sensitive endpoints:
+Rate limits are applied to protect sensitive endpoints. **Counters live in Redis and are shared between server instances; a restart does not reset the budget.** If Redis is unreachable, each instance falls back to in-memory counters, so limits are still applied (weaker: `N` instances give `N ×` the budget) and `/ready` reports `degraded`.
+
 - `POST /auth/register`: 5 per hour per IP
 - `POST /auth/login`: 30 per 15 min per IP and 10 per 15 min per account (only failures count)
 - `POST /auth/refresh` / `/logout`: 60 per 15 min per IP
 - `POST /projects/:id/members`: 20 per hour per user
 - All routes: 300 per minute per IP
+- `GET /health` and `GET /ready`: **exempt** from the global limiter (load balancers and orchestrators poll them every few seconds)
 
-A `429 Too Many Requests` response includes `Retry-After` and `RateLimit` headers. The error body includes `retryAfterSeconds`.
+A `429 Too Many Requests` response includes `Retry-After` and `RateLimit` headers. The error body includes `retryAfterSeconds`. The per-account key contains a **hashed** email address, so Redis operators cannot enumerate login targets via `KEYS` or `MONITOR`.
+
+**Mount discipline:** each limiter is attached **once**, either in `app.ts` (only `globalLimiter`) or on the route handlers (the auth limiters in `auth.routes.ts`, `inviteLimiter` in `projects.routes.ts`). Mounting the same limiter in both places runs it twice per request and halves its effective limit — this exact bug was fixed on Day 32 (see Known Limitations #32). Any new limiter must follow the same rule: **one mount, one place** — `grep -rn "Limiter" src/` is the fast check. Every limiter also carries a unique `name` (used as the Redis key prefix `rl:<name>:`) — two limiters sharing a name would share a counter, and the redis variant of `ratelimit.test.ts` is the test that catches it.
 
 ## Authentication & Authorization
 
@@ -240,7 +520,7 @@ curl http://localhost:3000/tasks \
 
 | | Stranger | Member | Owner |
 |---|---|---|---|
-| See project, tasks, comments | `404` | yes | yes |
+| See project, tasks, comments, stats | `404` | yes | yes |
 | Create tasks and comments | `404` | yes | yes |
 | Edit any task | `404` | yes | yes |
 | Delete a task | `404` | own only | any |
@@ -249,7 +529,7 @@ curl http://localhost:3000/tasks \
 | Rename/delete/merge/manage members | `404` | `403` | yes |
 | Leave the project | `404` | yes | if not last owner |
 
-**Rule:** Strangers get `404` (so they can't tell if a project exists). A member without rights gets `403`. Roles are looked up on every request.
+**Rule:** Strangers get `404` (so they can't tell if a project exists). A member without rights gets `403`. Roles are looked up on every request. The table is **executable** — `tests/integration/access.matrix.test.ts` runs all 24 actions against all three personas (72 cells) and, for every denied request, asserts that a fingerprint of every table is identical before and after. The **stats** row is enforced by the same access check before the cache is touched, and a dedicated test asserts that a stranger gets `404` even when the entry is warm.
 
 ### Refresh Tokens
 Access tokens expire after 15 minutes. Use the refresh token to get a new pair:
@@ -272,7 +552,7 @@ curl -X POST http://localhost:3000/auth/logout \
   -d '{"refreshToken":"<your-refresh-token>"}'
 ```
 
-**Note:** Logout revokes the refresh token, but an access token that was already issued stays valid until it expires (15 min).
+**Note:** Logout revokes the refresh token, but an access token that was already issued stays valid until it expires (15 min). This is a documented limitation and a test in `auth.sessions.test.ts` locks it in.
 
 ### Sessions Diagram
 
@@ -298,13 +578,24 @@ sequenceDiagram
 ```
 HTTP request
   → helmet → cors → requestId → logger → rate limiter → json parser
+  → requestContext (AsyncLocalStorage)  ← runs AFTER the body parser
   → route (validate params / query / body)
   → controller (HTTP in, HTTP out)
-  → service (business rules)
+  → service (business rules, logs with requestId from context)
   → UnitOfWork (transactions) → repository (SQL queries via Prisma)
 ```
 
+`/health` and `/ready` are registered directly in `app.ts` (not in a router) because they must work even when the route layer is misbehaving, and because they are the only two endpoints exempt from the global limiter. `defaultReadiness` lives in `app.ts` and calls `prisma.$queryRaw\`SELECT 1\`` and `redis.ping()` behind a `Promise.race` timeout, so a hanging dependency is reported as `down` instead of hanging the probe. `createApp({ readiness })` accepts an injected probe — that is how `tests/integration/health.test.ts` exercises the `503` and `degraded` branches without a real outage.
+
 The repository pattern decouples business logic from data storage. Services depend on a `Repository<T>` interface, not a specific implementation. Listing, filtering, sorting, and pagination are handled directly by PostgreSQL. Multi-step operations (like `duplicate` and `merge`) run through a `UnitOfWork`. Role checks happen in the service layer, using a dedicated `Access` helper. Rate limiting runs before body parsing to avoid resource exhaustion.
+
+The **cache** sits in front of `GET /projects/:id/stats`: `StatsService` checks access, then hands a `compute` function to the cache-aside helper (`src/cache/cache.ts`), which reads a per-project generation counter from Redis, looks up the data key, and on a miss computes and stores the answer with a jittered TTL. Writes call `invalidateProject(projectId)` after the database commit, which simply `INCR`s the generation counter — old entries become unreachable and expire by TTL.
+
+The **queue** sits beside the API: `TaskService` enqueues a `task-assigned` job after the database commit, and a separate worker process (`src/worker.ts`, `npm run worker`) consumes it, reads the current state from the database, and sends the email. A queue failure is logged and never fails the user's request — the assignment is already saved.
+
+`requestContext` sits **after** the body parser deliberately: `express.json()` calls `next()` from a stream event, and a listener runs in the context of whoever calls `emit` — so a context store created before the parser would be lost for POST requests. Running it after means every downstream handler — including code inside a service that never received a `requestId` argument — logs with the correct request's id.
+
+The layering above is **enforced by ESLint**, not just documented. `no-restricted-imports` blocks `src/controllers/**`, `src/routes/**`, `src/services/**`, `src/auth/**`, `src/middleware/**`, and `src/schemas/**` from importing Prisma or `src/repositories/prisma/**`. Only `src/container.ts`, `src/server.ts`, and `src/cli.ts` may — the composition root, the shutdown hook, and the CLI.
 
 ## Performance
 
@@ -319,6 +610,15 @@ Moving list queries from JavaScript to SQL drastically reduced response times, e
 
 *(Run `npm run db:bench-seed` to seed data, and `npm run bench` to run the benchmark).*
 
+The `GET /projects/:id/stats` endpoint was measured separately on a **10,000-task project** (`npm run bench:stats`, median of 15 iterations, each pair measured after an explicit invalidation):
+
+| Case | Latency |
+|------|---------|
+| Cold (computed from PostgreSQL) | 17.3 ms |
+| Warm (served from Redis) | 8.2 ms |
+
+The cache roughly halves the latency on this data; the absolute saving is modest and grows with the number of rows, which is why the endpoint is cached with a 60 s TTL and invalidated on every write through the API.
+
 ## Configuration
 | Variable | Description | Default |
 |----------|-------------|---------|
@@ -327,15 +627,20 @@ Moving list queries from JavaScript to SQL drastically reduced response times, e
 | `DATABASE_URL` | PostgreSQL connection string | (required) |
 | `TEST_DATABASE_URL` | PostgreSQL connection string for integration tests (must end in `_test`) | `postgresql://postgres:postgres@localhost:5432/taskflow_test` |
 | `CORS_ORIGIN` | Allowed origins for browser requests | `http://localhost:5173` |
-| `LOG_LEVEL` | Logging verbosity (`info` or `debug`) | `info` |
+| `LOG_LEVEL` | Logging verbosity: `trace`, `debug`, `info`, `warn`, `error`, `fatal`, `silent` | `info` |
 | `JWT_SECRET` | Secret used to sign access tokens (min 32 chars) | (required) |
 | `ACCESS_TOKEN_TTL_SECONDS` | Access token lifetime in seconds | `900` (15 min) |
 | `REFRESH_TOKEN_TTL_DAYS` | Refresh token lifetime in days | `30` |
 | `RATE_LIMIT_ENABLED` | Enable rate limiting (must be `true` in production) | `false` (dev) |
 | `TRUST_PROXY_HOPS` | Number of reverse proxies in front of the app | `0` |
 | `DOCS_ENABLED` | Serve Swagger docs at `/docs` | `true` |
+| `REDIS_URL` | Redis connection string for shared rate-limit counters **and the stats cache**. Empty means in-memory (per-process) counters and a cache that is always a `bypass`. | `redis://localhost:6379` (dev); **required in production** |
+| `JOBS_MODE` | How background jobs run: `queue` (Redis + a separate worker process), `inline` (run the handler right away — for tests, or development without a worker), or `off`. `queue` requires `REDIS_URL`; production requires `queue`. | `queue` (dev); **must be `queue` in production** |
+| `MAIL_TRANSPORT` | How outgoing mail is sent: `smtp` (real delivery over `SMTP_URL` — Mailpit in development), `memory` (kept in memory — for tests), or `log` (a log line only, no delivery). `smtp` requires `SMTP_URL`; production requires `smtp`. | `log` (dev); **must be `smtp` in production** |
+| `SMTP_URL` | SMTP connection string used when `MAIL_TRANSPORT=smtp`. Development points at Mailpit (`smtp://localhost:1025`). Optional otherwise. | (unset unless `MAIL_TRANSPORT=smtp`) |
+| `MAIL_FROM` | The From address on every outgoing email. | `TaskFlow <noreply@taskflow.local>` |
 
-## Database
+## Database & Redis
 
 ```mermaid
 erDiagram
@@ -394,13 +699,17 @@ erDiagram
   }
 ```
 
+**Redis layout (development):** single instance, `appendonly yes`, `maxmemory 256mb`, `maxmemory-policy noeviction`, bound to `127.0.0.1:6379`. Rate-limit keys are `rl:<limiter-name>:<key>`, where `<key>` is `ip:<subnet>` (IPv6 normalized to a `/56` by `ipKeyGenerator`), `email:<32-hex>` (SHA-256, truncated), or `user:<id>`. **Cache keys** are `cache:v1:project-stats:project:<id>:<generation>:<YYYY-MM-DD>`, with a companion generation counter at `cache:ver:project-stats:project:<id>` (1-day TTL). **Queue keys** live under BullMQ's `bull:notifications:*` namespace — job data holds ids only, and failed jobs are kept for 7 days. Every key has a `PEXPIRE ... NX`-set TTL or a bounded `removeOn*` policy, so nothing lives forever. Database **15** is reserved for the test suite; `assertTestRedis` refuses any other.
+
 ## Production Middleware
 
 - **Helmet:** Sets security-related HTTP headers (e.g., `X-Content-Type-Options`, `Content-Security-Policy`).
-- **CORS:** Restricts browser requests to allowed origins (`CORS_ORIGIN` in `.env`).
+- **CORS:** Restricts browser requests to allowed origins (`CORS_ORIGIN` in `.env`). `X-Cache` is in `exposedHeaders` so browser code can read it.
 - **Request IDs:** Each request gets an `X-Request-Id` header, echoed back and included in logs for tracing.
 - **Body Limit:** JSON payloads are capped at 100kb to prevent abuse (returns `413 Payload Too Large`).
-- **Rate Limiter:** Throttles brute-force and enumeration attacks. Returns `429` with `Retry-After` and `RateLimit` headers.
+- **Rate Limiter:** Throttles brute-force and enumeration attacks. Returns `429` with `Retry-After` and `RateLimit` headers. Counters live in Redis and are shared across instances; if Redis is down, each instance falls back to in-memory counters and `/ready` reports `degraded`.
+- **Readiness (`/ready`):** Reports `status` (`ok`, `degraded`, `unavailable`) and `checks.database` / `checks.redis` (`up`, `down`, `disabled`). `503` only when the database is down. Exempt from the global rate limiter.
+- **Logger:** Pino — one JSON object per line on stdout, with `requestId` and `userId` from the `AsyncLocalStorage` context on every line. Secrets redacted by field name; query strings and bodies never logged; Prisma errors trimmed to their final line.
 
 ## Project Structure
 ```
@@ -409,29 +718,50 @@ prisma/
 ├── seed.ts               # Development seed data
 └── migrations/           # SQL migration history
 
+docs/
+├── TESTING.md            # Testing layers, commands, conventions, known gaps
+├── THREAT_MODEL.md       # Threat model and what is not defended
+└── smoke-test.png        # Smoke test screenshot
+
 tests/
 ├── unit/                 # Vitest unit tests (mirrors src/)
-├── integration/          # Supertest tests against a real test database
-└── support/              # Shared helpers: env, app, factories, truncate, globalSetup
+│   ├── cache/            # Cache-aside helper (Day 37)
+│   ├── mail/             # Mail templates (Day 38)
+│   ├── jobs/             # Job handlers (Day 38)
+│   └── ...
+├── integration/          # Supertest tests against a real test database + Redis db 15
+│   ├── cache.redis.test.ts   # Cache against real Redis (Day 37)
+│   ├── stats.test.ts         # Stats endpoint, invalidation, authorization (Day 37)
+│   ├── stats.outage.test.ts  # Stats with Redis unreachable (Day 37)
+│   ├── tasks.assignment.test.ts  # Assignment rules, emails (Day 38)
+│   ├── jobs.queue.test.ts    # Queue + worker against Redis (Day 38)
+│   ├── mail.smtp.test.ts     # SMTP against Mailpit (Day 38)
+│   └── ...
+└── support/              # Shared helpers: env, app, auth, factories, scenarios, sessions, truncate, globalSetup, redis, buildApp, waitFor, mail
 
 src/
-├── app.ts, server.ts, cli.ts
+├── app.ts, server.ts, cli.ts, worker.ts
 ├── auth/                 # Password hashing, JWT utilities, refresh token helpers, policy (Actor), access (roles)
+├── cache/                # Cache-aside helper with generations, single-flight, jitter, fail-soft (Day 37)
+├── jobs/                 # Job definitions, handlers, queue producer, worker (Day 38)
+├── mail/                 # Mailer (SMTP / memory / log) and templates (Day 38)
 ├── container.ts          # Composition root
 ├── db.ts                 # Prisma Client instance
+├── redis.ts              # ioredis client: lazy connect, fail-fast, throttled error log, connectRedis/closeRedis, redisConnectionOptions
+├── health.ts             # checkReadiness: parallel probes with a deadline
+├── requestContext.ts     # AsyncLocalStorage store + setContextUser
 ├── config.ts, logger.ts, errors.ts, types.ts, utils.ts
 ├── docs/                 # OpenAPI spec
 ├── generated/prisma/     # Auto-generated Prisma Client (gitignored)
-├── schemas/              # Zod validation
-├── repositories/         # Data storage: interface, Prisma impl, UnitOfWork
-├── services/             # Business logic: tasks, projects, comments, auth
-├── middleware/           # Logger, validation, error handling, request IDs, authenticate, rate limiters
-├── controllers/          # HTTP logic
+├── schemas/              # Zod validation (including `stats.schemas.ts`, Day 37)
+├── services/             # Business logic: tasks, projects, comments, auth, dates, stats (Day 37)
+├── middleware/           # Logger, request context, validation, error handling, request IDs, authenticate, rate limiters, rateLimitStores
+├── controllers/          # HTTP logic (including `stats` in projects.controller.ts, Day 37)
 └── routes/               # Express routes
 ```
 
 ## Tech Stack
-Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CORS, Swagger UI, Argon2, jose, express-rate-limit, Vitest, Supertest.
+Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Redis (ioredis), BullMQ, nodemailer, Zod, dotenv, tsx, Helmet, CORS, Swagger UI, Argon2, jose, express-rate-limit, pino, pino-pretty, Vitest, Supertest, ESLint (flat config, typescript-eslint), Prettier, Husky, lint-staged, Redocly.
 
 ## Roadmap
 - [x] Week 1 — CLI core
@@ -444,34 +774,78 @@ Node.js, TypeScript, Express 5, PostgreSQL, Prisma, Zod, dotenv, tsx, Helmet, CO
 - [x] Roles and project membership
 - [x] Rate limiting and security hardening
 - [x] Week 4 wrap-up and v0.4.0
-- [ ] Week 5 — Testing (Vitest unit tests, integration tests, coverage, CI test gate)
+- [x] Week 5 — Testing, code quality and observability
   - [x] Vitest setup and unit tests for pure logic
   - [x] Test database + Supertest integration tests for auth
-  - [ ] Integration tests for tasks, projects, comments
-  - [ ] Coverage target and CI gate
+  - [x] Integration tests for tasks and projects (incl. filtering, sorting, pagination, duplicate, merge)
+  - [x] Due-date business rule (past dates rejected on creation, CLI exempt) with unit-tested boundary
+  - [x] Integration tests for members, comments, sessions, access matrix and docs
+  - [x] Combined coverage run with ratcheted thresholds (90/78/96/92)
+  - [x] Retired six hand-written scripts (token-attacks, auth-coverage, refresh-flow, access-attacks, security-checks, test-ratelimit), shrunk smoke to a post-build check
+  - [x] ESLint (flat config, type-aware rules), Prettier, Husky pre-commit/pre-push hooks, `precheck` and `ci` scripts
+  - [x] Structured logging with pino + `AsyncLocalStorage` + redaction, and Redocly OpenAPI linting
+  - [x] Documentation drift tests and Week 5 wrap-up and v0.5.0
+- [ ] Week 6 — Real-world features (Redis, jobs, email, uploads, real-time)
+  - [x] Redis in Docker Compose; shared rate-limit counters via `RedisCounterStore` + `ResilientStore`; `GET /ready`; graceful Redis shutdown
+  - [x] Cache-aside dashboard stats (Day 37)
+  - [x] Background jobs with BullMQ (Day 38)
+  - [ ] Email verification + password reset (Day 39)
+  - [ ] File attachments with MinIO (Day 40)
+  - [ ] Real-time notifications with WebSockets (Day 41)
+  - [ ] Week 6 wrap-up and v0.6.0 (Day 42)
+- [ ] Week 7 — Docker, CI and deployment
 
 ## Known Limitations
-1. **In-memory rate limits:** Reset on restart and don't share between multiple server instances. Week 6 moves them to Redis.
-2. **Per-account throttle:** An attacker can intentionally lock a victim out by flooding `/auth/login` with wrong passwords.
-3. **No CAPTCHA or MFA:** A determined attacker with a botnet can still try many passwords.
-4. **No email verification:** Accounts can be created with fake emails.
-5. **Access tokens cannot be revoked:** A stolen access token stays valid for up to 15 minutes after logout.
-6. **Member invites reveal email existence:** Adding a member by email returns 404 if the user doesn't exist. Rate limiting makes probing slow, but not impossible.
-7. **No automated alerting:** Repeated `auth 401` events are logged but not flagged.
-8. **Search Wildcards:** Searching for `%` or `_` returns all tasks because SQL `LIKE` interprets them as wildcards.
-9. **No Retries on `P2034`:** We haven't implemented automatic retries for deadlocks yet.
-10. **No CI:** We don't have a GitHub Actions pipeline yet. This will be added in Week 7.
-11. **Offset pagination is slow on deep pages:** `OFFSET 49980` still walks past 49,980 rows. Week 5 fixes this.
-12. **`ILIKE` search lacks a trigram index:** The search is slow on large tables. Week 5 fixes this.
-13. **CSV export loads all rows:** The export uses `findAll()`, which loads the entire table into memory. Week 5 fixes this.
-14. **`/health` doesn't check the database:** It returns `ok` even if Postgres is down. Week 7 fixes this.
-15. **No grace window for concurrent refreshes:** Two parallel legitimate refreshes will kill the family and force a login.
-16. **Rotation isn't wrapped in one transaction:** If the new token fails to save after the old one is used, the user must log in again.
-17. **No device list or session names:** Users can't see "logged in from iPhone" and revoke individual sessions.
-18. **Only two roles (owner, member):** No read-only "viewer" role yet.
-19. **Legacy tasks and projects with no owner are invisible:** Only the CLI can see/modify them.
-20. **`listComments` still loads every comment before filtering:** It uses `findAll()` instead of a `WHERE taskId = ?` query. Week 5 fixes this.
-21. **Unit tests don't cover HTTP or SQL:** Controllers, repositories, and routes show 0% unit coverage by design. Integration tests (Week 5, Days 30–32) cover them.
-22. **Integration tests run serially:** The test database is shared across files, so `fileParallelism: false` is required. Per-worker databases would allow parallelism at the cost of setup complexity.
-23. **Test database is wiped on every `beforeEach`:** Correct for the current suite (a few ms per wipe), but slower than transaction rollback isolation. Documented as a challenge for later.
-24. **`test:ratelimit` is order-sensitive in `verify.sh`:** It assumes a fresh rate-limit budget, so it must run *first* in the `for step in` loop. Any other script that drains register/refresh/login counters before it will cause false failures. The limiter itself is correct; the test setup just needs headroom. Week 5's integration suite will `beforeEach` reset the in-memory store, retiring this script into the suite.
+1. **In-memory rate limits (fixed on Day 36):** Counters now live in Redis and are shared across instances; the budget survives a restart. If `REDIS_URL` is empty, the app falls back to per-instance `MemoryStore` (dev only; the production config refuses to start without `REDIS_URL`).
+2. **During a Redis outage, rate limits degrade to per-instance:** `ResilientStore` falls back to `MemoryStore`, so an attacker facing `N` instances gets `N ×` the budget until Redis recovers. `/ready` reports `degraded` so operators see the outage; `rate_limit.store_fallback` is logged (once per 30 s per limiter). The alternative — fail closed — would 503 every login during the outage; fail open would remove the limit entirely.
+3. **Fixed-window rate limiting allows a burst at the window boundary:** A client can make `limit` requests at the end of one window and `limit` at the start of the next, getting `2 × limit` in a short span. A sliding-window implementation (sorted set + Lua script) is a challenge.
+4. **`ipKeyGenerator` normalizes IPv6 to a `/56` subnet:** Two clients in the same block share a budget. This is the intended defense against rotating through addresses, but one abusive client in a shared `/56` can rate-limit neighbors.
+5. **No Redis authentication or TLS in development:** The `docker-compose.yml` instance is unauthenticated and unencrypted, bound to `127.0.0.1` (not reachable from the network). A shared or remote Redis must run with `requirepass` and TLS; `REDIS_URL` supports `redis://:password@host:port`, but the config does not enforce it.
+6. **`/ready` is public and reveals dependency state:** It returns `checks.database` and `checks.redis` to anyone who asks. Acceptable for an internal service behind a load balancer, but on a public API it should be restricted to the infrastructure (header check, or a private port). The field shape is intentionally minimal (no versions, no hostnames, no credentials).
+7. **Redis is a single instance with `noeviction` and `appendonly yes`:** If memory fills, writes fail (correct for the Day 38 queue, wrong for a cache). A real system would run separate instances for cache and queues, or a cluster.
+8. **The in-memory fallback's counters are local to the process and reset on restart:** During a Redis outage, if the app is also restarted, per-instance counters start at zero again. The same limitation as pre-Day-36 rate limits, scoped to outages.
+9. **Per-account throttle:** An attacker can intentionally lock a victim out by flooding `/auth/login` with wrong passwords.
+10. **No CAPTCHA or MFA:** A determined attacker with a botnet can still try many passwords.
+11. **No email verification:** Accounts can be created with fake emails. Week 6 adds verification and password reset.
+12. **Access tokens cannot be revoked:** A stolen access token stays valid for up to 15 minutes after logout. `auth.sessions.test.ts` locks this in as a characterization test.
+13. **Member invites reveal email existence:** Adding a member by email returns 404 if the user doesn't exist. Rate limiting makes probing slow, but not impossible.
+14. **No automated alerting:** Repeated `auth 401` events are logged but not flagged.
+15. **Search Wildcards:** Searching for `%` or `_` returns all tasks because SQL `LIKE` interprets them as wildcards.
+16. **No Retries on `P2034`:** We haven't implemented automatic retries for deadlocks yet.
+17. **No CI:** We don't have a GitHub Actions pipeline yet. This will be added in Week 7.
+18. **Offset pagination is slow on deep pages:** `OFFSET 49980` still walks past 49,980 rows. Week 5 fixes this.
+19. **`ILIKE` search lacks a trigram index:** The search is slow on large tables. Week 5 fixes this.
+20. **CSV export loads all rows:** The export uses `findAll()`, which loads the entire table into memory. Week 5 fixes this.
+21. **`/health` doesn't check the database:** It's liveness only, by design. **`/ready` (Day 36) is the readiness probe** that checks the database and reports Redis.
+22. **No grace window for concurrent refreshes:** Two parallel legitimate refreshes will kill the family and force a login.
+23. **Rotation isn't wrapped in one transaction:** If the new token fails to save after the old one is used, the user must log in again.
+24. **No device list or session names:** Users can't see "logged in from iPhone" and revoke individual sessions.
+25. **Only two roles (owner, member):** No read-only "viewer" role yet.
+26. **Legacy tasks and projects with no owner are invisible:** Only the CLI can see/modify them.
+27. **`listComments` still loads every comment before filtering:** It uses `findAll()` instead of a `WHERE taskId = ?` query. Week 5 fixes this.
+28. **Unit tests don't cover HTTP or SQL:** Controllers, repositories, and routes show 0% unit coverage by design. Integration tests (Week 5, Days 30–32) cover them.
+29. **Integration tests run serially:** The test database is shared across files, so `fileParallelism: false` is required. Per-worker databases would allow parallelism at the cost of setup complexity.
+30. **Test database is wiped on every `beforeEach`:** Correct for the current suite (a few ms per wipe), but slower than transaction rollback isolation. The Redis cache is flushed in the same `beforeEach` (Day 37), because ids restart at 1 and the cache cannot know that "project 1" is a different project.
+31. **Rate-limit tests build their own app copy:** `tests/integration/ratelimit.test.ts` uses `vi.stubEnv` + `vi.resetModules()` + dynamic import to build a fresh app with `RATE_LIMIT_ENABLED=true`. The shared test app still runs with limits off, so ordinary tests can send as many requests as they like. **Window expiry is now tested** against real Redis in `rateLimitStores.test.ts` (short `windowMs` + `sleep`).
+32. **Rate limiters must be mounted exactly once:** A limiter attached both in `app.ts` by path **and** on the route handler runs twice per request and halves its effective limit. This bug existed for `registerLimiter`, `loginIpLimiter`, and `refreshLimiter` and was fixed on Day 32. Any new limiter must follow the same rule: **one mount, one place** — `grep -rn "Limiter" src/` is the fast check.
+33. **Every limiter needs a unique `name`:** The Redis key is `rl:<name>:<key>`, so two limiters sharing a name share a counter. Mutation row 2 of the Day 36 table (giving `refresh` the name `register`) is caught **only** by the redis variant of `ratelimit.test.ts` — the memory variant cannot see the collision because its `MemoryStore` is per-limiter. This is why the suite runs both.
+34. **Due-date rule uses the UTC calendar date, not the caller's local date:** A user far west of UTC can be rejected for setting "today" in their time zone late in their evening. Options (accept vs. one-day grace vs. `Time-Zone` header) are documented in `notes.md`; the current choice is to accept UTC for consistency with the rest of the API.
+35. **Integration tests don't cover every branch of `PATCH /tasks/:id`:** Coverage gaps identified in my own test list: preserving `createdById` through a patch is only implicitly covered, and "stranger moves `projectId`" isn't a distinct test. Not bugs — candidates for a second pass.
+36. **Six scripts retired in Week 5:** `scripts/token-attacks.ts`, `scripts/auth-coverage.ts`, `scripts/refresh-flow.ts`, `scripts/access-attacks.ts`, `scripts/security-checks.ts` (retired Day 32), and `scripts/test-ratelimit.ts` (retired Day 35). Each replacement is a named integration suite, and the mutation tables are the evidence that the suites catch the bugs the scripts caught.
+37. **`smoke.ts` is intentionally small (13 checks):** It's a post-build check of the *compiled* `dist/` server, not a behavior suite. It now also checks `GET /ready`. Detailed behavior is `npm test`'s job.
+38. **`typescript-eslint` needs TypeScript 6, not 7:** The project uses the native TypeScript 7 compiler (`tsc`), but `typescript-eslint` requires the TypeScript 6 JS compiler API. `package.json` uses the official side-by-side alias.
+39. **`eslint-config-prettier` is the only rule-disabling plugin:** Every ESLint rule disabled in `eslint.config.mjs` has a written reason. `errorHandler.ts` has one file-level `eslint-disable` for `no-unsafe-member-access`/`no-unsafe-assignment`, with a written reason.
+40. **`no-restricted-imports` is the architecture fitness function:** It makes `src/container.ts` the only place that constructs concrete repositories; controllers, routes, services, auth, middleware, and schemas cannot import `../db.js` or `src/repositories/prisma/**`. Verified by a temporary Prisma import in a controller (rejected) and in `server.ts`/`cli.ts` (allowed), then reverted. **`src/app.ts` is also allowed** — it wires the readiness probe.
+41. **`precheck` / `ci` catch drift the individual scripts can miss:** The first `npm run ci` found 7 files that had drifted from Prettier's output. `format:check` is the canary — cheap, and it never lies.
+42. **Hooks are not the gate:** Only `npm run ci` on a fresh checkout is a real gate. Week 7's pipeline will run `npm run ci` and will not rely on hooks.
+43. **`prepare: "husky || true"`:** Husky's install is guarded so `npm ci --omit=dev` in a production Docker build doesn't crash when Husky (a devDependency) isn't installed.
+44. **Redaction is by key name only:** A secret inside a message string, a field name not in `SENSITIVE_KEYS`, or nesting deeper than the 3 configured paths is **not** redacted. The integration leak test is the real defense.
+45. **Prisma's own query log bypasses pino:** With `LOG_LEVEL=debug` on the Prisma client, SQL is written by Prisma in its own format. Routing Prisma's `query` events through `pino` is a documented challenge.
+46. **No log shipping or alerting yet:** The app writes JSON to stdout; a real system would pipe to a log aggregator and alert on `auth.refresh_reuse` frequency, 5xx rate, and rate-limit hits. Documented as a Week 7+ concern.
+47. **`operationId` is auto-generated from method + path:** Renaming a path or switching a route's method would silently change the `operationId`, which is a breaking change for any consumer that generates an SDK from the spec.
+48. **`operation-4xx-response` is off in `redocly.yaml`:** `/health` and `/ready` have no meaningful 4xx case. Disabled with a comment — the decision is recorded, not hidden.
+49. **`/ready` is not checked by `precheck` at runtime:** `lint:openapi` is a build-time check. The `/docs` endpoint serves whatever the current `openApiSpec` says. `precheck` is the gate.
+50. **No load testing:** Nothing measures the API under concurrency or sustained load. Week 7 adds a minimal load check against the deployed build.
+51. **No contract test between the OpenAPI document and real responses:** Redocly lints the spec and `docs.and.auth.test.ts` checks `operationId`/401 coverage, but no test validates a real response body against the spec's schema. A future Ajv-based test closes this.
+52. **The stats cache can lag after a write that bypasses the service layer:** A direct database write (a script, `prisma/seed.ts`, the benchmark seed, a `psql` session) does not `INCR` the generation counter, so a cached answer can survive up to the 60 s TTL. Writes through the API invalidate immediately. This is the documented trade-off of a TTL as the safety net rather than the mechanism — a script that mutates the database should also flush `cache:*` (or accept the lag).
+53. **Single-flight works within one process, not across instances:** Two Node processes can miss the same key and both compute. A cross-instance `SET lock:key token NX PX 5000` around the computation would make the stampede defense global; it is listed as a challenge in Day 37 and not implemented today. On a single instance the current behavior is sufficient, and a `miss` is bounded by the same TTL as any stale entry.
